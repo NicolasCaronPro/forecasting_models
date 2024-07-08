@@ -47,7 +47,7 @@ class Model(BaseEstimator, ClassifierMixin):
         self.selected_features_ = []
         self.dir_output = None  # Ajout de l'attribut dir_output
 
-    def fit(self, X, y, X_test=None, y_test=None, sample_weight=None, evaluate_individual_features=True, optimization='grid', param_grid=None, **fit_params):
+    def fit(self, X, y, X_test=None, y_test=None, sample_weight=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
         """
         Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
         
@@ -79,7 +79,7 @@ class Model(BaseEstimator, ClassifierMixin):
                 if optimization == 'grid':
                     assert param_grid is not None
                     grid_search = GridSearchCV(temp_model, self.param_grid, scoring=self._get_scorer(), cv=5)
-                    grid_search.fit(X_train_single, y, sample_weight=sample_weight, **fit_params)
+                    grid_search.fit(X_train_single, y, **fit_params)
                     best_model = grid_search.best_estimator_
                 elif optimization == 'bayes':
                     assert param_grid is not None
@@ -104,10 +104,10 @@ class Model(BaseEstimator, ClassifierMixin):
                     
                     opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
                     bayes_search = BayesSearchCV(temp_model, opt, scoring=self._get_scorer(), cv=5)
-                    bayes_search.fit(X_train_single, y, sample_weight=sample_weight, **fit_params)
+                    bayes_search.fit(X_train_single, y, **fit_params)
                     best_model = bayes_search.best_estimator_
                 else:
-                    temp_model.fit(X_train_single, y, sample_weight=sample_weight, **fit_params)
+                    temp_model.fit(X_train_single, y, **fit_params)
                     best_model = temp_model
 
                 # Calculer le score avec cette seule caractéristique
@@ -121,7 +121,7 @@ class Model(BaseEstimator, ClassifierMixin):
         if optimization == 'grid':
             assert param_grid is not None
             grid_search = GridSearchCV(self.model, self.param_grid, scoring=self._get_scorer(), cv=5)
-            grid_search.fit(X[:, self.selected_features_], y, sample_weight=sample_weight, **fit_params)
+            grid_search.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
         elif optimization == 'bayes':
             assert param_grid is not None
@@ -146,11 +146,13 @@ class Model(BaseEstimator, ClassifierMixin):
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.model, opt, scoring=self._get_scorer(), cv=5)
-            bayes_search.fit(X[:, self.selected_features_], y, sample_weight=sample_weight, **fit_params)
+            bayes_search.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_= bayes_search.best_estimator_
-        else:
-            self.model.fit(X[:, self.selected_features_], y, sample_weight=sample_weight, **fit_params)
+        elif optimization == 'skip':
+            self.model.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_ = self.model
+        else:
+             raise ValueError("Unsupported optimization parameter method")
         
     def predict(self, X):
         """
