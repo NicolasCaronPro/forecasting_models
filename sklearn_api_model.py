@@ -34,20 +34,18 @@ class Model(BaseEstimator, ClassifierMixin):
         
         Parameters:
         - model: Le modèle de base à utiliser (doit suivre l'API sklearn).
-        - param_grid: Dictionnaire des paramètres à optimiser pour GridSearchCV.
-        - is_binary: Booléen indiquant si le modèle est binaire ou non.
+        - name : Le nom du modèle
         - loss: Fonction de perte à utiliser ('log_loss', 'hinge_loss', etc.).
         """
-        self.model = model
+        self.best_estimator_ = model
         self.name = name
         self.loss = loss
-        self.best_estimator_ = None
         self.X_test = None
         self.y_test = None
         self.selected_features_ = []
         self.dir_output = None  # Ajout de l'attribut dir_output
 
-    def fit(self, X, y, X_test=None, y_test=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
+    def fit(self, X, y, X_test=None, y_test=None, w_test=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
         """
         Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
         
@@ -56,72 +54,53 @@ class Model(BaseEstimator, ClassifierMixin):
         - y: Les étiquettes des données d'entraînement.
         - X_test: Les données de test pour évaluer les performances (optionnel).
         - y_test: Les étiquettes des données de test pour évaluer les performances (optionnel).
-        - sample_weight: Poids des échantillons.
+        - w_test: Poids des échantillons de la base de test
         - evaluate_individual_features: Booléen pour activer l'évaluation des caractéristiques individuellement.
-        - dir_output: Chemin du répertoire de sortie pour sauvegarder les caractéristiques sélectionnées.
+        - param_grid : Paramètre à optimiser
         - optimization: Méthode d'optimisation à utiliser ('grid' ou 'bayes').
         - fit_params: Paramètres supplémentaires pour la fonction de fit.
         """
         self.X_test = X_test
         self.y_test = y_test
 
+        self.X_train = X
+        self.y_train = y
+
         if evaluate_individual_features and X_test is not None and y_test is not None:
+            self.features_importance = []
+            self.selected_features_ = []
             n_features = X.shape[1]
-            base_score = self.score(X_test, y_test)
-            self.selected_features_ = [0]
-            for i in range(1, n_features):
+            early_stopping_rounds = self.best_estimator_.get_params()['early_stopping_rounds']
+            self.best_estimator_.set_params(early_stopping_rounds=0) # On enleve l'early stopping parce que je peux pas accéder à Xval dans fitparams à cause du modèle ngboost
+            base_score = -math.inf
+            for i in range(n_features):
+                
+                self.selected_features_.append(i)
+
                 X_train_single = X[:, self.selected_features_]
                 X_test_single = X_test[:, self.selected_features_]
 
-                # Cloner le modèle pour chaque itération
-                temp_model = clone(self.model)
-
-                if optimization == 'grid':
-                    assert param_grid is not None
-                    grid_search = GridSearchCV(temp_model, self.param_grid, scoring=self._get_scorer(), cv=5)
-                    grid_search.fit(X_train_single, y, **fit_params)
-                    best_model = grid_search.best_estimator_
-                elif optimization == 'bayes':
-                    assert param_grid is not None
-                    param_list = []
-                    for param_name, param_values in self.param_grid.items():
-                        if isinstance(param_values, list):
-                            param_list.append(param_values)
-                        elif isinstance(param_values, tuple) and len(param_values) == 2:
-                            param_list.append(param_values)
-                        else:
-                            raise ValueError("Unsupported parameter type in param_grid. Expected list or tuple of size 2.")
-                    
-                    # Configure the parameter space for BayesSearchCV
-                    param_space = {}
-                    for param_values in param_list:
-                        param_name = param_values[0]
-                        param_range = param_values[1]
-                        if isinstance(param_range[0], int):
-                            param_space[param_name] = Integer(param_range[0], param_range[-1])
-                        elif isinstance(param_range[0], float):
-                            param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
-                    
-                    opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
-                    bayes_search = BayesSearchCV(temp_model, opt, scoring=self._get_scorer(), cv=5)
-                    bayes_search.fit(X_train_single, y, **fit_params)
-                    best_model = bayes_search.best_estimator_
-                else:
-                    temp_model.fit(X_train_single, y, **fit_params)
-                    best_model = temp_model
+                self.best_estimator_.fit(X_train_single, y)
 
                 # Calculer le score avec cette seule caractéristique
-                single_feature_score = self.score(X_test_single, y_test)
+                single_feature_score = self.score(X_test_single, y_test, sample_weight=w_test)
 
-                # Si le score s'améliore, ajouter la caractéristique à la liste
-                if single_feature_score > base_score:
-                    self.selected_features_.append(i)
+                # Si le score ne s'améliore pas, on retire la variable de la liste
+                if single_feature_score < base_score:
+                    self.selected_features_.pop()
+                    base_score = single_feature_score
+
+                # On ajoute la différence de score
+                self.features_importance(single_feature_score - base_score)
+
+            self.best_estimator_.set_params({'early_stopping_rounds': early_stopping_rounds})
         else:
             self.selected_features_ = np.arange(0, X.shape[1])
+
         # Entraîner le modèle final avec toutes les caractéristiques sélectionnées
         if optimization == 'grid':
             assert param_grid is not None
-            grid_search = GridSearchCV(self.model, self.param_grid, scoring=self._get_scorer(), cv=5)
+            grid_search = GridSearchCV(self.best_estimator_, param_grid, scoring=self._get_scorer(), cv=5)
             grid_search.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
         elif optimization == 'bayes':
@@ -150,10 +129,9 @@ class Model(BaseEstimator, ClassifierMixin):
             bayes_search.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_= bayes_search.best_estimator_
         elif optimization == 'skip':
-            self.model.fit(X[:, self.selected_features_], y, **fit_params)
-            self.best_estimator_ = self.model
+            self.best_estimator_.fit(X[:, self.selected_features_], y, **fit_params)
         else:
-             raise ValueError("Unsupported optimization parameter method")
+             raise ValueError("Unsupported optimization method")
         
     def predict(self, X):
         """
@@ -204,7 +182,7 @@ class Model(BaseEstimator, ClassifierMixin):
         elif self.loss == 'mse':
             return mean_squared_error(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'rmse':
-            return math.sqrt(mean_squared_error(y, y_pred), sample_weight=sample_weight)
+            return math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'msle':
             return math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
         else:
@@ -220,7 +198,7 @@ class Model(BaseEstimator, ClassifierMixin):
         Returns:
         - Dictionnaire des paramètres.
         """
-        return {'model': self.model, 'param_grid': self.param_grid, 'is_binary': self.is_binary, 'loss': self.loss}
+        return {'model': self.best_estimator_, 'loss': self.loss, 'name' : self.name}
 
     def set_params(self, **params):
         """
@@ -252,3 +230,7 @@ class Model(BaseEstimator, ClassifierMixin):
             return 'rmsle'
         else:
             raise ValueError(f"Fonction de perte inconnue: {self.loss}")
+        
+    def _show_features_importance(self, names : str) -> None:
+        # To do
+        pass
