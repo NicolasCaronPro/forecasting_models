@@ -28,7 +28,7 @@ def save_object(obj, filename: str, path: Path):
         pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
 
 class Model(BaseEstimator, ClassifierMixin):
-    def __init__(self, model, is_binary=True, loss='log_loss', name='Model'):
+    def __init__(self, model, loss='log_loss', name='Model'):
         """
         Initialise la classe CustomModel.
         
@@ -39,7 +39,6 @@ class Model(BaseEstimator, ClassifierMixin):
         - loss: Fonction de perte à utiliser ('log_loss', 'hinge_loss', etc.).
         """
         self.model = model
-        self.is_binary = is_binary
         self.name = name
         self.loss = loss
         self.best_estimator_ = None
@@ -48,7 +47,7 @@ class Model(BaseEstimator, ClassifierMixin):
         self.selected_features_ = []
         self.dir_output = None  # Ajout de l'attribut dir_output
 
-    def fit(self, X, y, X_test=None, y_test=None, sample_weight=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
+    def fit(self, X, y, X_test=None, y_test=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
         """
         Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
         
