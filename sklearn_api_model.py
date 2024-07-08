@@ -182,7 +182,7 @@ class Model(BaseEstimator, ClassifierMixin):
             return mean_squared_error(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'rmse':
             return math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
-        elif self.loss == 'msle':
+        elif self.loss == 'rmsle':
             return math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
         else:
             raise ValueError(f"Fonction de perte inconnue: {self.loss}")
