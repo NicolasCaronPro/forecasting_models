@@ -142,9 +142,9 @@ class Model(BaseEstimator, ClassifierMixin):
                 param_name = param_values[0]
                 param_range = param_values[1]
                 if isinstance(param_range[0], int):
-                    param_space[param_name] = Integer(param_range[0], param_range[1])
+                    param_space[param_name] = Integer(param_range[0], param_range[-1])
                 elif isinstance(param_range[0], float):
-                    param_space[param_name] = Real(param_range[0], param_range[1], prior='log-uniform')
+                    param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.model, opt, scoring=self._get_scorer(), cv=5)
