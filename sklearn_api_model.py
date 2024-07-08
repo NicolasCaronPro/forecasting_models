@@ -223,7 +223,7 @@ class Model(BaseEstimator, ClassifierMixin):
             return 'hinge'
         elif self.loss == 'accuracy':
             return 'accuracy'
-        elif self.loss == 'rmse':
+        elif self.loss == 'neg_root_mean_squared_error':
             return 'rmse'
         elif self.loss == 'rmsle':
             return 'rmsle'
