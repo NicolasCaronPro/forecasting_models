@@ -235,3 +235,20 @@ class Model(BaseEstimator, ClassifierMixin):
         for key, value in params.items():
             setattr(self, key, value)
         return self
+    
+    def _get_scorer(self):
+        """
+        Retourne la fonction de score basée sur la fonction de perte choisie.
+        """
+        if self.loss == 'log_loss':
+            return 'neg_log_loss'
+        elif self.loss == 'hinge_loss':
+            return 'hinge'
+        elif self.loss == 'accuracy':
+            return 'accuracy'
+        elif self.loss == 'rmse':
+            return 'rmse'
+        elif self.loss == 'rmsle':
+            return 'rmsle'
+        else:
+            raise ValueError(f"Fonction de perte inconnue: {self.loss}")
