@@ -8,6 +8,7 @@ from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, prec
 import math
 from skopt import Optimizer, BayesSearchCV
 from skopt.space import Integer, Real
+import numpy as np
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -116,7 +117,8 @@ class Model(BaseEstimator, ClassifierMixin):
                 # Si le score s'améliore, ajouter la caractéristique à la liste
                 if single_feature_score > base_score:
                     self.selected_features_.append(i)
-
+        else:
+            self.selected_features_ = np.arange(0, X.shape[1])
         # Entraîner le modèle final avec toutes les caractéristiques sélectionnées
         if optimization == 'grid':
             assert param_grid is not None
