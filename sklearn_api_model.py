@@ -78,20 +78,19 @@ class Model(BaseEstimator, ClassifierMixin):
                 self.selected_features_.append(i)
 
                 X_train_single = X[:, self.selected_features_]
-                X_test_single = X_test[:, self.selected_features_]
 
                 self.best_estimator_.fit(X_train_single, y)
 
                 # Calculer le score avec cette seule caractéristique
-                single_feature_score = self.score(X_test_single, y_test, sample_weight=w_test)
+                single_feature_score = self.score(X_test, y_test, sample_weight=w_test)
 
                 # Si le score ne s'améliore pas, on retire la variable de la liste
                 if single_feature_score < base_score:
-                    self.selected_features_.pop()
+                    self.selected_features_.pop(-1)
+                else:
                     base_score = single_feature_score
 
-                # On ajoute la différence de score
-                self.features_importance(single_feature_score - base_score)
+                self.features_importance.append(single_feature_score)
 
             self.best_estimator_.set_params({'early_stopping_rounds': early_stopping_rounds})
         else:
