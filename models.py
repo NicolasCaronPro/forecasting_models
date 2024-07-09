@@ -1,6 +1,6 @@
 import sys
-#sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-sys.path.insert(0, '/Home/Users/ncaron/WORK/GNN/forecasting_models')
+sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
+#sys.path.insert(0, '/Home/Users/ncaron/WORK/GNN/forecasting_models')
 from utils import *
 
 ################################ GAT ###########################################
@@ -560,13 +560,8 @@ class ST_GATLSTM(torch.nn.Module):
         self.bn = torch.nn.BatchNorm1d(residual_channels)
 
         self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, batch_first=True, dropout=dropout).to(device)
-        for name, param in self.lstm1.named_parameters():
-            if 'bias' in name:
-                torch.nn.init.constant_(param, 0.0)
-            elif 'weight' in name:
-                torch.nn.init.xavier_uniform_(param)
 
-        self.gat = GATConv(in_channels=residual_channels, out_channels=residual_channels,
+        self.gat = GATConv(in_channels=hidden_channels, out_channels=hidden_channels,
             heads=heads, dropout=dropout, concat=concat).to(device)
 
         self.output = OutputLayer(in_channels=hidden_channels * heads if concat else hidden_channels,
@@ -583,8 +578,6 @@ class ST_GATLSTM(torch.nn.Module):
         batch_size = X.size(0)
         
         x = self.input(X)
-        x = x.reshape(X.shape[0], -1)
-
         x = torch.movedim(x, 2, 1)
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
@@ -596,7 +589,7 @@ class ST_GATLSTM(torch.nn.Module):
         x = self.output(x)
 
         return x
-############################### ConvLSTM ##################################
+############################### LSTM ##################################
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, residual_channels, hidden_channels,
@@ -626,7 +619,6 @@ class LSTM(torch.nn.Module):
         x = self.output(x)
 
         return x
-
 
 ############################### GraphSAGE ##################################
     
