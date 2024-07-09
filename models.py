@@ -551,25 +551,25 @@ class ST_GATLSTM(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels,
                  residual_channels, end_channels, n_sequences, device, act_func,
                  heads, dropout, num_layers,
-                 binary):
+                 binary, concat):
         super(ST_GATLSTM, self).__init__()
         self.n_sequences = n_sequences
 
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1).to(device)
 
         self.bn = torch.nn.BatchNorm1d(residual_channels)
-        self.dropout = torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity()
 
-        self.gat = GATConv(in_channels=residual_channels * n_sequences, out_channels=residual_channels * n_sequences,
-            heads=heads, dropout=dropout, concat=False).to(device)
-
-        self.lstm1 = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, batch_first=True, dropout=dropout).to(device)
+        self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, batch_first=True, dropout=dropout).to(device)
         for name, param in self.lstm1.named_parameters():
             if 'bias' in name:
                 torch.nn.init.constant_(param, 0.0)
             elif 'weight' in name:
                 torch.nn.init.xavier_uniform_(param)
-        self.output = OutputLayer(in_channels=hidden_channels,
+
+        self.gat = GATConv(in_channels=residual_channels, out_channels=residual_channels,
+            heads=heads, dropout=dropout, concat=concat).to(device)
+
+        self.output = OutputLayer(in_channels=hidden_channels * heads if concat else hidden_channels,
                                   end_channels=end_channels,
                                   n_steps=n_sequences,
                                   device=device, act_func=act_func,
@@ -585,15 +585,13 @@ class ST_GATLSTM(torch.nn.Module):
         x = self.input(X)
         x = x.reshape(X.shape[0], -1)
 
-        x = self.gat(x, edge_index)
-        print(x.shape)
-        x = x.reshape(X.shape[0], -1, self.n_sequences)
         x = torch.movedim(x, 2, 1)
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
-        x, _ = self.lstm1(x, (h0, c0))
+        x, _ = self.lstm(x, (h0, c0))
         
         x = torch.squeeze(x[:, -1, :])
+        x = self.gat(x, edge_index)
 
         x = self.output(x)
 
