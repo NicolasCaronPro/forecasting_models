@@ -9,6 +9,119 @@ import math
 from skopt import Optimizer, BayesSearchCV
 from skopt.space import Integer, Real
 import numpy as np
+from xgboost import XGBClassifier, XGBRegressor
+from ngboost import NGBClassifier, NGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+
+def config_xgboost(device, classifier, objective):
+    params = {
+        'verbosity':0,
+        'early_stopping_rounds':15,
+        'learning_rate' :0.01,
+        'min_child_weight' : 1.0,
+        'max_depth' : 6,
+        'max_delta_step' : 1.0,
+        'subsample' : 0.5,
+        'colsample_bytree' : 0.7,
+        'colsample_bylevel': 0.6,
+        'reg_lambda' : 1.7,
+        'reg_alpha' : 0.7,
+        'n_estimators' : 10000,
+        'random_state': 42,
+        'tree_method':'hist',
+        }
+    
+    param_grid = {
+        'learning_rate': [0.01],
+        'max_depth': [10, 15, 20],
+        'subsample': [0.3, 0.5, 0.7],
+        'colsample_bytree': [0.8],
+        'colsample_bylevel' : [0.8],
+        'min_child_weight' : [5, 7, 10],
+        'reg_lambda' : [5.5, 7.5, 10.5],
+        'reg_alpha' : [0.9],
+        'random_state' : [42]
+    }
+
+    if device == 'cuda':
+        params['device']='cuda'
+
+    if not classifier:
+        return XGBRegressor(**params,
+                            objective = objective
+                            ), param_grid
+    else:
+        return XGBClassifier(**params,
+                            objective = objective
+                            ), param_grid
+
+def config_lightGBM(device, classifier, objective):
+    params = {'verbosity':-1,
+        #'num_leaves':64,
+        'learning_rate':0.01,
+        'early_stopping_rounds': 15,
+        'bagging_fraction':0.7,
+        'colsample_bytree':0.6,
+        'max_depth' : 4,
+        'num_leaves' : 2**4,
+        'reg_lambda' : 1,
+        'reg_alpha' : 0.27,
+        #'gamma' : 2.5,
+        'num_iterations' :10000,
+        'random_state':42
+        }
+
+    param_grid = {
+    'learning_rate': [0.01, 0.05, 0.1],
+    'early_stopping_rounds': [15],
+    'bagging_fraction': [0.6, 0.7, 0.8],
+    'colsample_bytree': [0.5, 0.6, 0.7],
+    'max_depth': [3, 4, 5],
+    'num_leaves': [16, 32, 64],
+    'reg_lambda': [0.5, 1.0, 1.5],
+    'reg_alpha': [0.1, 0.2, 0.3],
+    'num_iterations': [10000],
+    'random_state': [42]
+    }
+
+    if device == 'cuda':
+        params['device'] = "gpu"
+
+    if not classifier:
+        params['objective'] = objective
+        return LGBMRegressor(**params), param_grid
+    else:
+        params['objective'] = objective
+        return LGBMClassifier(**params), param_grid
+
+def config_ngboost(classifier, objective):
+    params  = {
+        'natural_gradient':True,
+        'n_estimators':1000,
+        'learning_rate':0.01,
+        'minibatch_frac':0.7,
+        'col_sample':0.6,
+        'verbose':False,
+        'verbose_eval':100,
+        'tol':1e-4,
+    }
+
+    param_grid = {
+    'natural_gradient': [True, False],
+    'n_estimators': [500, 1000, 1500],
+    'learning_rate': [0.01, 0.05, 0.1],
+    'minibatch_frac': [0.6, 0.7, 0.8],
+    'col_sample': [0.5, 0.6, 0.7],
+    'verbose': [False],
+    'verbose_eval': [50, 100, 200],
+    'tol': [1e-3, 1e-4, 1e-5],
+    'random_state': [42]
+    }
+
+    if not classifier:
+        return NGBRegressor(**params), param_grid
+    else:
+        return NGBClassifier(**params), param_grid
 
 def save_object(obj, filename: str, path: Path):
     """
