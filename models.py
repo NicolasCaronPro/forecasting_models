@@ -1,6 +1,6 @@
 import sys
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-#sys.path.insert(0, '/Home/Users/ncaron/WORK/GNN/forecasting_models')
+#sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
+sys.path.insert(0, '/Home/Users/ncaron/WORK/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
 from utils import *
 
 ################################ GAT ###########################################
@@ -58,9 +58,9 @@ class GAT(torch.nn.Module):
 # See code from https://github.com/SakastLord/STGAT and https://github.com/jswang/stgat_traffic_prediction
 # https://github.com/nnzhan/Graph-WaveNet/blob/master/model.py
 
-class TemporalBlock(torch.nn.Module):
+class GatedDilatedConvolution(torch.nn.Module):
     def __init__(self, in_channels, out_channels, dilation):
-        super(TemporalBlock, self).__init__()
+        super(GatedDilatedConvolution, self).__init__()
         #self.residual = [in_channels // i for i in range(1, n_residual + 1)]
         #self.tcn1 = TCN(num_inputs=in_channels, num_channels=[out_channels], kernel_size=3, activation='tanh', input_shape='NCL', dilations=None)
         #self.tcn2 = TCN(num_inputs=in_channels, num_channels=[out_channels], kernel_size=3, activation='relu', input_shape='NCL', dilations=None)
@@ -86,30 +86,20 @@ class TemporalBlock(torch.nn.Module):
 
 class SpatioTemporalLayer(torch.nn.Module):
     def __init__(self, n_sequences,
-                 residual_channels,
-                 skip_channels,
-                 dilation_channels,
+                 in_channels,
+                 out_channels,
                  dilation,
-                 dropout,
-                 concat,
-                 heads):
+                 dropout):
         
         super(SpatioTemporalLayer, self).__init__()
         
-        self.tcn = TemporalBlock(in_channels=residual_channels, out_channels=dilation_channels, dilation=dilation)
-        self.concat = concat
+        self.tcn = GatedDilatedConvolution(in_channels=in_channels, out_channels=out_channels, dilation=dilation)
 
-        if concat:
-            self.residual_proj = torch.nn.Conv1d(in_channels=residual_channels, out_channels=dilation_channels * heads, kernel_size=1)
-        else:
-            self.residual_proj = torch.nn.Conv1d(in_channels=residual_channels, out_channels=dilation_channels, kernel_size=1)
+        self.residual_proj = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=1)
 
-        self.gat = GATConv(in_channels=dilation_channels * n_sequences, out_channels=dilation_channels * n_sequences,
-                           heads=heads, concat=concat, dropout=0.03)
+        self.gcn = GCNConv(in_channels=out_channels * n_sequences, out_channels=out_channels * n_sequences)
 
-        self.skipconv = torch.nn.Conv1d(in_channels=dilation_channels, out_channels=skip_channels, kernel_size=1)
-
-        self.bn = nn.BatchNorm(in_channels=dilation_channels * heads if concat else dilation_channels)
+        self.bn = nn.BatchNorm(in_channels=out_channels)
 
         self.drop = torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity()
         self.n_sequences = n_sequences
@@ -119,58 +109,46 @@ class SpatioTemporalLayer(torch.nn.Module):
         residual = self.residual_proj(X)
 
         x = self.tcn(X)
-        s = self.skipconv(x)
 
         x = x.view(X.shape[0], self.n_sequences * x.shape[1])
-        x = self.gat(x, edge_index)
+        x = self.gcn(x, edge_index)
         x = x.reshape(X.shape[0], x.shape[1] // self.n_sequences, self.n_sequences)
 
         x = self.bn(x)
-        #x =  x + residual
         x = self.activation(x + residual)
         x = self.drop(x)
 
-        return x, s
+        return x
 
-class STGATCN(torch.nn.Module):
-    def __init__(self, n_sequences, num_of_layers,
+class DSTGCN(torch.nn.Module):
+    def __init__(self, n_sequences,
                  in_channels,
                  end_channels,
-                 skip_channels,
-                 residual_channels,
                  dilation_channels,
+                 dilations,
                  dropout,
-                 heads,
                  act_func,
                  device,
                  binary):
         
-        super(STGATCN, self).__init__()
+        super(DSTGCN, self).__init__()
         
-
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1, device=device)
-        dilation = 1
+        num_of_layers = len(dilation_channels) - 1
+        
+        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
         self.n_sequences = n_sequences
         self.layers = []
-
-        in_channels = residual_channels
 
         for i in range(num_of_layers):
             concat = True if i < num_of_layers -1 else False
         
             self.layers.append(SpatioTemporalLayer(n_sequences=n_sequences,
-                                            residual_channels=in_channels,
-                                            skip_channels=skip_channels,
-                                            dilation_channels=dilation_channels,
-                                            dilation=dilation, dropout=dropout,
-                                            concat=concat,
-                                            heads=heads).to(device))
-        
-            in_channels = residual_channels * heads if concat else residual_channels
+                                            in_channels=dilation_channels[i],
+                                            out_channels=dilation_channels[i + 1],
+                                            dilation=dilations[i], dropout=dropout).to(device))
             
-            dilation *= 2
         self.layers = torch.nn.ModuleList(self.layers)
-        self.output = OutputLayer(in_channels=skip_channels * n_sequences,
+        self.output = OutputLayer(in_channels=dilation_channels[-1] * n_sequences,
                                   end_channels=end_channels,
                                   n_steps=self.n_sequences,
                                   device=device,
@@ -179,13 +157,12 @@ class STGATCN(torch.nn.Module):
 
     def forward(self, X, edge_index):
         x = self.input(X)
-        #x = X
         for i, layer in enumerate(self.layers):
-            x, s = layer(x, edge_index)
+            x = layer(x, edge_index)
             if i == 0:
-                skip = s
+                skip = x
             else:
-                skip = s + skip
+                skip = x + skip
         
         x = self.output(skip)
         return x
@@ -231,25 +208,22 @@ class Temporal_Gated_Conv(torch.nn.Module):
         return H
 
 class SandiwchLayer(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, out_channels, dropout, heads, concat):
+    def __init__(self, n_sequences, in_channels, out_channels, dropout, heads, concat):
         super(SandiwchLayer, self).__init__()
 
-        coef = heads if concat else 1
         self.concat = concat
-        self.residual_proj = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels * coef, kernel_size=1)
+        self.residual_proj = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=1)
 
-        self.gated_conv1 = Temporal_Gated_Conv(in_channels, hidden_channels, kernel_size=3)
+        self.gated_conv1 = Temporal_Gated_Conv(in_channels, in_channels, kernel_size=3)
 
-        self.skipconv = torch.nn.Conv1d(in_channels=hidden_channels, out_channels=out_channels, kernel_size=1)
-
-        self.gat = GATConv(in_channels=hidden_channels * n_sequences,
-                           out_channels=hidden_channels * n_sequences,
+        self.gat = GATConv(in_channels=in_channels * n_sequences,
+                           out_channels=out_channels * n_sequences,
                            heads=heads, concat=concat,
-                           dropout=0.03)
+                           dropout=dropout)
 
-        self.gated_conv2 = Temporal_Gated_Conv(in_channels=hidden_channels * coef, out_channels=out_channels * coef)
+        self.gated_conv2 = Temporal_Gated_Conv(in_channels=out_channels, out_channels=out_channels)
 
-        self.bn = nn.BatchNorm(in_channels=out_channels * coef)
+        self.bn = nn.BatchNorm(in_channels=out_channels)
 
         self.n_sequences = n_sequences
         self.drop = torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity()
@@ -257,10 +231,7 @@ class SandiwchLayer(torch.nn.Module):
 
     def forward(self, X, edge_index):
         residual = self.residual_proj(X)
-        #residual = X
         x = self.gated_conv1(X)
-
-        s = self.skipconv(x)
         
         x = x.view(X.shape[0], self.n_sequences * x.shape[1])
         x = self.gat(x, edge_index)
@@ -272,37 +243,38 @@ class SandiwchLayer(torch.nn.Module):
         x = self.activation(x + residual)
         x = self.drop(x)
         
-        return x, s
+        return x
     
-class STGATCONV(torch.nn.Module):
-    def __init__(self, n_sequences, num_of_layers,
+class STGAT(torch.nn.Module):
+    def __init__(self, n_sequences,
                  in_channels,
-                 residual_channels,
                  hidden_channels,
                  end_channels,
                  dropout, heads, act_func, device,
                  binary):
-        super(STGATCONV, self).__init__()
+        super(STGAT, self).__init__()
+
+        num_of_layers = len(hidden_channels) - 1
 
         self.layers = []
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1, device=device)
+        self.skip_layers = []
+        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
 
         self.n_sequences = n_sequences
-        in_channels = residual_channels
 
         for i in range(num_of_layers):
             concat = True if i < num_of_layers -1 else False
-
             self.layers.append(SandiwchLayer(n_sequences=n_sequences,
-                                            in_channels=in_channels,
-                                            hidden_channels=hidden_channels,
-                                            out_channels=residual_channels, 
+                                            in_channels=hidden_channels[i],
+                                            out_channels=hidden_channels[i+1], 
                                             heads=heads, dropout=dropout,
                                             concat=concat).to(device))
             
-            in_channels = residual_channels * heads if concat else residual_channels
+        for i in range(num_of_layers):
+            self.skip_layers.append(torch.nn.Conv1d(in_channels=hidden_channels[i+1], out_channels=hidden_channels[-1], padding='same', kernel_size=1, device=device))
+            
         self.layers = torch.nn.ModuleList(self.layers)
-        self.output = OutputLayer(in_channels=residual_channels * self.n_sequences,
+        self.output = OutputLayer(in_channels=hidden_channels[-1] * self.n_sequences,
                                   end_channels=end_channels,
                                   n_steps=self.n_sequences,
                                   device=device, act_func=act_func,
@@ -310,9 +282,10 @@ class STGATCONV(torch.nn.Module):
 
     def forward(self, X, edge_index):
         x = self.input(X)
-        #x = X
+
         for i, layer in enumerate(self.layers):
-            x, s = layer(x, edge_index)
+            x = layer(x, edge_index)
+            s = self.skip_layers[i](x)
             if i == 0:
                 skip = s
             else:
@@ -325,19 +298,17 @@ class STGATCONV(torch.nn.Module):
 ###################################### ST-GCN #####################################################
 
 class SandiwchLayerGCN(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, out_channels, dropout, act_func):
+    def __init__(self, n_sequences, in_channels, out_channels, dropout, act_func):
         super(SandiwchLayerGCN, self).__init__()
 
         self.residual_proj = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=1)
 
-        self.gated_conv1 = Temporal_Gated_Conv(in_channels, hidden_channels, kernel_size=3)
+        self.gated_conv1 = Temporal_Gated_Conv(in_channels, out_channels, kernel_size=3)
 
-        self.skipconv = torch.nn.Conv1d(in_channels=hidden_channels, out_channels=out_channels, kernel_size=1)
+        self.gcn = GCNConv(in_channels=out_channels * n_sequences,
+                           out_channels=out_channels * n_sequences)
 
-        self.gcn = GCNConv(in_channels=hidden_channels * n_sequences,
-                           out_channels=hidden_channels * n_sequences)
-
-        self.gated_conv2 = Temporal_Gated_Conv(in_channels=hidden_channels, out_channels=out_channels)
+        self.gated_conv2 = Temporal_Gated_Conv(in_channels=out_channels, out_channels=out_channels)
 
         self.bn = nn.BatchNorm(in_channels=out_channels)
 
@@ -351,8 +322,6 @@ class SandiwchLayerGCN(torch.nn.Module):
     def forward(self, X, edge_index):
         residual = self.residual_proj(X)
         x = self.gated_conv1(X)
-
-        s = self.skipconv(x)
         
         x = x.view(X.shape[0], self.n_sequences * x.shape[1])
         x = self.gcn(x, edge_index)
@@ -364,34 +333,32 @@ class SandiwchLayerGCN(torch.nn.Module):
         x = self.activation(x + residual)
         x = self.drop(x)
         
-        return x, s
+        return x
     
-class STGCNCONV(torch.nn.Module):
-    def __init__(self, n_sequences, num_of_layers,
+class STGCN(torch.nn.Module):
+    def __init__(self, n_sequences,
                  in_channels,
-                 residual_channels,
                  hidden_channels,
                  end_channels,
                  dropout, act_func, device,
                  binary):
-        super(STGCNCONV, self).__init__()
-
+        super(STGCN, self).__init__()
+    
+        num_of_layers = len(hidden_channels) - 1
         self.layers = []
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1, device=device)
+        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
 
         self.n_sequences = n_sequences
-        in_channels = residual_channels
 
         for i in range(num_of_layers):
             self.layers.append(SandiwchLayerGCN(n_sequences=n_sequences,
-                                            in_channels=in_channels,
-                                            hidden_channels=hidden_channels,
-                                            out_channels=residual_channels, 
+                                            in_channels=hidden_channels[i],
+                                            out_channels=hidden_channels[i + 1],
                                             dropout=dropout,
                                             act_func=act_func).to(device))
             
         self.layers = torch.nn.ModuleList(self.layers)
-        self.output = OutputLayer(in_channels=residual_channels * self.n_sequences,
+        self.output = OutputLayer(in_channels=hidden_channels[-1] * self.n_sequences,
                                   end_channels=end_channels,
                                   n_steps=self.n_sequences,
                                   device=device, act_func=act_func,
@@ -400,16 +367,16 @@ class STGCNCONV(torch.nn.Module):
     def forward(self, X, edge_index):
         x = self.input(X)
         for i, layer in enumerate(self.layers):
-            x, s = layer(x, edge_index)
+            x = layer(x, edge_index)
             if i == 0:
-                skip = s
+                skip = x
             else:
-                skip = s + skip
+                skip = x + skip
         
         x = self.output(skip)
         return x
     
-################################## MY ST-GCNCONV ###############################
+################################## SDSTGCN ###############################
 
 class GCNLAYER(torch.nn.Module):
     def __init__(self, in_dim, end_channels,
@@ -429,88 +396,94 @@ class GCNLAYER(torch.nn.Module):
             self.activation = torch.nn.GELU()
 
     def forward(self, X, edge_index):
-        X = self.dropout(X)
         X = self.gcn(X, edge_index)
         if self.activation is not None:
             X = self.activation(X)
+        X = self.dropout(X)
         return X
 
-class DSTGCNCONV(torch.nn.Module):
-    def __init__(self, n_sequences, num_of_temporal_layers,
-                 num_of_spatial_layers,
+class SDSTGCN(torch.nn.Module):
+    def __init__(self, n_sequences,
                  in_channels,
-                 residual_channels,
-                 hidden_channels,
+                 hidden_channels_temporal,
+                 dilations,
+                 hidden_channels_spatial,
                  end_channels,
                  dropout, act_func, device,
                  binary):
         
-        super(DSTGCNCONV, self).__init__()
+        super(SDSTGCN, self).__init__()
+
+        num_of_temporal_layers = len(hidden_channels_temporal) - 1
+        num_of_spatial_layers = len(hidden_channels_spatial) - 1
 
         self.temporal_layers = []
         self.spatial_layers = []
-        self.input_temporal = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1, device=device)
-        self.input_spatial = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1, device=device)
+        self.input_temporal = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels_temporal[0], kernel_size=1, device=device)
+        self.input_spatial = nn.Linear(in_channels=in_channels, out_channels=hidden_channels_temporal[0], weight_initializer='glorot', bias=True).to(device)
 
         self.n_sequences = n_sequences
-        in_channels = residual_channels
 
-        for i in range(num_of_temporal_layers):
-            self.temporal_layers.append(SandiwchLayerGCN(n_sequences=n_sequences,
-                                            in_channels=in_channels,
-                                            hidden_channels=hidden_channels,
-                                            out_channels=residual_channels, 
-                                            dropout=dropout,
-                                            act_func=act_func).to(device))
-            
+        for ti in range(num_of_temporal_layers):
+            self.temporal_layers.append(GatedDilatedConvolution(in_channels=hidden_channels_temporal[ti],
+                                                      out_channels=hidden_channels_temporal[ti + 1],
+                                                      dilation=dilations[ti]))
+
         self.temporal_layers = torch.nn.ModuleList(self.temporal_layers)
 
-        self.temporal_output = OutputLayer(in_channels=residual_channels * self.n_sequences,
-                                  end_channels=residual_channels,
-                                  n_steps=self.n_sequences,
-                                  device=device, act_func=act_func,
-                                  binary=False)
-        
-        for i in range(num_of_spatial_layers):
-            self.spatial_layers.append(GCNLAYER(in_dim=residual_channels, end_channels=residual_channels, dropout=dropout, act_func=act_func).to(device))
+        for si in range(num_of_spatial_layers):
+            self.spatial_layers.append(GCNLAYER(in_dim=hidden_channels_spatial[si],
+                                                end_channels=hidden_channels_spatial[si+1], dropout=dropout, act_func=act_func).to(device))
 
         self.spatial_layers = torch.nn.ModuleList(self.spatial_layers)
-        self.spatial_output = OutputLayer(in_channels=residual_channels,
-                                  end_channels=residual_channels,
+        self.output = OutputLayer(in_channels=hidden_channels_spatial[-1] + hidden_channels_temporal[-1],
+                                  end_channels=end_channels,
                                   n_steps=1,
                                   device=device, act_func=act_func,
-                                  binary=False)
-
-        self.binary = binary
-        if not binary:
-            self.output = nn.Linear(in_channels=2, out_channels=1, weight_initializer='glorot', bias=True).to(device)
-        else:
-            self.output = nn.Linear(in_channels=2, out_channels=2, weight_initializer='glorot', bias=True).to(device)
-            self.softmax = Softmax()
+                                  binary=binary)
 
     def forward(self, X, edge_index):
+        
         xt = self.input_temporal(X)
         for i, layer in enumerate(self.temporal_layers):
-            xt, s = layer(xt, edge_index)
-            if i == 0:
-                skip = s
-            else:
-                skip = s + skip
-        xt = self.temporal_output(skip)
-
+            xt = layer(xt)
+        
         xs = self.input_spatial(X)
-        xs = xs[:,:,-1]
         for i, layer in enumerate(self.spatial_layers):
             xs = layer(xs, edge_index)
 
-        xs = self.spatial_output(xs)
-
-        x = torch.concat((xs, xt), axis=1)
+        x = torch.cat((xs, xt))
 
         x = self.output(x)
-        if self.binary:
-            x = self.softmax(x)
+
         return x
+    
+################################## DGATCONV ####################################
+class GATLAYER(torch.nn.Module):
+    def __init__(self, in_dim, end_channels,
+                 dropout,
+                 act_func,
+                 concat,
+                 heads):
+        super(GATLAYER, self).__init__()
+
+        self.dropout = torch.nn.Dropout(dropout) if dropout > 0.0 else torch.nn.Identity()
+
+        self.gcn = GATConv(in_channels=in_dim,
+                        out_channels=end_channels, heads=heads, concat=concat)
+        
+        self.activation = None
+        if act_func == 'relu':
+            self.activation = torch.nn.ReLU()
+        if act_func == 'gelu':
+            self.activation = torch.nn.GELU()
+
+    def forward(self, X, edge_index):
+        X = self.gcn(X, edge_index)
+        if self.activation is not None:
+            X = self.activation(X)
+        X = self.dropout(X)
+        return X
 
 ################################## TEMPORAL GNN ################################
 class TemporalGNN(torch.nn.Module):

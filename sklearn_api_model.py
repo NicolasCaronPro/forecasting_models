@@ -16,7 +16,7 @@ from lightgbm import LGBMClassifier, LGBMRegressor
 def config_xgboost(device, classifier, objective):
     params = {
         'verbosity':0,
-        'early_stopping_rounds':15,
+        'early_stopping_rounds':None,
         'learning_rate' :0.01,
         'min_child_weight' : 1.0,
         'max_depth' : 6,
@@ -94,7 +94,7 @@ def config_lightGBM(device, classifier, objective):
         params['objective'] = objective
         return LGBMClassifier(**params), param_grid
 
-def config_ngboost(classifier, objective):
+def config_ngboost(classifier):
     params  = {
         'natural_gradient':True,
         'n_estimators':1000,
