@@ -215,7 +215,7 @@ class Model(BaseEstimator, ClassifierMixin):
         if optimization == 'grid':
             assert param_grid is not None
             grid_search = GridSearchCV(self.best_estimator_, param_grid, scoring=self._get_scorer(), cv=5)
-            grid_search.fit(X[:, self.selected_features_], y, **fit_params)
+            grid_search.fit(X, y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
         elif optimization == 'bayes':
             assert param_grid is not None
@@ -240,7 +240,7 @@ class Model(BaseEstimator, ClassifierMixin):
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.model, opt, scoring=self._get_scorer(), cv=5)
-            bayes_search.fit(X[:, self.selected_features_], y, **fit_params)
+            bayes_search.fit(X, y, **fit_params)
             self.best_estimator_= bayes_search.best_estimator_
         elif optimization == 'skip':
             self.best_estimator_.fit(X, y, **fit_params)
