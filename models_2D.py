@@ -2,7 +2,7 @@ import sys
 
 sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/models')
 
-from utils import *
+from forecasting_models.utils import *
 from conv_lstm import ConvLSTM
 
 class Zhang(torch.nn.Module):

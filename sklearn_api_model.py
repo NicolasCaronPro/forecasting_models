@@ -140,7 +140,7 @@ def save_object(obj, filename: str, path: Path):
     with open(path / filename, 'wb') as outp:
         pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
 
-def find_relevant_features(model, features : np.array, X : np.array, y : np.array,
+def find_relevant_features(model, features : np.array, X : np.array, y : np.array, w : np.array,
                           X_val=None, y_val=None, w_val=None,
                           X_test=None, y_test=None, w_test=None):
     
@@ -151,9 +151,15 @@ def find_relevant_features(model, features : np.array, X : np.array, y : np.arra
         
         selected_features_.append(fet)
 
+        fitparams={
+                'eval_set':[(X[:, features], y), (X_val[:, features], y_val)],
+                'sample_weight' : w,
+                'verbose' : False
+                }
+
         X_train_single = X[:, selected_features_]
 
-        model.fit(X_train_single, y)
+        model.fit(X_train_single, y, fit_params=fitparams)
 
         # Calculer le score avec cette seule caractéristique
         single_feature_score = model.score(X_test, y_test, sample_weight=w_test)
@@ -186,7 +192,7 @@ class Model(BaseEstimator, ClassifierMixin):
         self.selected_features_ = []
         self.dir_output = None  # Ajout de l'attribut dir_output
 
-    def fit(self, X, y, optimization='grid', param_grid=None, fit_params=None):
+    def fit(self, X, y, optimization='skip', param_grid=None, fit_params=None):
         """
         Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
         
