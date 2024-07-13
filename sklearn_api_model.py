@@ -140,6 +140,35 @@ def save_object(obj, filename: str, path: Path):
     with open(path / filename, 'wb') as outp:
         pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
 
+def find_relevant_features(model, features : np.array, X : np.array, y : np.array,
+                          X_val=None, y_val=None, w_val=None,
+                          X_test=None, y_test=None, w_test=None):
+    
+    features_importance = []
+    selected_features_ = []
+    model.best_estimator_.set_params(early_stopping_rounds=0) # On enleve l'early stopping parce que je peux pas accéder à Xval dans fitparams à cause du modèle ngboost
+    base_score = -math.inf
+    for i, fet in enumerate(features):
+        
+        selected_features_.append(fet)
+
+        X_train_single = X[:, selected_features_]
+
+        model.fit(X_train_single, y)
+
+        # Calculer le score avec cette seule caractéristique
+        single_feature_score = model.score(X_test, y_test, sample_weight=w_test)
+
+        # Si le score ne s'améliore pas, on retire la variable de la liste
+        if single_feature_score < base_score:
+            selected_features_.pop(-1)
+        else:
+            base_score = single_feature_score
+
+        features_importance.append(single_feature_score)
+
+    return selected_features_
+
 class Model(BaseEstimator, ClassifierMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
         """
@@ -158,7 +187,7 @@ class Model(BaseEstimator, ClassifierMixin):
         self.selected_features_ = []
         self.dir_output = None  # Ajout de l'attribut dir_output
 
-    def fit(self, X, y, X_test=None, y_test=None, w_test=None, evaluate_individual_features=True, optimization='grid', param_grid=None, fit_params=None):
+    def fit(self, X, y, optimization='grid', param_grid=None, fit_params=None):
         """
         Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
         
@@ -173,41 +202,9 @@ class Model(BaseEstimator, ClassifierMixin):
         - optimization: Méthode d'optimisation à utiliser ('grid' ou 'bayes').
         - fit_params: Paramètres supplémentaires pour la fonction de fit.
         """
-        self.X_test = X_test
-        self.y_test = y_test
 
         self.X_train = X
         self.y_train = y
-
-        if evaluate_individual_features and X_test is not None and y_test is not None:
-            self.features_importance = []
-            self.selected_features_ = []
-            n_features = X.shape[1]
-            early_stopping_rounds = self.best_estimator_.get_params()['early_stopping_rounds']
-            self.best_estimator_.set_params(early_stopping_rounds=0) # On enleve l'early stopping parce que je peux pas accéder à Xval dans fitparams à cause du modèle ngboost
-            base_score = -math.inf
-            for i in range(n_features):
-                
-                self.selected_features_.append(i)
-
-                X_train_single = X[:, self.selected_features_]
-
-                self.best_estimator_.fit(X_train_single, y)
-
-                # Calculer le score avec cette seule caractéristique
-                single_feature_score = self.score(X_test, y_test, sample_weight=w_test)
-
-                # Si le score ne s'améliore pas, on retire la variable de la liste
-                if single_feature_score < base_score:
-                    self.selected_features_.pop(-1)
-                else:
-                    base_score = single_feature_score
-
-                self.features_importance.append(single_feature_score)
-
-            self.best_estimator_.set_params({'early_stopping_rounds': early_stopping_rounds})
-        else:
-            self.selected_features_ = np.arange(0, X.shape[1])
 
         # Entraîner le modèle final avec toutes les caractéristiques sélectionnées
         if optimization == 'grid':
@@ -255,7 +252,7 @@ class Model(BaseEstimator, ClassifierMixin):
         Returns:
         - Les étiquettes prédites.
         """
-        return self.best_estimator_.predict(X[:, self.selected_features_])
+        return self.best_estimator_.predict(X)
 
     def predict_proba(self, X):
         """
@@ -268,7 +265,7 @@ class Model(BaseEstimator, ClassifierMixin):
         - Les probabilités prédites.
         """
         if hasattr(self.best_estimator_, "predict_proba"):
-            return self.best_estimator_.predict_proba(X[:, self.selected_features_])
+            return self.best_estimator_.predict_proba(X)
         else:
             raise AttributeError("Le modèle choisi ne supporte pas predict_proba.")
 
