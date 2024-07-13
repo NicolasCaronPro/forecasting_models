@@ -243,7 +243,7 @@ class Model(BaseEstimator, ClassifierMixin):
             bayes_search.fit(X[:, self.selected_features_], y, **fit_params)
             self.best_estimator_= bayes_search.best_estimator_
         elif optimization == 'skip':
-            self.best_estimator_.fit(X[:, self.selected_features_], y, **fit_params)
+            self.best_estimator_.fit(X, y, **fit_params)
         else:
              raise ValueError("Unsupported optimization method")
         
