@@ -168,6 +168,7 @@ def find_relevant_features(model, features : np.array, X : np.array, y : np.arra
         if single_feature_score < base_score:
             selected_features_.pop(-1)
         else:
+            print(f'With {fet} : {base_score} -> {single_feature_score}')
             base_score = single_feature_score
 
         features_importance.append(single_feature_score)
@@ -290,11 +291,11 @@ class Model(BaseEstimator, ClassifierMixin):
         elif self.loss == 'accuracy':
             return accuracy_score(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'mse':
-            return mean_squared_error(y, y_pred, sample_weight=sample_weight)
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'rmse':
-            return math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'rmsle':
-            return math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
+            return -math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
         else:
             raise ValueError(f"Fonction de perte inconnue: {self.loss}")
 
