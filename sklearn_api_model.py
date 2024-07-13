@@ -146,7 +146,6 @@ def find_relevant_features(model, features : np.array, X : np.array, y : np.arra
     
     features_importance = []
     selected_features_ = []
-    model.best_estimator_.set_params(early_stopping_rounds=0) # On enleve l'early stopping parce que je peux pas accéder à Xval dans fitparams à cause du modèle ngboost
     base_score = -math.inf
     for i, fet in enumerate(features):
         
