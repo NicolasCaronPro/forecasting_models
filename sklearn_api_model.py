@@ -151,18 +151,18 @@ def find_relevant_features(model, features : np.array, X : np.array, y : np.arra
         
         selected_features_.append(fet)
 
+        X_train_single = X[:, selected_features_]
+
         fitparams={
-                'eval_set':[(X[:, features], y), (X_val[:, features], y_val)],
+                'eval_set':[(X_train_single, y), (X_val[:, selected_features_], y_val)],
                 'sample_weight' : w,
                 'verbose' : False
                 }
 
-        X_train_single = X[:, selected_features_]
-
-        model.fit(X_train_single, y, fit_params=fitparams)
+        model.fit(X=X_train_single, y=y, fit_params=fitparams)
 
         # Calculer le score avec cette seule caractéristique
-        single_feature_score = model.score(X_test, y_test, sample_weight=w_test)
+        single_feature_score = model.score(X_test[:, selected_features_], y_test, sample_weight=w_test)
 
         # Si le score ne s'améliore pas, on retire la variable de la liste
         if single_feature_score < base_score:
@@ -199,10 +199,6 @@ class Model(BaseEstimator, ClassifierMixin):
         Parameters:
         - X: Les données d'entraînement.
         - y: Les étiquettes des données d'entraînement.
-        - X_test: Les données de test pour évaluer les performances (optionnel).
-        - y_test: Les étiquettes des données de test pour évaluer les performances (optionnel).
-        - w_test: Poids des échantillons de la base de test
-        - evaluate_individual_features: Booléen pour activer l'évaluation des caractéristiques individuellement.
         - param_grid : Paramètre à optimiser
         - optimization: Méthode d'optimisation à utiliser ('grid' ou 'bayes').
         - fit_params: Paramètres supplémentaires pour la fonction de fit.
