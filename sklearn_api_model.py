@@ -250,7 +250,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _show_features_importance(self, X_set, y_set, names, outname, dir_output):
+    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output):
         """
         Display the importance of features using feature permutation.
         
@@ -258,6 +258,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - X_set: Data to evaluate feature importance.
         - y_set: Corresponding labels.
         - names: Names of the features.
+        - outname : Name of the test set
         - dir_output: Directory to save the plot.
         """
         result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
@@ -274,7 +275,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #plt.show()
         plt.close('all')
 
-    def _show_params_influence(self, param, dir_output):
+    def _plot_param_influence(self, param, dir_output):
         """
         Display the influence of parameters on model performance.
         
