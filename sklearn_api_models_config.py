@@ -148,7 +148,6 @@ def config_svm(device, task_type):
     else:
         return SVC(**params, probability=True), param_grid
 
-
 def config_random_forest(device, task_type):
 
     params = {

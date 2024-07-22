@@ -1,4 +1,6 @@
-from forecasting_models import sklearn_api_models_config
+from forecasting_models.sklearn_api_models_config import *
+from sklearn.inspection import permutation_importance
+from matplotlib import pyplot as plt
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -85,108 +87,108 @@ def explore_features(model, features : np.array, X : np.array, y : np.array, w :
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
         """
-        Initialise la classe CustomModel.
+        Initialize the CustomModel class.
         
         Parameters:
-        - model: Le modèle de base à utiliser (doit suivre l'API sklearn).
-        - name : Le nom du modèle
-        - loss: Fonction de perte à utiliser ('log_loss', 'hinge_loss', etc.).
+        - model: The base model to use (must follow the sklearn API).
+        - name: The name of the model.
+        - loss: Loss function to use ('log_loss', 'hinge_loss', etc.).
         """
         self.best_estimator_ = model
         self.name = name
         self.loss = loss
-        self.X_test = None
-        self.y_test = None
-        self.dir_output = None  # Ajout de l'attribut dir_output
+        self.X_train = None
+        self.y_train = None
+        self.cv_results_ = None  # Adding the cv_results_ attribute
 
     def fit(self, X, y, optimization='skip', param_grid=None, fit_params=None):
         """
-        Entraîne le modèle sur les données en utilisant GridSearchCV ou BayesSearchCV.
+        Train the model on the data using GridSearchCV or BayesSearchCV.
         
         Parameters:
-        - X: Les données d'entraînement.
-        - y: Les étiquettes des données d'entraînement.
-        - param_grid : Paramètre à optimiser
-        - optimization: Méthode d'optimisation à utiliser ('grid' ou 'bayes').
-        - fit_params: Paramètres supplémentaires pour la fonction de fit.
+        - X: Training data.
+        - y: Labels for the training data.
+        - param_grid: Parameters to optimize.
+        - optimization: Optimization method to use ('grid' or 'bayes').
+        - fit_params: Additional parameters for the fit function.
         """
-
         self.X_train = X
         self.y_train = y
 
-        # Entraîner le modèle final avec toutes les caractéristiques sélectionnées
+        # Train the final model with all selected features
         if optimization == 'grid':
             assert param_grid is not None
             grid_search = GridSearchCV(self.best_estimator_, param_grid, scoring=self._get_scorer(), cv=5)
             grid_search.fit(X, y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
+            self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
             assert param_grid is not None
             param_list = []
-            for param_name, param_values in self.param_grid.items():
+            for param_name, param_values in param_grid.items():
                 if isinstance(param_values, list):
-                    param_list.append(param_values)
+                    param_list.append((param_name, param_values))
                 elif isinstance(param_values, tuple) and len(param_values) == 2:
-                    param_list.append(param_values)
+                    param_list.append((param_name, param_values))
                 else:
                     raise ValueError("Unsupported parameter type in param_grid. Expected list or tuple of size 2.")
                 
             # Configure the parameter space for BayesSearchCV
             param_space = {}
-            for param_values in param_list:
-                param_name = param_values[0]
-                param_range = param_values[1]
+            for param_name, param_range in param_list:
                 if isinstance(param_range[0], int):
                     param_space[param_name] = Integer(param_range[0], param_range[-1])
                 elif isinstance(param_range[0], float):
                     param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
-            bayes_search = BayesSearchCV(self.model, opt, scoring=self._get_scorer(), cv=5)
+            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self._get_scorer(), cv=5)
             bayes_search.fit(X, y, **fit_params)
-            self.best_estimator_= bayes_search.best_estimator_
+            self.best_estimator_ = bayes_search.best_estimator_
+            self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
             self.best_estimator_.fit(X, y, **fit_params)
         else:
-             raise ValueError("Unsupported optimization method")
+            raise ValueError("Unsupported optimization method")
         
     def predict(self, X):
         """
-        Prédit les étiquettes pour les données d'entrée.
+        Predict labels for input data.
         
         Parameters:
-        - X: Les données pour lesquelles prédire les étiquettes.
+        - X: Data to predict labels for.
         
         Returns:
-        - Les étiquettes prédites.
+        - Predicted labels.
         """
         return self.best_estimator_.predict(X)
 
     def predict_proba(self, X):
         """
-        Prédit les probabilités pour les données d'entrée.
+        Predict probabilities for input data.
         
         Parameters:
-        - X: Les données pour lesquelles prédire les probabilités.
+        - X: Data to predict probabilities for.
         
         Returns:
-        - Les probabilités prédites.
+        - Predicted probabilities.
         """
         if hasattr(self.best_estimator_, "predict_proba"):
             return self.best_estimator_.predict_proba(X)
         else:
-            raise AttributeError("Le modèle choisi ne supporte pas predict_proba.")
+            raise AttributeError("The chosen model does not support predict_proba.")
 
-    def score(self, X, y, sample_weight):
+    def score(self, X, y, sample_weight=None):
         """
-        Évalue les performances du modèle.
+        Evaluate the model's performance.
         
         Parameters:
-        - X: Les données d'entrée.
-        - y: Les étiquettes réelles.
+        - X: Input data.
+        - y: True labels.
+        - sample_weight: Sample weights.
         
         Returns:
-        - Le score du modèle sur les données fournies.
+        - The model's score on the provided data.
         """
         y_pred = self.predict(X)
         if self.loss == 'log_loss':
@@ -203,26 +205,26 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         elif self.loss == 'rmsle':
             return -math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
         else:
-            raise ValueError(f"Fonction de perte inconnue: {self.loss}")
+            raise ValueError(f"Unknown loss function: {self.loss}")
 
     def get_params(self, deep=True):
         """
-        Obtient les paramètres du modèle.
+        Get the model's parameters.
         
         Parameters:
-        - deep: Si True, retourne les paramètres pour ce modèle et les modèles imbriqués.
+        - deep: If True, return the parameters for this model and nested models.
         
         Returns:
-        - Dictionnaire des paramètres.
+        - Dictionary of parameters.
         """
-        return {'model': self.best_estimator_, 'loss': self.loss, 'name' : self.name}
+        return {'model': self.best_estimator_, 'loss': self.loss, 'name': self.name}
 
     def set_params(self, **params):
         """
-        Définit les paramètres du modèle.
+        Set the model's parameters.
         
         Parameters:
-        - params: Dictionnaire des paramètres à définir.
+        - params: Dictionary of parameters to set.
         
         Returns:
         - Self.
@@ -233,7 +235,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     
     def _get_scorer(self):
         """
-        Retourne la fonction de score basée sur la fonction de perte choisie.
+        Return the scoring function based on the chosen loss function.
         """
         if self.loss == 'log_loss':
             return 'neg_log_loss'
@@ -244,10 +246,59 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         elif self.loss == 'rmse':
             return 'neg_root_mean_squared_error'
         elif self.loss == 'rmsle':
-            return 'rmsle'
+            return 'neg_root_mean_squared_log_error'
         else:
-            raise ValueError(f"Fonction de perte inconnue: {self.loss}")
+            raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _show_features_importance(self, names : str) -> None:
-        # To do
-        pass
+    def _show_features_importance(self, X_set, y_set, names, outname, dir_output):
+        """
+        Display the importance of features using feature permutation.
+        
+        Parameters:
+        - X_set: Data to evaluate feature importance.
+        - y_set: Corresponding labels.
+        - names: Names of the features.
+        - dir_output: Directory to save the plot.
+        """
+        result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
+        importances = result.importances_mean
+        indices = np.argsort(importances)[::-1]
+        
+        plt.figure(figsize=(50,25))
+        plt.title(f"Feature importances for {self.name}")
+        plt.bar(range(len(importances)), importances[indices], align="center")
+        plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
+        plt.xlim([-1, len(importances)])
+        plt.tight_layout()
+        plt.savefig(Path(dir_output) / f"{outname}_feature_importances_influence.png")
+        #plt.show()
+        plt.close('all')
+
+    def _show_params_influence(self, param, dir_output):
+        """
+        Display the influence of parameters on model performance.
+        
+        Parameters:
+        - param: The parameter to visualize.
+        - dir_output: Directory to save the plot.
+        """
+        if self.cv_results_ is None:
+            raise AttributeError("Grid search or bayes search results not available. Please run GridSearchCV or BayesSearchCV first.")
+        
+        if param not in self.cv_results_['params'][0]:
+            raise ValueError(f"The parameter {param} is not in the grid or bayes search results.")
+        
+        param_values = [result[param] for result in self.cv_results_['params']]
+        means = self.cv_results_['mean_test_score']
+        stds = self.cv_results_['std_test_score']
+
+        plt.figure(figsize=(50,25))
+        plt.title(f"Influence of {param} on performance for {self.name}")
+        plt.xlabel(param)
+        plt.ylabel("Mean score")
+        plt.errorbar(param_values, means, yerr=stds, fmt='-o')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(Path(dir_output) / f"{self.name}_{param}_influence.png")
+        #plt.show()
+        plt.close('all')
