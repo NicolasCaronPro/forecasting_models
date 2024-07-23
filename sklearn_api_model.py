@@ -217,7 +217,11 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Dictionary of parameters.
         """
-        return {'model': self.best_estimator_, 'loss': self.loss, 'name': self.name}
+        params = {'model': self.best_estimator_, 'loss': self.loss, 'name': self.name}
+        if deep and hasattr(self.best_estimator_, 'get_params'):
+            deep_params = self.best_estimator_.get_params(deep=True)
+            params.update(deep_params)
+        return params
 
     def set_params(self, **params):
         """
@@ -229,8 +233,16 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Self.
         """
+        best_estimator_params = {}
         for key, value in params.items():
-            setattr(self, key, value)
+            if key in ['model', 'loss', 'name']:
+                setattr(self, key, value)
+            else:
+                best_estimator_params[key] = value
+        
+        if best_estimator_params != {}:
+            self.best_estimator_.set_params(**best_estimator_params)
+        
         return self
     
     def _get_scorer(self):
@@ -250,7 +262,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output):
+    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar'):
         """
         Display the importance of features using feature permutation.
         
@@ -260,20 +272,33 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - names: Names of the features.
         - outname : Name of the test set
         - dir_output: Directory to save the plot.
+        - mode : moustache or bar.
         """
         result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
         importances = result.importances_mean
         indices = np.argsort(importances)[::-1]
         
-        plt.figure(figsize=(50,25))
-        plt.title(f"Feature importances for {self.name}")
-        plt.bar(range(len(importances)), importances[indices], align="center")
-        plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
-        plt.xlim([-1, len(importances)])
-        plt.tight_layout()
-        plt.savefig(Path(dir_output) / f"{outname}_feature_importances_influence.png")
-        #plt.show()
-        plt.close('all')
+        if mode == 'bar':
+            plt.figure(figsize=(50,25))
+            plt.title(f"Permutation importances {self.name}")
+            plt.bar(range(len(importances)), importances[indices], align="center")
+            plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
+            plt.xlim([-1, len(importances)])
+            plt.ylabel(f"Decrease in {self._get_scorer()} score")
+            plt.tight_layout()
+            plt.savefig(Path(dir_output) / f"{outname}_permutation_importances_{mode}.png")
+            plt.close('all')
+        elif mode == 'moustache':
+            plt.figure(figsize=(50,25))
+            plt.boxplot(importances[indices].T, vert=False, whis=10)
+            plt.title(f"Permutation Importances {self.name}")
+            plt.axvline(x=0, color="k", linestyle="--")
+            plt.xlabel(f"Decrease in {self._get_scorer()} score")
+            plt.tight_layout()
+            plt.savefig(Path(dir_output) / f"{outname}_permutation_importances_{mode}.png")
+            plt.close('all')
+        else:
+            raise ValueError(f'Unknown {mode} for ploting features importance but feel free to add new one')
 
     def _plot_param_influence(self, param, dir_output):
         """
@@ -293,7 +318,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         means = self.cv_results_['mean_test_score']
         stds = self.cv_results_['std_test_score']
 
-        plt.figure(figsize=(50,25))
+        plt.figure(figsize=(25,25))
         plt.title(f"Influence of {param} on performance for {self.name}")
         plt.xlabel(param)
         plt.ylabel("Mean score")
@@ -301,5 +326,4 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         plt.grid(True)
         plt.tight_layout()
         plt.savefig(Path(dir_output) / f"{self.name}_{param}_influence.png")
-        #plt.show()
         plt.close('all')
