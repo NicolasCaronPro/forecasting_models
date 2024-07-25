@@ -270,9 +270,6 @@ class MeanFeaturesModel(Model):
         self.mean_ = None
     
     def fit(self, X, y=None):
-        # Calculer la moyenne des features
-        #self.mean_ = np.mean(X, axis=0)
-        #return self
         pass
     
     def predict(self, X):
@@ -297,7 +294,7 @@ class ModelTree(Model):
         """
         super().__init__(model, loss, name)
 
-    def plot_tree(self, feature_names=None, class_names=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20,20)):
+    def plot_tree(self, features_name=None, class_names=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20,20)):
         """
         Plot a tree for tree-based models.
         
