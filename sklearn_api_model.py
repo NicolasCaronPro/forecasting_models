@@ -1,88 +1,24 @@
-from forecasting_models.sklearn_api_models_config import *
-from sklearn.inspection import permutation_importance
-from matplotlib import pyplot as plt
-
-def save_object(obj, filename: str, path: Path):
-    """
-    Sauvegarde un objet en utilisant pickle dans un fichier donné.
-    
-    Parameters:
-    - obj: L'objet à sauvegarder.
-    - filename: Le nom du fichier.
-    - path: Le chemin du répertoire où sauvegarder le fichier.
-    """
-    # Vérifie et crée le chemin s'il n'existe pas
-    if not os.path.exists(path):
-        os.makedirs(path)
-    
-    # Sauvegarde l'objet en utilisant pickle
-    with open(path / filename, 'wb') as outp:
-        pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
-
-def explore_parameters(model,
-                       features : np.array,
-                       X : np.array, y : np.array, w : np.array,
-                       parameter_name : str,
-                    values : list,
-                    fitparams  : dict = None,
-                    X_val=None, y_val=None, w_val=None,
-                    X_test=None, y_test=None, w_test=None):
-    
-    parameter_loss = []
-    base_score = -math.inf
-    for i, val in enumerate(values):
-
-        params = model.get_params()
-        params[parameter_name] = val
-        model.set_params(**params)
-
-        model.fit(X=X[:, features], y=y, fit_params=fitparams)
-
-        single_feature_score = model.score(X_test[:, features], y_test, sample_weight=w_test)
-
-        print(f'Parame {parameter_name} at {val} : {base_score} -> {single_feature_score}')
-        base_score = single_feature_score
-
-        parameter_loss.append(single_feature_score)
-
-    res = np.row_stack(values, parameter_loss)
-
-    return res
-
-def explore_features(model, features : np.array, X : np.array, y : np.array, w : np.array,
-                          X_val=None, y_val=None, w_val=None,
-                          X_test=None, y_test=None, w_test=None):
-    
-    features_importance = []
-    selected_features_ = []
-    base_score = -math.inf
-    for i, fet in enumerate(features):
-        
-        selected_features_.append(fet)
-
-        X_train_single = X[:, selected_features_]
-
-        fitparams={
-                'eval_set':[(X_train_single, y), (X_val[:, selected_features_], y_val)],
-                'sample_weight' : w,
-                'verbose' : False
-                }
-
-        model.fit(X=X_train_single, y=y, fit_params=fitparams)
-
-        # Calculer le score avec cette seule caractéristique
-        single_feature_score = model.score(X_test[:, selected_features_], y_test, sample_weight=w_test)
-
-        # Si le score ne s'améliore pas, on retire la variable de la liste
-        if single_feature_score <= base_score:
-            selected_features_.pop(-1)
-        else:
-            print(f'With {fet} : {base_score} -> {single_feature_score}')
-            base_score = single_feature_score
-
-        features_importance.append(single_feature_score)
-
-    return selected_features_
+from forecasting_models.tools import *
+from xgboost import XGBClassifier, XGBRegressor
+from ngboost import NGBClassifier, NGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+from sklearn.svm import SVR, SVC
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from xgboost import plot_tree as xgb_plot_tree
+from lightgbm import plot_tree as lgb_plot_tree
+from ngboost.distns import Normal
+from ngboost.scores import LogScore
+from sklearn.tree import plot_tree as sklearn_plot_tree
+from sklearn.model_selection import GridSearchCV
+from sklearn.base import clone
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error
+from skopt import Optimizer, BayesSearchCV
+from skopt.space import Integer, Real
+import logging
+import sys
+from typing import Union
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
@@ -101,14 +37,14 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
 
-    def fit(self, X, y, optimization='skip', param_grid=None, fit_params=None):
+    def fit(self, X, y, optimization='skip', params_grid=None, fit_params={}):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
         
         Parameters:
         - X: Training data.
         - y: Labels for the training data.
-        - param_grid: Parameters to optimize.
+        - params_grid: Parameters to optimize.
         - optimization: Optimization method to use ('grid' or 'bayes').
         - fit_params: Additional parameters for the fit function.
         """
@@ -117,21 +53,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         # Train the final model with all selected features
         if optimization == 'grid':
-            assert param_grid is not None
-            grid_search = GridSearchCV(self.best_estimator_, param_grid, scoring=self._get_scorer(), cv=5)
+            assert params_grid is not None
+            grid_search = GridSearchCV(self.best_estimator_, params_grid, scoring=self._get_scorer(), cv=5)
             grid_search.fit(X, y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
-            assert param_grid is not None
+            assert params_grid is not None
             param_list = []
-            for param_name, param_values in param_grid.items():
+            for param_name, param_values in params_grid.items():
                 if isinstance(param_values, list):
                     param_list.append((param_name, param_values))
                 elif isinstance(param_values, tuple) and len(param_values) == 2:
                     param_list.append((param_name, param_values))
                 else:
-                    raise ValueError("Unsupported parameter type in param_grid. Expected list or tuple of size 2.")
+                    raise ValueError("Unsupported parameter type in params_grid. Expected list or tuple of size 2.")
                 
             # Configure the parameter space for BayesSearchCV
             param_space = {}
@@ -262,7 +198,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar'):
+    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25)):
         """
         Display the importance of features using feature permutation.
         
@@ -272,14 +208,13 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - names: Names of the features.
         - outname : Name of the test set
         - dir_output: Directory to save the plot.
-        - mode : moustache or bar.
+        - mode : mustache (boxplot) or bar.
         """
         result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
         importances = result.importances_mean
-        indices = np.argsort(importances)[::-1]
-        
+        indices = importances.argsort()
         if mode == 'bar':
-            plt.figure(figsize=(50,25))
+            plt.figure(figsize=figsize)
             plt.title(f"Permutation importances {self.name}")
             plt.bar(range(len(importances)), importances[indices], align="center")
             plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
@@ -288,9 +223,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.tight_layout()
             plt.savefig(Path(dir_output) / f"{outname}_permutation_importances_{mode}.png")
             plt.close('all')
-        elif mode == 'moustache':
-            plt.figure(figsize=(50,25))
-            plt.boxplot(importances[indices].T, vert=False, whis=10)
+        elif mode == 'mustache' or mode == 'boxplot':
+            plt.figure(figsize=figsize)
+            plt.boxplot(importances[indices].T, vert=False, whis=1.5)
             plt.title(f"Permutation Importances {self.name}")
             plt.axvline(x=0, color="k", linestyle="--")
             plt.xlabel(f"Decrease in {self._get_scorer()} score")
@@ -299,8 +234,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.close('all')
         else:
             raise ValueError(f'Unknown {mode} for ploting features importance but feel free to add new one')
+        
+        save_object(importances, f"{outname}_permutation_importances.pkl", dir_output)
 
-    def _plot_param_influence(self, param, dir_output):
+    def _plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
         Display the influence of parameters on model performance.
         
@@ -318,7 +255,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         means = self.cv_results_['mean_test_score']
         stds = self.cv_results_['std_test_score']
 
-        plt.figure(figsize=(25,25))
+        plt.figure(figsize=figsize)
         plt.title(f"Influence of {param} on performance for {self.name}")
         plt.xlabel(param)
         plt.ylabel("Mean score")
@@ -327,3 +264,86 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         plt.tight_layout()
         plt.savefig(Path(dir_output) / f"{self.name}_{param}_influence.png")
         plt.close('all')
+
+class MeanFeaturesModel(Model):
+    def __init__(self):
+        self.mean_ = None
+    
+    def fit(self, X, y=None):
+        # Calculer la moyenne des features
+        #self.mean_ = np.mean(X, axis=0)
+        #return self
+        pass
+    
+    def predict(self, X):
+        # Retourner la moyenne des features
+        return np.mean(X, axis=1)
+    
+    def predict_proba(self, X):
+        A = np.ones(X.shape[0]) - X[:, 0]
+        B = np.ones(X.shape[0]) - X[:, 1]
+
+        return 1 - (A * B)
+    
+class ModelTree(Model):
+    def __init__(self, model, loss='log_loss', name='ModelTree'):
+        """
+        Initialize the ModelTree class.
+        
+        Parameters:
+        - model: The base model to use (must follow the sklearn API and support tree plotting).
+        - name: The name of the model.
+        - loss: Loss function to use ('log_loss', 'hinge_loss', etc.).
+        """
+        super().__init__(model, loss, name)
+
+    def plot_tree(self, feature_names=None, class_names=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20,20)):
+        """
+        Plot a tree for tree-based models.
+        
+        Parameters:
+        - feature_names: Names of the features.
+        - class_names: Names of the classes (for classification tasks).
+        - filled: Whether to color the nodes to reflect the majority class or value.
+        - outname: Name of the output file.
+        - dir_output: Directory to save the plot.
+        """
+        if isinstance(self.best_estimator_, DecisionTreeClassifier) or isinstance(self.best_estimator_, DecisionTreeRegressor):
+            # Plot for DecisionTree
+            plt.figure(figsize=figsize)
+            sklearn_plot_tree(self.best_estimator_, feature_names=feature_names, class_names=class_names, filled=filled)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, RandomForestClassifier) or isinstance(self.best_estimator_, RandomForestRegressor):
+            # Plot for RandomForest - only the first tree
+            plt.figure(figsize=figsize)
+            sklearn_plot_tree(self.best_estimator_.estimators_[0], feature_names=feature_names, class_names=class_names, filled=filled)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, XGBClassifier) or isinstance(self.best_estimator_, XGBRegressor):
+            # Plot for XGBoost
+            plt.figure(figsize=figsize)
+            xgb_plot_tree(self.best_estimator_, num_trees=0)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, LGBMClassifier) or isinstance(self.best_estimator_, LGBMRegressor):
+            # Plot for LightGBM
+            plt.figure(figsize=figsize)
+            lgb_plot_tree(self.best_estimator_, tree_index=0, figsize=figsize, show_info=['split_gain', 'internal_value', 'internal_count', 'leaf_count'])
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, NGBClassifier) or isinstance(self.best_estimator_, NGBRegressor):
+            # Plot for NGBoost - not directly supported, but you can plot the base learner
+            if hasattr(self.best_estimator_, 'learners_'):
+                learner = self.best_estimator_.learners_[0][0]
+                if hasattr(learner, 'tree_'):
+                    plt.figure(figsize=figsize)
+                    sklearn_plot_tree(learner, feature_names=feature_names, class_names=class_names, filled=filled)
+                    plt.savefig(Path(dir_output) / f"{outname}.png")
+                    plt.close('all')
+                else:
+                    raise AttributeError("The base learner of NGBoost does not support tree plotting.")
+            else:
+                raise AttributeError("The chosen NGBoost model does not support tree plotting.")
+        else:
+            raise AttributeError("The chosen model does not support tree plotting.")
