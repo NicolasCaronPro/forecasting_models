@@ -308,13 +308,13 @@ class ModelTree(Model):
         if isinstance(self.best_estimator_, DecisionTreeClassifier) or isinstance(self.best_estimator_, DecisionTreeRegressor):
             # Plot for DecisionTree
             plt.figure(figsize=figsize)
-            sklearn_plot_tree(self.best_estimator_, feature_names=feature_names, class_names=class_names, filled=filled)
+            sklearn_plot_tree(self.best_estimator_, feature_names=features_name, class_names=class_names, filled=filled)
             plt.savefig(Path(dir_output) / f"{outname}.png")
             plt.close('all')
         elif isinstance(self.best_estimator_, RandomForestClassifier) or isinstance(self.best_estimator_, RandomForestRegressor):
             # Plot for RandomForest - only the first tree
             plt.figure(figsize=figsize)
-            sklearn_plot_tree(self.best_estimator_.estimators_[0], feature_names=feature_names, class_names=class_names, filled=filled)
+            sklearn_plot_tree(self.best_estimator_.estimators_[0], feature_names=features_name, class_names=class_names, filled=filled)
             plt.savefig(Path(dir_output) / f"{outname}.png")
             plt.close('all')
         elif isinstance(self.best_estimator_, XGBClassifier) or isinstance(self.best_estimator_, XGBRegressor):
@@ -335,7 +335,7 @@ class ModelTree(Model):
                 learner = self.best_estimator_.learners_[0][0]
                 if hasattr(learner, 'tree_'):
                     plt.figure(figsize=figsize)
-                    sklearn_plot_tree(learner, feature_names=feature_names, class_names=class_names, filled=filled)
+                    sklearn_plot_tree(learner, feature_names=features_name, class_names=class_names, filled=filled)
                     plt.savefig(Path(dir_output) / f"{outname}.png")
                     plt.close('all')
                 else:
