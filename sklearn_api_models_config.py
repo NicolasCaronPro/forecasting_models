@@ -4,6 +4,7 @@ if __name__ == '__main__':
     from sklearn.datasets import make_regression
     from sklearn.model_selection import train_test_split
     import logging
+    import argparse
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
@@ -223,61 +224,110 @@ def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeCl
         return DecisionTreeClassifier(**params)
     
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(
+    prog='Test code',
+    description='',
+    )
+    parser.add_argument('-test_id', '--test_id', type=str, help='Test id')
+    args = parser.parse_args()
+    test_id = args.test_id
+
     check_and_create_path(Path('./Test'))
 
     X, y = make_regression(n_samples=1000, n_features=10, noise=0.1, random_state=42)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    ############################## XGBOOST TEST ###########################################
-    params = {
-            'objective':'reg:squarederror',
-            'verbosity':0,
-            'early_stopping_rounds':None,
-            'learning_rate' :0.01,
-            'min_child_weight' : 5.0,
-            'max_depth' : 6,
-            'max_delta_step' : 1.0,
-            'subsample' : 0.3,
-            'colsample_bytree' : 0.8,
-            'colsample_bylevel': 0.8,
-            'reg_lambda' : 10.5,
-            'reg_alpha' : 0.9,
-            'n_estimators' : 10000,
-            'random_state': 42,
-            'tree_method':'hist',
-        }
-    
-    params_grid = {
-            'max_depth': [1,2,5,10,15],
-        }
-    
-    name = 'xgboost_test'
-    task_type = 'regression'
-    device='cpu'
-    loss = 'rmse'
-    check_and_create_path(Path('./Test') / name)
+    logger.info(f'Test : {test_id}')
+    if test_id == '1':
+        ############################## XGBOOST TEST ###########################################
+        params = {
+                'objective':'reg:squarederror',
+                'verbosity':0,
+                'early_stopping_rounds':None,
+                'learning_rate' :0.01,
+                'min_child_weight' : 5.0,
+                'max_depth' : 6,
+                'max_delta_step' : 1.0,
+                'subsample' : 0.3,
+                'colsample_bytree' : 0.8,
+                'colsample_bylevel': 0.8,
+                'reg_lambda' : 10.5,
+                'reg_alpha' : 0.9,
+                'n_estimators' : 10000,
+                'random_state': 42,
+                'tree_method':'hist',
+            }
+        
+        grid_params = {
+                'max_depth': [1,2,5,10,15],
+            }
+        
+        name = 'xgboost_test'
+        task_type = 'regression'
+        device='cpu'
+        loss = 'rmse'
+        check_and_create_path(Path('./Test') / name)
 
-    logger.info(f'Configuration du modèle XGBoost pour la {task_type} sur : {device} avec une loss {loss}')
-    model = get_model(type='xgboost', name=name, device=device, task_type=task_type, params=params, loss='rmse')
+        logger.info(f'Configuration du modèle XGBoost pour la {task_type} sur : {device} avec une loss {loss}')
+        model = get_model(type='xgboost', name=name, device=device, task_type=task_type, params=params, loss='rmse')
 
-    logger.info('Fit du modèle avec les données d entraînement')
-    model.fit(X_train, y_train, optimization='grid', params_grid=params_grid, fit_params={})
+        logger.info('Fit du modèle avec les données d entraînement')
+        model.fit(X_train, y_train, optimization='grid', grid_params=grid_params, fit_params={})
 
-    logger.info('Prédiction avec les données de test')
-    predictions = model.predict(X_test)
+        logger.info('Prédiction avec les données de test')
+        predictions = model.predict(X_test)
 
-    logger.info('Si le modèle est de type arbre, tracer l arbre')
-    if isinstance(model, ModelTree):
+        logger.info('Si le modèle est de type arbre, tracer l arbre')
+        if isinstance(model, ModelTree):
+            feature_names = [f"feature_{i}" for i in range(X_train.shape[1])]
+            model.plot_tree(feature_names=feature_names, outname="xgboost", dir_output=Path("./Test") / name, figsize=(50,25))
+
+        logger.info('Afficher les résultats')
+        logger.info(f"Sample predictions: {predictions[:10]}")
+
+        logger.info('Afficher l importance des caractéristiques')
+        model.plot_features_importance(X_train, y_train, feature_names, "xgboost_importance", Path("./Test") / name)
+
+        param_test = 'max_depth'
+        logger.info(f'Afficher l influence d un paramètre {param_test}')
+        if hasattr(model, 'cv_results_') and model.cv_results_ is not None:
+            model.plot_param_influence(param_test, Path("./Test") / name)
+
+    elif test_id == '2':
+    ################################ FUSION ########################################
+        name = 'fusion_mode'
+        check_and_create_path(Path('./Test') / name)
+        # Usage example:
+        logger.info('Initialize base models')
+        xgb_model = Model(XGBRegressor(), loss='rmse', name='xgb')
+        lgb_model = Model(LGBMRegressor(), loss='rmse', name='lgb')
+        ngb_model = Model(NGBRegressor(Dist=Normal, Score=LogScore), loss='rmse', name='ngb')
+
+        logger.info('Initialize fusion model')
+        fusion_model = ModelFusion([xgb_model, lgb_model, ngb_model], LinearRegression(), loss='rmse', name='fusion_rf')
+
+        logger.info('Fit the fusion model')
+        fusion_model.fit([X_train, X_train, X_train], [y_train, y_train, y_train], y_train,
+                        optimization_list='skip', 
+                        grid_params_list=None)
+        
+        predictions = fusion_model.predict([X_test, X_test, X_test])
+        plt.figure(figsize=(15,15))
+        plt.plot(y, label='y')
+        plt.plot(predictions, label='predictions')
+        plt.legend()
+        plt.savefig(Path('./Test') / name / 'predictions.png')
+        
         feature_names = [f"feature_{i}" for i in range(X_train.shape[1])]
-        model.plot_tree(feature_names=feature_names, outname="xgboost", dir_output=Path("./Test") / name, figsize=(50,25))
 
-    logger.info('Afficher les résultats')
-    logger.info(f"Sample predictions: {predictions[:10]}")
+        logger.info('Afficher l importance des caractéristiques')
+        fusion_model.plot_features_importance(X_set=[X_train, X_train, X_train], y_set=y_train, names=feature_names,
+                                              outname="train_importance", dir_output=Path("./Test") / name, mode='bar', figsize=(50,25))
 
-    logger.info('Afficher l importance des caractéristiques')
-    model._plot_features_importance(X_train, y_train, feature_names, "xgboost_importance", Path("./Test") / name)
-
-    param_test = 'max_depth'
-    logger.info(f'Afficher l influence d un paramètre {param_test}')
-    if hasattr(model, 'cv_results_') and model.cv_results_ is not None:
-        model._plot_param_influence(param_test, Path("./Test") / name)
+        logger.info('Afficher l importance des caractéristiques de chaque modèle')
+        fusion_model.plot_features_importance_list(X_list=[X_train, X_train, X_train], y_list=[y_train, y_train, y_train],
+                                                   names_list=[feature_names, feature_names, feature_names], outname="train", dir_output=Path("./Test") / name,
+                                                   mode='bar', figsize=(50,25))
+    else:
+        raise ValueError(f'{test_id} Unknowed')
