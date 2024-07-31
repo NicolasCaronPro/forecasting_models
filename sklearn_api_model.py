@@ -37,14 +37,14 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
 
-    def fit(self, X, y, optimization='skip', params_grid=None, fit_params={}):
+    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
         
         Parameters:
         - X: Training data.
         - y: Labels for the training data.
-        - params_grid: Parameters to optimize.
+        - grid_params: Parameters to optimize.
         - optimization: Optimization method to use ('grid' or 'bayes').
         - fit_params: Additional parameters for the fit function.
         """
@@ -53,21 +53,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         # Train the final model with all selected features
         if optimization == 'grid':
-            assert params_grid is not None
-            grid_search = GridSearchCV(self.best_estimator_, params_grid, scoring=self._get_scorer(), cv=5)
+            assert grid_params is not None
+            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self._get_scorer(), cv=5)
             grid_search.fit(X, y, **fit_params)
             self.best_estimator_ = grid_search.best_estimator_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
-            assert params_grid is not None
+            assert grid_params is not None
             param_list = []
-            for param_name, param_values in params_grid.items():
+            for param_name, param_values in grid_params.items():
                 if isinstance(param_values, list):
                     param_list.append((param_name, param_values))
                 elif isinstance(param_values, tuple) and len(param_values) == 2:
                     param_list.append((param_name, param_values))
                 else:
-                    raise ValueError("Unsupported parameter type in params_grid. Expected list or tuple of size 2.")
+                    raise ValueError("Unsupported parameter type in grid_params. Expected list or tuple of size 2.")
                 
             # Configure the parameter space for BayesSearchCV
             param_space = {}
@@ -198,7 +198,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25)):
+    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25), limit=10):
         """
         Display the importance of features using feature permutation.
         
@@ -212,7 +212,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
         importances = result.importances_mean
-        indices = importances.argsort()
+        indices = importances.argsort()[:limit]
         if mode == 'bar':
             plt.figure(figsize=figsize)
             plt.title(f"Permutation importances {self.name}")
@@ -235,7 +235,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f'Unknown {mode} for ploting features importance but feel free to add new one')
         
-        save_object(importances, f"{outname}_permutation_importances.pkl", dir_output)
+        save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
     def _plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """

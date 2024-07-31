@@ -247,7 +247,7 @@ if __name__ == '__main__':
             'tree_method':'hist',
         }
     
-    params_grid = {
+    grid_params = {
             'max_depth': [1,2,5,10,15],
         }
     
@@ -261,7 +261,7 @@ if __name__ == '__main__':
     model = get_model(type='xgboost', name=name, device=device, task_type=task_type, params=params, loss='rmse')
 
     logger.info('Fit du modèle avec les données d entraînement')
-    model.fit(X_train, y_train, optimization='grid', params_grid=params_grid, fit_params={})
+    model.fit(X_train, y_train, optimization='grid', grid_params=grid_params, fit_params={})
 
     logger.info('Prédiction avec les données de test')
     predictions = model.predict(X_test)
