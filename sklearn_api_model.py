@@ -3,6 +3,7 @@ from xgboost import XGBClassifier, XGBRegressor
 from ngboost import NGBClassifier, NGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.svm import SVR, SVC
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
 from xgboost import plot_tree as xgb_plot_tree
@@ -51,7 +52,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.X_train = X
         self.y_train = y
 
-        # Train the final model with all selected features
+                # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self._get_scorer(), cv=5)
@@ -78,7 +79,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
-            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self._get_scorer(), cv=5)
+            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=5)
             bayes_search.fit(X, y, **fit_params)
             self.best_estimator_ = bayes_search.best_estimator_
             self.cv_results_ = bayes_search.cv_results_
@@ -181,7 +182,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         
         return self
     
-    def _get_scorer(self):
+    def get_scorer(self):
         """
         Return the scoring function based on the chosen loss function.
         """
@@ -219,7 +220,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.bar(range(len(importances)), importances[indices], align="center")
             plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
             plt.xlim([-1, len(importances)])
-            plt.ylabel(f"Decrease in {self._get_scorer()} score")
+            plt.ylabel(f"Decrease in {self.get_scorer()} score")
             plt.tight_layout()
             plt.savefig(Path(dir_output) / f"{outname}_permutation_importances_{mode}.png")
             plt.close('all')
@@ -228,7 +229,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.boxplot(importances[indices].T, vert=False, whis=1.5)
             plt.title(f"Permutation Importances {self.name}")
             plt.axvline(x=0, color="k", linestyle="--")
-            plt.xlabel(f"Decrease in {self._get_scorer()} score")
+            plt.xlabel(f"Decrease in {self.get_scorer()} score")
             plt.tight_layout()
             plt.savefig(Path(dir_output) / f"{outname}_permutation_importances_{mode}.png")
             plt.close('all')
@@ -237,7 +238,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
-    def _plot_param_influence(self, param, dir_output, figsize=(25,25)):
+    def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
         Display the influence of parameters on model performance.
         
@@ -336,6 +337,230 @@ class ModelTree(Model):
                 if hasattr(learner, 'tree_'):
                     plt.figure(figsize=figsize)
                     sklearn_plot_tree(learner, feature_names=features_name, class_names=class_names, filled=filled)
+                    plt.savefig(Path(dir_output) / f"{outname}.png")
+                    plt.close('all')
+                else:
+                    raise AttributeError("The base learner of NGBoost does not support tree plotting.")
+            else:
+                raise AttributeError("The chosen NGBoost model does not support tree plotting.")
+        else:
+            raise AttributeError("The chosen model does not support tree plotting.")
+
+class ModelFusion(Model):
+    def __init__(self, model_list, model, loss='log_loss', name='ModelFusion'):
+        """
+        Initialize the ModelFusion class.
+
+        Parameters:
+        ----------
+        - model_list : list
+            A list of models to use as base learners.
+        - model : object
+            The model to use for the fusion.
+        - loss : str, optional (default='log_loss')
+            Loss function to use ('log_loss', 'hinge_loss', etc.).
+        - name : str, optional (default='ModelFusion')
+            The name of the model.
+        """
+        super().__init__(model, loss, name)
+        self.model_list = model_list
+
+    def fit(self, X_list, y_list, y, optimization_list='skip', grid_params_list=None, fit_params_list=None, fit_params=None, grid_params=None, deep=True):
+        """
+        Train the fusion model on the data using the predictions from the base models.
+
+        Parameters:
+        ----------
+        - X_list : list of np.array
+            List of training data for each base model.
+        - y_list : list of np.array
+            List of labels for the training data for each base model.
+        - y : np.array
+            Labels for the training data of the fusion model.
+        - optimization_list : str or list of str, optional (default='skip')
+            List of optimization methods to use ('grid', 'bayes', or 'skip') for each base model.
+        - grid_params_list : list of dict, optional
+            List of parameters to optimize for each base model.
+        - fit_params_list : list of dict, optional
+            List of additional parameters for the fit function for each base model.
+        - fit_params : dict, optional
+            Additional parameters for the fit function of the fusion model.
+        - grid_params : dict, optional
+            Parameters to optimize for the fusion model.
+        - deep : bool, optional (default=True)
+            Whether to perform deep training on the base models.
+        """
+        base_predictions = []
+
+        for i, model in enumerate(self.model_list):
+            X = X_list[i]
+            y = y_list[i]
+
+            if deep:
+                optimization = optimization_list[i] if isinstance(optimization_list, list) else optimization_list
+                grid_params = grid_params_list[i] if grid_params_list else None
+                fit_params = fit_params_list[i] if fit_params_list else {}
+
+                model.fit(X, y, optimization=optimization, grid_params=grid_params, fit_params=fit_params)
+                base_predictions.append(model.predict(X))  # Use the last X_list for consistency
+
+        # Stack predictions to form new feature set
+        stacked_predictions = np.column_stack(base_predictions)
+
+        # Fit the fusion model
+        super().fit(stacked_predictions, y, optimization='skip', grid_params=grid_params, fit_params=fit_params)
+
+    def predict(self, X):
+        """
+        Predict labels for input data.
+
+        Parameters:
+        ----------
+        - X : list of np.array
+            Data to predict labels for.
+
+        Returns:
+        -------
+        - np.array
+            Predicted labels.
+        """
+        base_predictions = [model.predict(X[i]) for i, model in enumerate(self.model_list)]
+        stacked_predictions = np.column_stack(base_predictions)
+        return self.best_estimator_.predict(stacked_predictions)
+
+    def predict_proba(self, X):
+        """
+        Predict probabilities for input data.
+
+        Parameters:
+        ----------
+        - X : list of np.array
+            Data to predict probabilities for.
+
+        Returns:
+        -------
+        - np.array
+            Predicted probabilities.
+        """
+        base_predictions = [model.predict(X[i]) for i, model in enumerate(self.model_list)]
+        stacked_predictions = np.column_stack(base_predictions)
+        return self.best_estimator_.predict_proba(stacked_predictions)
+
+    def score(self, X, y, sample_weight=None):
+        """
+        Evaluate the model's performance.
+
+        Parameters:
+        ----------
+        - X : list of np.array
+            Input data.
+        - y : np.array
+            True labels.
+        - sample_weight : np.array, optional
+            Sample weights.
+
+        Returns:
+        -------
+        - float
+            The model's score on the provided data.
+        """
+        base_predictions = [model.predict(X[i]) for i, model in enumerate(self.model_list)]
+        stacked_predictions = np.column_stack(base_predictions)
+        return super().score(stacked_predictions, y, sample_weight)
+    
+    def plot_features_importance(self, X, y_list, y, names, outname, dir_output, mode='bar', figsize=(50,25), deep=True):
+        """
+        Display the importance of features using feature permutation.
+
+        Parameters:
+        ----------
+        - X : list of np.array
+            Data to evaluate feature importance.
+        - y_list : list of np.array
+            Corresponding labels for each base model.
+        - y : np.array
+            Labels for the fusion model.
+        - names : list
+            Names of the features.
+        - outname : str
+            Name of the test set.
+        - dir_output : Path
+            Directory to save the plot.
+        - mode : str, optional (default='bar')
+            Plot mode ('bar' or 'mustache').
+        - figsize : tuple, optional (default=(50, 25))
+            Figure size for the plot.
+        - deep : bool, optional (default=True)
+            Whether to perform deep plotting for base models.
+        """
+        if deep:
+            for i, model in enumerate(self.model_list):
+                model.plot_features_importance(X[i], y_list[i], names[i], f'{model.name}_{outname}', dir_output, mode=mode, figsize=figsize)
+        base_predictions = [model.predict(X[i]) for i, model in enumerate(self.model_list)]
+        stacked_predictions = np.column_stack(base_predictions)
+        names = [f'{model.name}_prediction' for model in self.model_list]
+        super().plot_features_importance(stacked_predictions, y, names, outname, dir_output, mode=mode, figsize=figsize)
+
+    def plot_tree(self, deep, features_name_list=None, class_names_list=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20,20)):
+        """
+        Plot each model from the model list.
+
+        Parameters:
+        ----------
+        - deep : bool, optional (default=True)
+            Whether to perform deep plotting for base models.
+        - features_name_list : list of list, optional
+            List of feature names for each base model.
+        - class_names_list : list of list, optional
+            List of class names for each base model.
+        - filled : bool, optional (default=True)
+            Whether to color the nodes to reflect the majority class or value.
+        - outname : str, optional (default='tree_plot')
+            Name of the output file.
+        - dir_output : Path, optional (default='.')
+            Directory to save the plots.
+        - figsize : tuple, optional (default=(20, 20))
+            Figure size for the plot.
+        """
+        if deep:
+            for i, model in enumerate(self.model_list):
+                if isinstance(model, ModelTree):
+                    model.plot_tree(outname=f'{model.name}_tree_plot', dir_output=dir_output,
+                                    figsize=figsize, filled=filled, features_name=features_name_list[i], class_names=class_names_list[i])
+        
+        features_name = [f'{model.name}_prediction' for model in self.model_list]
+                
+        if isinstance(self.best_estimator_, DecisionTreeClassifier) or isinstance(self.best_estimator_, DecisionTreeRegressor):
+            # Plot for DecisionTree
+            plt.figure(figsize=figsize)
+            sklearn_plot_tree(self.best_estimator_, feature_names=features_name, class_names=None, filled=filled)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, RandomForestClassifier) or isinstance(self.best_estimator_, RandomForestRegressor):
+            # Plot for RandomForest - only the first tree
+            plt.figure(figsize=figsize)
+            sklearn_plot_tree(self.best_estimator_.estimators_[0], feature_names=features_name, class_names=None, filled=filled)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, XGBClassifier) or isinstance(self.best_estimator_, XGBRegressor):
+            # Plot for XGBoost
+            plt.figure(figsize=figsize)
+            xgb_plot_tree(self.best_estimator_, num_trees=0)
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, LGBMClassifier) or isinstance(self.best_estimator_, LGBMRegressor):
+            # Plot for LightGBM
+            plt.figure(figsize=figsize)
+            lgb_plot_tree(self.best_estimator_, tree_index=0, figsize=figsize, show_info=['split_gain', 'internal_value', 'internal_count', 'leaf_count'])
+            plt.savefig(Path(dir_output) / f"{outname}.png")
+            plt.close('all')
+        elif isinstance(self.best_estimator_, NGBClassifier) or isinstance(self.best_estimator_, NGBRegressor):
+            # Plot for NGBoost - not directly supported, but you can plot the base learner
+            if hasattr(self.best_estimator_, 'learners_'):
+                learner = self.best_estimator_.learners_[0][0]
+                if hasattr(learner, 'tree_'):
+                    plt.figure(figsize=figsize)
+                    sklearn_plot_tree(learner, feature_names=features_name, class_names=None, filled=filled)
                     plt.savefig(Path(dir_output) / f"{outname}.png")
                     plt.close('all')
                 else:
