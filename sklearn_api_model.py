@@ -217,7 +217,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if mode == 'bar':
             plt.figure(figsize=figsize)
             plt.title(f"Permutation importances {self.name}")
-            plt.bar(range(len(importances[importances])), importances[indices], align="center")
+            plt.bar(range(len(importances[indices])), importances[indices], align="center")
             plt.xticks(range(len(importances[importances])), [names[i] for i in indices], rotation=90)
             plt.xlim([-1, len(importances[importances])])
             plt.ylabel(f"Decrease in {self.get_scorer()} score")
