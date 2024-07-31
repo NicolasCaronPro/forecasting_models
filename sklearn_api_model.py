@@ -213,7 +213,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
         importances = result.importances_mean
-        indices = importances.argsort()[:limit]
+        indices = importances.argsort()[-limit:]
         if mode == 'bar':
             plt.figure(figsize=figsize)
             plt.title(f"Permutation importances {self.name}")
