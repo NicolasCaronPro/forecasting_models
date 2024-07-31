@@ -217,7 +217,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if mode == 'bar':
             plt.figure(figsize=figsize)
             plt.title(f"Permutation importances {self.name}")
-            plt.bar(range(len(importances)), importances[indices], align="center")
+            plt.bar(range(len(importances)), importances, align="center")
             plt.xticks(range(len(importances)), [names[i] for i in indices], rotation=90)
             plt.xlim([-1, len(importances)])
             plt.ylabel(f"Decrease in {self.get_scorer()} score")
@@ -226,7 +226,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.close('all')
         elif mode == 'mustache' or mode == 'boxplot':
             plt.figure(figsize=figsize)
-            plt.boxplot(importances[indices].T, vert=False, whis=1.5)
+            plt.boxplot(importances.T, vert=False, whis=1.5)
             plt.title(f"Permutation Importances {self.name}")
             plt.axvline(x=0, color="k", linestyle="--")
             plt.xlabel(f"Decrease in {self.get_scorer()} score")
