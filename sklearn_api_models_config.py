@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
 from forecasting_models.sklearn_api_model import *
 
-def get_model(type, name, device, task_type, loss='log_loss', params=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, loss='log_loss', params=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -33,20 +33,20 @@ def get_model(type, name, device, task_type, loss='log_loss', params=None) -> Un
     """
     model = None
 
-    if type == 'xgboost':
+    if model_type == 'xgboost':
         model = config_xgboost(device, task_type, params)
-    elif type == 'lightgbm':
+    elif model_type == 'lightgbm':
         model = config_lightGBM(device, task_type, params)
-    elif type == 'ngboost':
+    elif model_type == 'ngboost':
         model = config_ngboost(device, task_type, params)
-    elif type == 'svm':
+    elif model_type == 'svm':
         model = config_svm(device, task_type, params)
-    elif type == 'random_forest':
+    elif model_type == 'random_forest':
         model = config_random_forest(device, task_type, params)
-    elif type == 'decision_tree':
+    elif model_type == 'decision_tree':
         model = config_decision_tree(device, task_type, params)
     else:
-        raise ValueError(f"Unrecognized model: {type}")
+        raise ValueError(f"Unrecognized model: {model_type}")
     
     # Check if the model is a tree-based model
     tree_based_models = (DecisionTreeClassifier, DecisionTreeRegressor, 
@@ -318,15 +318,15 @@ if __name__ == '__main__':
         plt.legend()
         plt.savefig(Path('./Test') / name / 'predictions.png')
         
-        feature_names = [f"feature_{i}" for i in range(X_train.shape[1])]
+        features_name = [f"feature_{i}" for i in range(X_train.shape[1])]
 
         logger.info('Afficher l importance des caractéristiques')
-        fusion_model.plot_features_importance(X_set=[X_train, X_train, X_train], y_set=y_train, names=feature_names,
+        fusion_model.plot_features_importance(X_set=[X_train, X_train, X_train], y_set=y_train, names=features_name,
                                               outname="train_importance", dir_output=Path("./Test") / name, mode='bar', figsize=(50,25))
 
         logger.info('Afficher l importance des caractéristiques de chaque modèle')
         fusion_model.plot_features_importance_list(X_list=[X_train, X_train, X_train], y_list=[y_train, y_train, y_train],
-                                                   names_list=[feature_names, feature_names, feature_names], outname="train", dir_output=Path("./Test") / name,
+                                                   names_list=[features_name, features_name, features_name], outname="train", dir_output=Path("./Test") / name,
                                                    mode='bar', figsize=(50,25))
     else:
         raise ValueError(f'{test_id} Unknowed')

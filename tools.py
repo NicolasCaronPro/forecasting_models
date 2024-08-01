@@ -60,6 +60,8 @@ def explore_features(model, features : np.array, X : np.array, y : np.array, w :
     features_importance = []
     selected_features_ = []
     base_score = -math.inf
+    count_max = 30
+    c = 0
     for i, fet in enumerate(features):
         
         selected_features_.append(fet)
@@ -80,10 +82,14 @@ def explore_features(model, features : np.array, X : np.array, y : np.array, w :
         # Si le score ne s'améliore pas, on retire la variable de la liste
         if single_feature_score <= base_score:
             selected_features_.pop(-1)
+            c += 1
         else:
-            print(f'With {fet} : {base_score} -> {single_feature_score}')
+            print(f'With {fet} number {i}: {base_score} -> {single_feature_score}')
             base_score = single_feature_score
+            c = 0
 
+        if c > count_max:
+            break
         features_importance.append(single_feature_score)
 
     return np.asarray(selected_features_)
