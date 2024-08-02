@@ -53,31 +53,35 @@ def explore_parameters(model,
 
     return res
 
-def explore_features(model, features : np.array, X : np.array, y : np.array, w : np.array,
-                          X_val=None, y_val=None, w_val=None,
-                          X_test=None, y_test=None, w_test=None):
+def explore_features(model,
+                    features,
+                    df_train,
+                    df_val,
+                    df_test,
+                    weight_col,
+                    target):
     
     features_importance = []
     selected_features_ = []
     base_score = -math.inf
-    count_max = 30
+    count_max = 50
     c = 0
     for i, fet in enumerate(features):
         
         selected_features_.append(fet)
 
-        X_train_single = X[:, selected_features_]
+        X_train_single = df_train[selected_features_]
 
         fitparams={
-                'eval_set':[(X_train_single, y), (X_val[:, selected_features_], y_val)],
-                'sample_weight' : w,
+                'eval_set':[(X_train_single, df_train[target]), (df_val[selected_features_], df_val[target])],
+                'sample_weight' : df_train[weight_col],
                 'verbose' : False
                 }
 
-        model.fit(X=X_train_single, y=y, fit_params=fitparams)
+        model.fit(X=X_train_single, y=df_train[target], fit_params=fitparams)
 
         # Calculer le score avec cette seule caractéristique
-        single_feature_score = model.score(X_test[:, selected_features_], y_test, sample_weight=w_test)
+        single_feature_score = model.score(df_test[selected_features_], df_test[target], sample_weight=df_test[weight_col])
 
         # Si le score ne s'améliore pas, on retire la variable de la liste
         if single_feature_score <= base_score:
@@ -89,10 +93,11 @@ def explore_features(model, features : np.array, X : np.array, y : np.array, w :
             c = 0
 
         if c > count_max:
+            print(f'Score didn t improove for {c} features, we break')
             break
         features_importance.append(single_feature_score)
 
-    return np.asarray(selected_features_)
+    return selected_features_
 
 def check_and_create_path(path: Path):
     """

@@ -279,14 +279,14 @@ if __name__ == '__main__':
 
         logger.info('Si le modèle est de type arbre, tracer l arbre')
         if isinstance(model, ModelTree):
-            feature_names = [f"feature_{i}" for i in range(X_train.shape[1])]
-            model.plot_tree(feature_names=feature_names, outname="xgboost", dir_output=Path("./Test") / name, figsize=(50,25))
+            features_name = [f"feature_{i}" for i in range(X_train.shape[1])]
+            model.plot_tree(features_name=features_name, outname="xgboost", dir_output=Path("./Test") / name, figsize=(50,25))
 
         logger.info('Afficher les résultats')
         logger.info(f"Sample predictions: {predictions[:10]}")
 
         logger.info('Afficher l importance des caractéristiques')
-        model.plot_features_importance(X_train, y_train, feature_names, "xgboost_importance", Path("./Test") / name)
+        model.plot_features_importance(X_train, y_train, features_name, "xgboost_importance", Path("./Test") / name)
 
         param_test = 'max_depth'
         logger.info(f'Afficher l influence d un paramètre {param_test}')

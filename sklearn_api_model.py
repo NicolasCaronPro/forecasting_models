@@ -199,7 +199,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def _plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25), limit=10):
+    def plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25), limit=10):
         """
         Display the importance of features using feature permutation.
         
