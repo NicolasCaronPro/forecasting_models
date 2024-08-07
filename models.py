@@ -47,9 +47,7 @@ class GAT(torch.nn.Module):
 
     def forward(self, X, edge_index):
         edge_index = edge_index[:2]
-        x = X[:,:,-1]
         x = self.net(x, edge_index)
-        x = self.dropout(x)
         x = self.output(x)
         return x
 

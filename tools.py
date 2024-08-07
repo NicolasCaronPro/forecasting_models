@@ -64,7 +64,7 @@ def explore_features(model,
     features_importance = []
     selected_features_ = []
     base_score = -math.inf
-    count_max = 50
+    count_max = 70
     c = 0
     for i, fet in enumerate(features):
         
@@ -93,7 +93,7 @@ def explore_features(model,
             c = 0
 
         if c > count_max:
-            print(f'Score didn t improove for {c} features, we break')
+            print(f'Score didn t improove for {count_max} features, we break')
             break
         features_importance.append(single_feature_score)
 

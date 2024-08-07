@@ -20,6 +20,7 @@ from skopt.space import Integer, Real
 import logging
 import sys
 from typing import Union
+import shap
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
@@ -199,7 +200,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
         
-    def plot_features_importance(self, X_set, y_set, names, outname, dir_output, mode = 'bar', figsize=(50,25), limit=10):
+    def plot_features_importance(self, X_set, y_set, outname, dir_output, mode = 'bar', figsize=(50,25), limit=10):
         """
         Display the importance of features using feature permutation.
         
@@ -211,7 +212,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - dir_output: Directory to save the plot.
         - mode : mustache (boxplot) or bar.
         """
-        result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1)
+        names = X_set.columns
+        result = permutation_importance(self.best_estimator_, X_set, y_set, n_repeats=10, random_state=42, n_jobs=-1, scoring=self.get_scorer())
         importances = result.importances_mean
         indices = importances.argsort()[-limit:]
         if mode == 'bar':
@@ -237,6 +239,24 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             raise ValueError(f'Unknown {mode} for ploting features importance but feel free to add new one')
         
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
+
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None):
+        explainer = shap.Explainer(self.best_estimator_)
+        shap_values = explainer(df_set)
+        plt.figure(figsize=figsize)
+        if mode == 'bar':
+            shap.plots.bar(shap_values)
+        elif mode == 'beeswarm':
+            shap.plots.beeswarm(shap_values)
+        else:
+            raise ValueError(f'Unknow {mode} mode')
+        
+        plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
+        plt.close('all')
+        if samples is not None:
+            plt.figure(figsize=figsize)
+            shap.plots.force(shap_values[:samples])
+            plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
 
     def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
