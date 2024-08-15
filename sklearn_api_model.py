@@ -245,9 +245,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         shap_values = explainer(df_set)
         plt.figure(figsize=figsize)
         if mode == 'bar':
-            shap.plots.bar(shap_values)
+            shap.plots.bar(shap_values, show=False)
         elif mode == 'beeswarm':
-            shap.plots.beeswarm(shap_values)
+            shap.plots.beeswarm(shap_values, show=False)
         else:
             raise ValueError(f'Unknow {mode} mode')
         
@@ -257,6 +257,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.figure(figsize=figsize)
             shap.plots.force(shap_values[:samples])
             plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
+            plt.close()
 
     def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
