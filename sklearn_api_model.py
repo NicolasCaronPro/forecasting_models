@@ -257,7 +257,11 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.figure(figsize=figsize)
             shap.plots.force(shap_values[:samples])
             plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
+<<<<<<< Updated upstream
             plt.close()
+=======
+            plt.close('all')
+>>>>>>> Stashed changes
 
     def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """

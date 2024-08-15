@@ -53,7 +53,7 @@ def explore_parameters(model,
 
     return res
 
-def explore_features(model,
+"""def explore_features(model,
                     features,
                     df_train,
                     df_val,
@@ -97,7 +97,7 @@ def explore_features(model,
             break
         features_importance.append(single_feature_score)
 
-    return selected_features_
+    return selected_features_"""
 
 def check_and_create_path(path: Path):
     """

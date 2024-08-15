@@ -6,27 +6,31 @@ from forecasting_models.utils import *
 from conv_lstm import ConvLSTM
 
 class Zhang(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, end_channels, dropout, binary, device, n_sequences):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, binary, device, n_sequences):
         super(Zhang, self).__init__()
         torch.manual_seed(42)
 
-        self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=hidden_channels, kernel_size=(1,1)).to(device)
+        self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
-        self.conv1 = torch.nn.Conv2d(hidden_channels, 64, kernel_size=(3,3), padding=1, stride=1).to(device)
-        self.conv2 = torch.nn.Conv2d(64, 128, kernel_size=(3,3), padding=1, stride=1).to(device)
-        self.conv3 = torch.nn.Conv2d(128, end_channels, kernel_size=(3,3), padding=1, stride=1).to(device)
+        self.conv_list = []
+        self.fc_list = []
+
+        for i in range(len(conv_channels) - 1):
+            self.conv_list.append(torch.nn.Conv2d(in_channels=conv_channels[i], out_channels=conv_channels[i+1], kernel_size=(3,3), padding='same').to(device))
 
         self.pooling = torch.nn.MaxPool2d(kernel_size=(2,2), stride=2).to(device)
         self.activation = ReLU().to(device)
 
-        self.FC1 = torch.nn.Linear(in_features=end_channels * 6 * 6, out_features=128).to(device)
-        self.FC2 = torch.nn.Linear(in_features=128, out_features=64).to(device)
-        self.FC3 = torch.nn.Linear(in_features=64, out_features=32).to(device)
+        for i in range(len(fc_channels) - 1):
+            self.fc_list.append(torch.nn.Linear(in_features=fc_channels[i], out_features=fc_channels[i+1]).to(device))
 
-        self.FC4 = torch.nn.Linear(in_features=32, out_features=2 if binary else n_sequences).to(device)
-
-        self.output = torch.nn.Softmax(dim=1) if binary else Identity().to(device)
+        self.output = torch.nn.Softmax(dim=1) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
         self.drop = torch.nn.Dropout(dropout) if dropout > 0.0 else Identity().to(device)
+        self.conv_list = torch.nn.ModuleList(self.conv_list)
+        self.fc_list = torch.nn.ModuleList(self.fc_list)
+
+        self.num_conv = len(self.conv_list)
+        self.num_fc = len(self.fc_list)
     
     def forward(self, X, edge_index):
         # egde index not used, API configuration
@@ -36,37 +40,24 @@ class Zhang(torch.nn.Module):
         x = X[:,:,:,:,-1]
 
         # (B, H, W, F) -> (B, F, H, W)
-        x = x.permute(0,3,1,2)
+        #x = x.permute(0,3,1,2)
 
         # Bottleneck
         x = self.input(x)
 
-        # Series of convolution
-        x = self.conv1(x)
-        x = self.activation(x)
-        x = self.pooling(x)
+        for i, layer in enumerate(self.conv_list):
+            x = layer(x)
+            if i != self.num_conv - 1:
+                x = self.activation(x)
+                x = self.pooling(x)
 
-        x = self.conv2(x)
-        x = self.activation(x)
-        x = self.pooling(x)
-
-        x = self.conv3(x)
         x = x.reshape(x.shape[0], -1)
 
-        # Output
-        x = self.FC1(x)
-        x = self.drop(x)
-        x = self.activation(x)
-
-        x = self.FC2(x)
-        x = self.drop(x)
-        x = self.activation(x)
-        
-        x = self.FC3(x)
-        x = self.drop(x)
-        x = self.activation(x)
-
-        x = self.FC4(x)
+        for i, layer in enumerate(self.fc_list):
+            x = layer(x)
+            if i != self.num_fc - 1:
+                x = self.drop(x)
+                x = self.activation(x)
 
         output = self.output(x)
 
@@ -153,13 +144,13 @@ class DoubleConv(torch.nn.Module):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+        self.double_conv = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            torch.nn.BatchNorm2d(mid_channels),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
@@ -171,8 +162,8 @@ class Down(torch.nn.Module):
 
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
+        self.maxpool_conv = torch.nn.Sequential(
+            torch.nn.MaxPool2d(2),
             DoubleConv(in_channels, out_channels)
         )
 
@@ -188,10 +179,10 @@ class Up(torch.nn.Module):
 
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.up = torch.nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
             self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
         else:
-            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.up = torch.nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
             self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
@@ -211,7 +202,7 @@ class Up(torch.nn.Module):
 class OutConv(torch.nn.Module):
     def __init__(self, in_channels, out_channels):
         super(OutConv, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
         return self.conv(x)
