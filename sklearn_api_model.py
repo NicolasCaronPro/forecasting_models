@@ -245,6 +245,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             explainer = shap.Explainer(self.best_estimator_)
             shap_values = explainer(df_set)
             plt.figure(figsize=figsize)
+<<<<<<< Updated upstream
             if mode == 'bar':
                 shap.plots.bar(shap_values, show=False)
             elif mode == 'beeswarm':
@@ -265,6 +266,11 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         except Exception as e:
             print(f'Error {e} with shapley_additive_explanation')
             return
+=======
+            shap.plots.force(shap_values[:samples])
+            plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
+            plt.close('all')
+>>>>>>> Stashed changes
 
     def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
