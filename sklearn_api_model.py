@@ -241,27 +241,30 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
     def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None):
-        explainer = shap.Explainer(self.best_estimator_)
-        shap_values = explainer(df_set)
-        plt.figure(figsize=figsize)
-        if mode == 'bar':
-            shap.plots.bar(shap_values, show=False)
-        elif mode == 'beeswarm':
-            shap.plots.beeswarm(shap_values, show=False)
-        else:
-            raise ValueError(f'Unknow {mode} mode')
-        
-        plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
-        plt.close('all')
-        if samples is not None:
+        try:
+            explainer = shap.Explainer(self.best_estimator_)
+            shap_values = explainer(df_set)
             plt.figure(figsize=figsize)
-            shap.plots.force(shap_values[:samples])
-            plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
-<<<<<<< Updated upstream
-            plt.close()
-=======
+            if mode == 'bar':
+                shap.plots.bar(shap_values, show=False)
+            elif mode == 'beeswarm':
+                shap.plots.beeswarm(shap_values, show=False)
+            else:
+                raise ValueError(f'Unknow {mode} mode')
+            
+            plt.tight_layout()
+            plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
             plt.close('all')
->>>>>>> Stashed changes
+            if samples is not None:
+                plt.figure(figsize=figsize)
+                shap.plots.force(shap_values[:samples], show=False)
+                plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
+                plt.tight_layout()
+                plt.close('all')
+
+        except Exception as e:
+            print(f'Error {e} with shapley_additive_explanation')
+            return
 
     def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
