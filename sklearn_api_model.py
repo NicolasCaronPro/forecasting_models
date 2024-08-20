@@ -257,8 +257,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.close('all')
             if samples is not None and samples_name is not None:
                 for i, sample in enumerate(samples):
-                    plt.figure(figsize=figsize)
-                    shap.plots.force(shap_values[i], show=False)
+                    plt.figure(figsize=(30,15))
+                    shap.plots.force(shap_values[i], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
                     plt.tight_layout()
                     plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
                     plt.close('all')
