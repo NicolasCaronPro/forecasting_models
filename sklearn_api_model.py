@@ -240,7 +240,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
-    def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None):
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
         try:
             explainer = shap.Explainer(self.best_estimator_)
             shap_values = explainer(df_set)
@@ -255,12 +255,12 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             plt.tight_layout()
             plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
             plt.close('all')
-            if samples is not None:
-                for sample in samples:
+            if samples is not None and samples_name is not None:
+                for i, sample in enumerate(samples):
                     plt.figure(figsize=figsize)
                     shap.plots.force(shap_values[sample], show=False)
                     plt.tight_layout()
-                    plt.savefig(dir_output / 'sample' / f'{outname}_{sample}_shapley_additive_explanation.png')
+                    plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
                     plt.close('all')
 
         except Exception as e:
