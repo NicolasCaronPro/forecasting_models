@@ -242,7 +242,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
     def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
         try:
-            explainer = shap.Explainer(self.best_estimator_)
+            explainer = shap.Explainer(self.best_estimator_, check_additivity=False )
             shap_values = explainer(df_set)
             plt.figure(figsize=figsize)
             if mode == 'bar':
@@ -252,13 +252,17 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             else:
                 raise ValueError(f'Unknow {mode} mode')
             
+            shap_values_abs = np.abs(shap_values.values).mean(axis=0)  # Importance moyenne absolue des SHAP values
+            top_features_indices = np.argsort(shap_values_abs)[-10:]  # Indices des 10 plus importantes
+            self.top_features_ = df_set.columns[top_features_indices].tolist()  # Noms des 10 features
+            
             plt.tight_layout()
             plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
             plt.close('all')
             if samples is not None and samples_name is not None:
                 for i, sample in enumerate(samples):
                     plt.figure(figsize=(30,15))
-                    shap.plots.force(shap_values[i], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
+                    shap.plots.force(shap_values[sample], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
                     plt.tight_layout()
                     plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
                     plt.close('all')

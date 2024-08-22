@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import math
 import numpy as np
+import shap
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -109,3 +110,30 @@ def check_and_create_path(path: Path):
 
     if not path.exists():
         path.touch()
+
+def shapley_additive_explanation_neural_network(model, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+    try:
+        explainer = shap.DeepExplainer(model)
+        shap_values = explainer(df_set)
+        plt.figure(figsize=figsize)
+        if mode == 'bar':
+            shap.plots.bar(shap_values, show=False)
+        elif mode == 'beeswarm':
+            shap.plots.beeswarm(shap_values, show=False)
+        else:
+            raise ValueError(f'Unknow {mode} mode')
+        
+        plt.tight_layout()
+        plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
+        plt.close('all')
+        if samples is not None and samples_name is not None:
+            for i, sample in enumerate(samples):
+                plt.figure(figsize=(30,15))
+                shap.plots.force(shap_values[sample], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
+                plt.tight_layout()
+                plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
+                plt.close('all')
+
+    except Exception as e:
+        print(f'Error {e} with shapley_additive_explanation')
+        return

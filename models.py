@@ -47,7 +47,7 @@ class GAT(torch.nn.Module):
 
     def forward(self, X, edge_index):
         edge_index = edge_index[:2]
-        x = self.net(x, edge_index)
+        x = self.net(X, edge_index)
         x = self.output(x)
         return x
 
@@ -131,14 +131,13 @@ class DSTGCN(torch.nn.Module):
         
         super(DSTGCN, self).__init__()
         
-        num_of_layers = len(dilation_channels) - 1
+        num_of_layers = len(dilation_channels) - 1  
         
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
         self.n_sequences = n_sequences
         self.layers = []
 
         for i in range(num_of_layers):
-            concat = True if i < num_of_layers -1 else False
         
             self.layers.append(SpatioTemporalLayer(n_sequences=n_sequences,
                                             in_channels=dilation_channels[i],
