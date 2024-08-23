@@ -117,11 +117,16 @@ def shapley_additive_explanation_neural_network(model, df_set, outname, dir_outp
         shap_values = explainer(df_set)
         plt.figure(figsize=figsize)
         if mode == 'bar':
-            shap.plots.bar(shap_values, show=False)
+            shap.plots.bar(shap_values, show=False, max_display=20)
         elif mode == 'beeswarm':
-            shap.plots.beeswarm(shap_values, show=False)
+            shap.plots.beeswarm(shap_values, show=False, max_display=20)
         else:
             raise ValueError(f'Unknow {mode} mode')
+        
+        shap_values_abs = np.abs(shap_values.values).mean(axis=0)  # Importance moyenne absolue des SHAP values
+        top_features_indices = np.argsort(shap_values_abs)[-10:]  # Indices des 10 plus importantes
+        top_features_ = df_set.columns[top_features_indices].tolist()  # Noms des 10 features
+            
         
         plt.tight_layout()
         plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
@@ -136,4 +141,8 @@ def shapley_additive_explanation_neural_network(model, df_set, outname, dir_outp
 
     except Exception as e:
         print(f'Error {e} with shapley_additive_explanation')
-        return
+        if 'top_features_' in locals():
+            return top_features_
+        else:
+            return None
+    return top_features_
