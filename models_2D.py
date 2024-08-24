@@ -24,7 +24,8 @@ class Zhang(torch.nn.Module):
         for i in range(len(fc_channels) - 1):
             self.fc_list.append(torch.nn.Linear(in_features=fc_channels[i], out_features=fc_channels[i+1]).to(device))
 
-        self.output = torch.nn.Softmax(dim=1) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.last_linear = torch.nn.Linear(in_features=fc_channels[-1], out_features=2).to(device) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.output = torch.nn.Softmax(dim=1) if binary else torch.nn.Identity()
         self.drop = torch.nn.Dropout(dropout) if dropout > 0.0 else Identity().to(device)
         self.conv_list = torch.nn.ModuleList(self.conv_list)
         self.fc_list = torch.nn.ModuleList(self.fc_list)
@@ -59,6 +60,7 @@ class Zhang(torch.nn.Module):
                 x = self.drop(x)
                 x = self.activation(x)
 
+        x = self.last_linear(x)
         output = self.output(x)
 
         return output
