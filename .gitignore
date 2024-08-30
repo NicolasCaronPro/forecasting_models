@@ -171,3 +171,7 @@ cython_debug/
 
 # ARS data folder, should be created when instanciated
 data/
+
+# mlflow runs folder
+mlruns/
+mlartifacts/

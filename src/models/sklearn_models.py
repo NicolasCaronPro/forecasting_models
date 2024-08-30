@@ -26,7 +26,6 @@ import numpy as np
 import math
 from pathlib import Path
 
-
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
         """
@@ -99,6 +98,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
+        
+        # mlflow.sklearn.log_model(self.best_estimator_, self.name)
+        # mlflow.log_params(fit_params)
+        # mlflow.log_params(self.best_estimator_.get_params())
 
     def predict(self, X):
         """

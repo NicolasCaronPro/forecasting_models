@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..')))
-from src.features.air_quality_features import AirQualityFeatures, Config
+from src.features.traffic_features import TrafficFeatures, Config
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -16,8 +16,8 @@ config = Config({'max_nan': 0, "departement": "21", "root_dir": root_dir, "start
                  "stop": dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), "logger": logger, "step_unit": 'days', "step_value": 1,
                  "shift": 0, "rolling_window": 0})
 
-airQualityFeatures = AirQualityFeatures(config=config)
+trafficFeatures = TrafficFeatures(config=config)
 
-airQualityFeatures.fetch_data()
+trafficFeatures.fetch_data()
 
-airQualityFeatures.plot(freq='1M')
+trafficFeatures.plot(freq='1ME')

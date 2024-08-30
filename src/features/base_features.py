@@ -6,7 +6,6 @@ import datetime as dt
 import os
 import sys
 from src.configs.config import Config
-import src.encoders as enc
 from typing import List, Optional, Union
 from copy import deepcopy
 import matplotlib.pyplot as plt
@@ -145,9 +144,14 @@ class BaseFeature(object):
             self.max_nan = self.config.get('max_nan')
             assert isinstance(
                 self.max_nan, int), f"max_nan must be an integer, not {type(self.max_nan)}"
+            
+        self.categorical_columns = []
+        self.numeric_columns = []
+
+        self.date_min = None
+        self.date_max = None
 
 
-    @abc.abstractmethod
     def features_augmentation(self, features_names: Optional[List[str]] = None) -> None:
 
         if features_names is None:
@@ -185,6 +189,10 @@ class BaseFeature(object):
         # Identifier les colonnes catégorielles
         self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
         self.numeric_columns = self.data.select_dtypes(include=['number']).columns
+
+        # Définir les dates min et max (Période ou toutes les données sont disponibles)
+        self.date_min = self.data.dropna().index.min()
+        self.date_max = self.data.dropna().index.max()
 
     @abc.abstractmethod
     def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None) -> pd.DataFrame:
@@ -224,6 +232,8 @@ class BaseFeature(object):
             features_names = self.get_features_names()
         assert isinstance(
             features_names, list), f"features_names must be of type list, not {type(features_names)}"
+        
+        # print(self.data.index)
 
         return self.data.loc[(self.data.index >= from_date) & (self.data.index <= to_date), features_names]
 
@@ -304,27 +314,27 @@ class BaseFeature(object):
 
         aggregated_data = pd.concat([numeric_grouped_data, categorical_grouped_data], axis=1)
         
-        print(aggregated_data)
+        # print(aggregated_data)
     
 
         return aggregated_data
 
-    def plot_numeric_over_time(df, column, resample_freq='1D'):
-        df[column].resample(resample_freq).mean().plot(kind='line', figsize=(10, 6))
-        plt.title(f'{column} over time ({resample_freq})')
-        plt.xlabel('Date')
-        plt.ylabel(column)
-        plt.show()
+    # def plot_numeric_over_time(self, df, column, resample_freq='1D'):
+    #     df[column].resample(resample_freq).mean().plot(kind='line', figsize=(10, 6))
+    #     plt.title(f'{column} over time ({resample_freq})')
+    #     plt.xlabel('Date')
+    #     plt.ylabel(column)
+    #     plt.show()
 
-    # Exemple de graphique pour une colonne catégorique
-    def plot_categorical_over_time(df, column, resample_freq='1D'):
-        category_counts = df[column].resample(resample_freq).value_counts().unstack().fillna(0)
-        category_counts.plot(kind='bar', stacked=True, figsize=(10, 6))
-        plt.title(f'{column} over time ({resample_freq})')
-        plt.xlabel('Date')
-        plt.ylabel('Count')
-        plt.legend(title=column)
-        plt.show()
+    # # Exemple de graphique pour une colonne catégorique
+    # def plot_categorical_over_time(self, df, column, resample_freq='1D'):
+    #     category_counts = df[column].resample(resample_freq).value_counts().unstack().fillna(0)
+    #     category_counts.plot(kind='bar', stacked=True, figsize=(10, 6))
+    #     plt.title(f'{column} over time ({resample_freq})')
+    #     plt.xlabel('Date')
+    #     plt.ylabel('Count')
+    #     plt.legend(title=column)
+    #     plt.show()
 
     @abc.abstractmethod
     def plot(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
@@ -349,10 +359,10 @@ class BaseFeature(object):
         # Calcul du nombre total de figures nécessaires
         num_vars = len(self.data.columns)
 
-        print(self.data.columns)
+        # print(self.data.columns)
         num_figures = math.ceil(num_vars / max_subplots)
 
-        print(num_figures)
+        # print(num_figures)
 
         # # Identifier les colonnes catégorielles
         # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
@@ -367,10 +377,10 @@ class BaseFeature(object):
             start_idx = fig_num * max_subplots
             end_idx = min(start_idx + max_subplots, num_vars)
 
-            print(start_idx, end_idx)
+            # print(start_idx, end_idx)
 
             for i, column in enumerate(self.data.columns[start_idx:end_idx]):
-                print(column)
+                # print(column)
                 if column in self.categorical_columns:
                     col = grouped_data.loc[:, [col for col in grouped_data.columns if col.startswith(f'{column}__')]]
                     print(col)
@@ -382,7 +392,7 @@ class BaseFeature(object):
 
                 elif column in self.numeric_columns:
                     col = grouped_data[column]
-                    print(col)
+                    # print(col)
                     col.plot(kind='line', ax=axes[i])
                     axes[i].set_title(f'{column} over time ({freq})')
                     axes[i].set_xlabel('Date')
