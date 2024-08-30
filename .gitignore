@@ -175,3 +175,6 @@ data/
 # mlflow runs folder
 mlruns/
 mlartifacts/
+
+# geodata
+src/geolocalisation/
