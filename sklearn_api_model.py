@@ -21,6 +21,10 @@ import logging
 import sys
 from typing import Union
 import shap
+from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
+from skopt import BayesSearchCV
+from skopt.space import Real, Integer
+from skopt import Optimizer
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
@@ -39,7 +43,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
 
-    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}):
+    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
         
@@ -56,9 +60,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                 # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
-            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self._get_scorer(), cv=5)
+            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self._get_scorer(), cv=cv_folds, refit=False)
             grid_search.fit(X, y, **fit_params)
-            self.best_estimator_ = grid_search.best_estimator_
+            best_params = grid_search.best_estimator_.get_params()
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
             assert grid_params is not None
@@ -80,14 +84,30 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
-            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=5)
+            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, Refit=False)
             bayes_search.fit(X, y, **fit_params)
-            self.best_estimator_ = bayes_search.best_estimator_
+            best_params = bayes_search.best_estimator_.get_params()
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
+            best_params = self.best_estimator_.get_params()
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
+        print(best_params)
+        self.set_params(**best_params)
+        # Perform cross-validation with the specified number of folds
+        #cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        #cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
+        
+        # Fit the model on the entire dataset
+        self.best_estimator_.fit(X, y, **fit_params)
+        
+        # Save the best estimator as the one that had the highest cross-validation score
+        """self.cv_results_['mean_cv_score'] = np.mean(cv_scores)
+        self.cv_results_['std_cv_score'] = np.std(cv_scores)
+        self.cv_results_['cv_scores'] = cv_scores"""
+
+        print(self.cv_results_)
         
     def predict(self, X):
         """
