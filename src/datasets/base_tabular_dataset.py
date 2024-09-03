@@ -6,7 +6,8 @@ import src.features as ft
 from src.encoding.tools import create_encoding_pipeline
 import pandas as pd
 from sklearn.model_selection import train_test_split
-
+from copy import deepcopy
+import datetime as dt
 
 
 
@@ -23,6 +24,23 @@ class BaseTabularDataset(ft.BaseFeature):
 
         # Initialize each feature
         self.initialize_features(features_class)
+
+        self.enc_X_train = None
+        self.enc_X_val = None
+        self.enc_X_test = None
+
+        self.X_train = None
+        self.y_train = None
+        
+        self.X_val = None
+        self.y_val = None
+
+        self.X_test = None
+        self.y_test = None
+
+        self.train_set = None
+        self.val_set = None
+        self.test_set = None
 
     def initialize_features(self, features_class) -> None:
         """
@@ -70,11 +88,11 @@ class BaseTabularDataset(ft.BaseFeature):
         if self.train_set is not None:
             self.enc_X_train = pipeline.fit_transform(X=self.X_train, y=self.y_train)
 
-        if self.val_set is not None:
-            self.enc_X_val = pipeline.transform(self.X_val)
+            if self.val_set is not None:
+                self.enc_X_val = pipeline.transform(self.X_val)
 
-        if self.test_set is not None:
-            self.enc_X_test = pipeline.transform(self.X_test)
+            if self.test_set is not None:
+                self.enc_X_test = pipeline.transform(self.X_test)
 
     
     def create_X_y(self) -> None:
@@ -190,3 +208,16 @@ class BaseTabularDataset(ft.BaseFeature):
         self.train_set = train_set
         self.val_set = val_set
         return train_set, val_set, test_set
+    
+    def get_dataset(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None) -> 'BaseTabularDataset':
+        """
+        Get the data.
+
+        Parameters:
+        - None
+        """
+        filtered_data = self.get_data(from_date=from_date, to_date=to_date, features_names=features_names)
+
+        new_dataset = deepcopy(self)
+        new_dataset.data = filtered_data
+        return new_dataset

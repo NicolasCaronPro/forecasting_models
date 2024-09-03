@@ -97,7 +97,7 @@ encoders_dict = {
 
 processor = create_encoding_pipeline(encoders_dict)
 
-processor
+print(processor)
 
 processor.fit(data, y)
 processor

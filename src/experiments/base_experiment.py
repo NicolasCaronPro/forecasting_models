@@ -21,7 +21,7 @@ import mlflow.sklearn
 
 class BaseExperiment:
     def __init__(self, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[Model, List[Model]]] = None, config: Optional[ft.Config] = None) -> None:
-        self.experiment_name = name
+        self.experiment_name = 'exp_' + dataset.__class__.__name__ + '_' + '_'.join(dataset.targets) + '_' + model.name if name is None else name
         self.dataset = dataset
         self.model = model
         self.dir = pathlib.Path(os.path.abspath(os.path.join(os.path.dirname(__file__), f'../../data/experiments/{self.experiment_name}')))
@@ -31,7 +31,6 @@ class BaseExperiment:
         experiment = mlflow.set_experiment(self.experiment_name)
         # mlflow.create_experiment(self.experiment_name, artifact_location=self.dir)
         runs = mlflow.search_runs(experiment_names=[self.experiment_name])
-        print(runs)
         self.runs = len(runs)
 
 
@@ -46,26 +45,41 @@ class BaseExperiment:
         with mlflow.start_run(run_name='run_' + str(self.runs), ):
             self.logger.info("Running the experiment...")
 
-            self.dataset.fetch_data()
-            self.dataset.split(test_size=0.2, val_size=0.2)
-            self.dataset.create_X_y()
-            self.dataset.encode(pipeline=encoding_pipeline)
+
+            dataset = self.dataset.get_dataset(**dataset_config)
+            dataset.split(test_size=0.2, val_size=0.2)
+            dataset.create_X_y()
+            dataset.encode(pipeline=encoding_pipeline)
+
+
+
+            # TODO: Certain fit_params doivent être initialisés après la création des datasets
+            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val)]})
+            
             mlflow.log_params(dataset_config)
-            # mlflow.log_dict(self.dataset.config, "dataset_config")
-            # mlflow.log_dict(model_config, "model_config")
-            mlflow.log_params(model_config)
+            # for key, value in dataset_config.items():
+            #     mlflow.log_param(key, value)
+
+            # mlflow.log_params(model_config)
+            # for key, value in model_config.items():
+            #     mlflow.log_param(key, value)
             # mlflow.doctor()
-            self.fit(model_config)
-            self.score()
+
+            self.fit(model_config, dataset)
+            mlflow.log_params(self.model.get_params(deep=True))
+
+            self.score(dataset)
             self.runs += 1
 
-    def fit(self, model_config) -> None:
+    def fit(self, model_config, dataset: BaseTabularDataset) -> None:
         """
         Train the model.
 
         Parameters:
         - None
         """
+
+        # TODO: utiliser des kwargs pour les paramètres de model.fit
         self.logger.info("Training the model...")
         if 'optimization' in model_config:
             optimization = model_config['optimization']
@@ -82,12 +96,14 @@ class BaseExperiment:
         else:
             fit_params = {}
 
-        self.model.fit(self.dataset.enc_X_train, self.dataset.y_train, optimization=optimization, grid_params=grid_params, fit_params=fit_params)
-        mlflow.sklearn.log_model(self.model, "model_" + str(self.runs))
-        print(self.model.get_params(deep=True))
-        mlflow.log_params(self.model.get_params(deep=True))
+        if 'params' in model_config:
+            params = model_config['params']
+        else:
+            params = {}
 
-    def predict(self) -> None:
+        self.model.fit(dataset.enc_X_train, dataset.y_train, optimization=optimization, grid_params=grid_params, fit_params=fit_params, params=params)
+
+    def predict(self, dataset: BaseTabularDataset) -> None:
         """
         Test the model.
 
@@ -95,10 +111,10 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Testing the model...")
-        y_pred = self.model.predict(self.dataset.enc_X_test)
+        y_pred = self.model.predict(dataset.enc_X_test)
         return y_pred
     
-    def score(self) -> None:
+    def score(self, dataset: BaseTabularDataset) -> None:
         """
         Score the model.
 
@@ -106,7 +122,7 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Scoring the model...")
-        score = self.model.score(self.dataset.enc_X_test, self.dataset.y_test)
+        score = self.model.score(dataset.enc_X_test, dataset.y_test)
         scorer = self.model.get_scorer()
         mlflow.log_metric(scorer, score)
         return score

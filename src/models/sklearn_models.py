@@ -43,7 +43,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
 
-    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}):
+    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}, params={}):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
 
@@ -57,6 +57,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.X_train = X
         self.y_train = y
 
+        self.best_estimator_.set_params(**params)
         # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
@@ -170,8 +171,13 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Dictionary of parameters.
         """
-        params = {'model': self.best_estimator_,
-                  'loss': self.loss, 'name': self.name}
+        params = {
+                # 'model': self.best_estimator_,
+                # 'loss': self.loss,
+                # 'name': self.name
+            }
+        
+
         if deep and hasattr(self.best_estimator_, 'get_params'):
             deep_params = self.best_estimator_.get_params(deep=True)
             params.update(deep_params)

@@ -80,10 +80,16 @@ class HopitalFeatures(BaseFeature):
         self.data["HNFC_moving"] = self.data["HNFC_moving"].astype("category")
         # self.data["2_HNFC_moving"] = self.data['HNFC_moving'].copy().shift(1).astype("category")
 
+    def include_nb_hospitalized(self):
+        hospitalized = pd.read_excel(self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
+        self.data = self.data.join(hospitalized.set_index("date_entree")["nb_vers_hospit"])
+
     def fetch_data(self) -> None:
         """
         Fetches the data by adding the target and calling the parent's fetch_data method.
         """
         self.add_target()
         self.include_HNFC_moving()
+        self.include_nb_hospitalized()
         super().fetch_data()
+        print(self.data)

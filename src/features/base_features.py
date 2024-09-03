@@ -121,7 +121,7 @@ class BaseFeature(object):
             self.step_value, int), f"step_value must be an integer, not {type(self.step_value)}"
 
         self.start -= dt.timedelta(**{self.step_unit: self.step_value *
-                                   max(max(self.shift, self.rolling_window), 1)})
+                                   max(max(self.shift, self.rolling_window), 0)})
 
         assert 'stop' in self.config, "stop must be provided in config"
         self.stop = self.config.get('stop')

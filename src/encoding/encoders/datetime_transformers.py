@@ -53,9 +53,10 @@ def extract_date_features(X, date_columns=None, date_features_names=None, dtype=
                 date_features_names)]
 
         if dtype == 'category':
+            pd.set_option('future.no_silent_downcasting', True)
             for column in date_features.columns:
-                date_features[f"{column}_cat"] = date_features[column].astype(
-                    'category').fillna(np.nan)
+                date_features[f"{column}_cat"] = date_features[column].astype('category').infer_objects(copy=False)
+            
     return date_features
 
 
