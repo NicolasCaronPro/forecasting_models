@@ -136,7 +136,7 @@ class DSTGCN(torch.nn.Module):
         
         super(DSTGCN, self).__init__()
         
-        num_of_layers = len(dilation_channels) - 1  
+        num_of_layers = len(dilation_channels) - 1
         self.return_hidden=return_hidden
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
         self.n_sequences = n_sequences

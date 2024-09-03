@@ -247,7 +247,7 @@ def make_model(model_name, in_dim, scale, dropout, act_func, k_days, binary, dev
                     dropout=dropout, num_layers=num_lstm_layers)
 
     elif model_name == 'Zhang':
-        return Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
+        return Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 15 * 15, 128, 64, 32],
                      dropout=dropout, binary=binary, device=device, n_sequences=k_days)
 
     elif model_name == 'UNet':

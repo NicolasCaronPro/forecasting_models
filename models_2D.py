@@ -286,7 +286,6 @@ class ConvGraphNet(torch.nn.Module):
         output = self.output(x)
 
         return output
-    
 
 ###########################################################################################
 
