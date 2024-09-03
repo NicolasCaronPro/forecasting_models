@@ -6,9 +6,11 @@ from forecasting_models.utils import *
 from conv_lstm import ConvLSTM
 
 class Zhang(torch.nn.Module):
-    def __init__(self, in_channels, conv_channels, fc_channels, dropout, binary, device, n_sequences):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, binary, device, n_sequences, return_hidden=False):
         super(Zhang, self).__init__()
         torch.manual_seed(42)
+
+        self.return_hidden = return_hidden
 
         self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
@@ -24,13 +26,16 @@ class Zhang(torch.nn.Module):
         for i in range(len(fc_channels) - 1):
             self.fc_list.append(torch.nn.Linear(in_features=fc_channels[i], out_features=fc_channels[i+1]).to(device))
 
-        self.output = torch.nn.Softmax(dim=1) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.last_linear = torch.nn.Linear(in_features=fc_channels[-1], out_features=2).to(device) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.softmax = torch.nn.Softmax(dim=1)
         self.drop = torch.nn.Dropout(dropout) if dropout > 0.0 else Identity().to(device)
         self.conv_list = torch.nn.ModuleList(self.conv_list)
         self.fc_list = torch.nn.ModuleList(self.fc_list)
 
         self.num_conv = len(self.conv_list)
         self.num_fc = len(self.fc_list)
+
+        self.binary = binary
     
     def forward(self, X, edge_index):
         # egde index not used, API configuration
@@ -38,13 +43,11 @@ class Zhang(torch.nn.Module):
         # (B, H, W, F, T) -> (B, H, W, F)
 
         x = X[:,:,:,:,-1]
-
         # (B, H, W, F) -> (B, F, H, W)
         #x = x.permute(0,3,1,2)
 
         # Bottleneck
         x = self.input(x)
-
         for i, layer in enumerate(self.conv_list):
             x = layer(x)
             if i != self.num_conv - 1:
@@ -59,9 +62,16 @@ class Zhang(torch.nn.Module):
                 x = self.drop(x)
                 x = self.activation(x)
 
-        output = self.output(x)
+        x_linear = self.last_linear(x)
+        if self.binary:
+            output = self.softmax(x_linear)
+        else:
+            output = x_linear
 
-        return output
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
     
 ########################### ConvLTSM ####################################    
 
@@ -240,7 +250,7 @@ class UNet(torch.nn.Module):
         x = self.up4(x, x1)
         logits = self.outc(x)
         return logits
-
+    
     def use_checkpointing(self):
         self.inc = torch.utils.checkpoint(self.inc)
         self.down1 = torch.utils.checkpoint(self.down1)
@@ -252,3 +262,49 @@ class UNet(torch.nn.Module):
         self.up3 = torch.utils.checkpoint(self.up3)
         self.up4 = torch.utils.checkpoint(self.up4)
         self.outc = torch.utils.checkpoint(self.outc)
+
+#################################### ConvGraphNet #######################################
+
+class ConvGraphNet(torch.nn.Module):
+    def __init__(self, cnn_model, gnn_model,
+                 output_layer_in_channels, output_layer_end_channels, n_sequence, binary, device, act_func):
+        super(ConvGraphNet, self).__init__()
+        torch.manual_seed(42)
+
+        self.cnn_layer = cnn_model
+        self.gnn_layer = gnn_model
+
+        self.output = OutputLayer(in_channels=output_layer_in_channels, end_channels=output_layer_end_channels, n_steps=n_sequence, binary=binary, device=device, act_func=act_func)
+    
+    def forward(self, gnn_X, cnn_X, edge_index):
+
+        cnn_x = self.cnn_layer(cnn_X)
+        gnn_x = self.gnn_layer(gnn_X, edge_index)
+        
+        x = torch.concat(cnn_x, gnn_x)
+
+        output = self.output(x)
+
+        return output
+
+###########################################################################################
+
+class HybridConvGraphNet(torch.nn.Module):
+    def __init__(self, cnn_model, gnn_model,
+                 output_layer_in_channels, output_layer_end_channels, n_sequence, binary, device, act_func):
+        super(HybridConvGraphNet, self).__init__()
+        torch.manual_seed(42)
+
+        self.cnn_layer = cnn_model
+        self.gnn_layer = gnn_model
+
+        self.output = OutputLayer(in_channels=output_layer_in_channels, end_channels=output_layer_end_channels, n_steps=n_sequence, binary=binary, device=device, act_func=act_func)
+    
+    def forward(self, gnn_X, cnn_X, edge_index):
+
+        cnn_x = self.cnn_layer(cnn_X)
+        gnn_x = self.gnn_layer(cnn_x, edge_index)
+        
+        output = self.output(gnn_x)
+
+        return output

@@ -41,9 +41,9 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None)
         model = config_ngboost(device, task_type, params)
     elif model_type == 'svm':
         model = config_svm(device, task_type, params)
-    elif model_type == 'random_forest':
+    elif model_type == 'rf':
         model = config_random_forest(device, task_type, params)
-    elif model_type == 'decision_tree':
+    elif model_type == 'dt':
         model = config_decision_tree(device, task_type, params)
     else:
         raise ValueError(f"Unrecognized model: {model_type}")

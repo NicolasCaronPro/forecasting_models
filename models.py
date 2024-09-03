@@ -11,12 +11,13 @@ class GAT(torch.nn.Module):
                  bias,
                  device,
                  act_func,
-                 binary):
+                 binary, return_hidden=False):
             super(GAT, self).__init__()
 
             heads = [1] + heads
             num_of_layers = len(in_dim) - 1
             gat_layers = []
+            self.return_hidden = return_hidden
 
             self.dropout = torch.nn.Dropout(dropout) if dropout > 0.0 else torch.nn.Identity()
 
@@ -47,9 +48,12 @@ class GAT(torch.nn.Module):
 
     def forward(self, X, edge_index):
         edge_index = edge_index[:2]
-        x = self.net(x, edge_index)
-        x = self.output(x)
-        return x
+        x = self.net(X, edge_index)
+        output = self.output(x)
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
 
 ################################### ST_GATCN ######################################
     
@@ -127,18 +131,18 @@ class DSTGCN(torch.nn.Module):
                  dropout,
                  act_func,
                  device,
-                 binary):
+                 binary,
+                 return_hidden=False):
         
         super(DSTGCN, self).__init__()
         
         num_of_layers = len(dilation_channels) - 1
-        
+        self.return_hidden=return_hidden
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
         self.n_sequences = n_sequences
         self.layers = []
 
         for i in range(num_of_layers):
-            concat = True if i < num_of_layers -1 else False
         
             self.layers.append(SpatioTemporalLayer(n_sequences=n_sequences,
                                             in_channels=dilation_channels[i],
@@ -163,7 +167,10 @@ class DSTGCN(torch.nn.Module):
                 skip = x + skip
         
         x = self.output(skip)
-        return x
+        if self.return_hidden:
+            return x, skip
+        else:
+            return x
 
 ################################# ST-GATCONV ###################################
     
@@ -249,10 +256,11 @@ class STGAT(torch.nn.Module):
                  hidden_channels,
                  end_channels,
                  dropout, heads, act_func, device,
-                 binary):
+                 binary, return_hidden=False):
         super(STGAT, self).__init__()
 
         num_of_layers = len(hidden_channels) - 1
+        self.return_hidden = return_hidden
 
         self.layers = []
         self.skip_layers = []
@@ -290,8 +298,10 @@ class STGAT(torch.nn.Module):
                 skip = s + skip
         
         x = self.output(skip)
-        return x
-
+        if self.return_hidden:
+            return x, skip
+        else:
+            return x
 
 ###################################### ST-GCN #####################################################
 
@@ -339,9 +349,9 @@ class STGCN(torch.nn.Module):
                  hidden_channels,
                  end_channels,
                  dropout, act_func, device,
-                 binary):
+                 binary, return_hidden=False):
         super(STGCN, self).__init__()
-    
+        self.return_hidden = return_hidden
         num_of_layers = len(hidden_channels) - 1
         self.layers = []
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
@@ -372,7 +382,11 @@ class STGCN(torch.nn.Module):
                 skip = x + skip
         
         x = self.output(skip)
-        return x
+        if self.return_hidden:
+            return x, skip
+        else:
+            return x
+
     
 ################################## SDSTGCN ###############################
 
@@ -408,12 +422,13 @@ class SDSTGCN(torch.nn.Module):
                  hidden_channels_spatial,
                  end_channels,
                  dropout, act_func, device,
-                 binary):
+                 binary, return_hidden=False):
         
         super(SDSTGCN, self).__init__()
 
         num_of_temporal_layers = len(hidden_channels_temporal) - 1
         num_of_spatial_layers = len(hidden_channels_spatial) - 1
+        self.return_hidden = return_hidden
 
         self.temporal_layers = []
         self.spatial_layers = []
@@ -450,11 +465,15 @@ class SDSTGCN(torch.nn.Module):
         for i, layer in enumerate(self.spatial_layers):
             xs = layer(xs, edge_index)
 
-        x = torch.cat((xs, xt))
+        xc = torch.cat((xs, xt))
 
-        x = self.output(x)
+        x = self.output(xc)
 
-        return x
+        if self.return_hidden:
+            return x, xc
+        else:
+            return x
+
     
 ################################## DGATCONV ####################################
 class GATLAYER(torch.nn.Module):
@@ -522,8 +541,10 @@ class ST_GATLSTM(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels,
                  residual_channels, end_channels, n_sequences, device, act_func,
                  heads, dropout, num_layers,
-                 binary, concat):
+                 binary, concat, return_hidden=False):
         super(ST_GATLSTM, self).__init__()
+        self.return_hidden = return_hidden
+
         self.n_sequences = n_sequences
 
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1).to(device)
@@ -555,17 +576,23 @@ class ST_GATLSTM(torch.nn.Module):
         x, _ = self.lstm(x, (h0, c0))
         
         x = torch.squeeze(x[:, -1, :])
-        x = self.gat(x, edge_index)
+        xg = self.gat(x, edge_index)
 
-        x = self.output(x)
+        x = self.output(xg)
 
-        return x
+        if self.return_hidden:
+            return x, xg
+        else:
+            return x
+
 ############################### LSTM ##################################
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, residual_channels, hidden_channels,
-                 end_channels, n_sequences, device, act_func, binary, dropout, num_layers):
+                 end_channels, n_sequences, device, act_func, binary, dropout, num_layers, return_hidden=False):
         super(LSTM, self).__init__()
+
+        self.return_hidden = return_hidden
 
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1).to(device)
 
@@ -587,9 +614,12 @@ class LSTM(torch.nn.Module):
         x = torch.movedim(x, 2, 1)
         x, _ = self.lstm(x, (h0, c0))
         x = torch.squeeze(x[:, -1, :])
-        x = self.output(x)
+        output = self.output(x)
 
-        return x
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
 
 ############################### GraphSAGE ##################################
     

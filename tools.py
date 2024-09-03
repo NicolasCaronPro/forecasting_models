@@ -5,6 +5,9 @@ from pathlib import Path
 import os
 import math
 import numpy as np
+import shap
+from forecasting_models.models import *
+from forecasting_models.models_2D import *
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -109,3 +112,183 @@ def check_and_create_path(path: Path):
 
     if not path.exists():
         path.touch()
+
+def shapley_additive_explanation_neural_network(model, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+    try:
+        explainer = shap.DeepExplainer(model)
+        shap_values = explainer(df_set)
+        plt.figure(figsize=figsize)
+        if mode == 'bar':
+            shap.plots.bar(shap_values, show=False, max_display=20)
+        elif mode == 'beeswarm':
+            shap.plots.beeswarm(shap_values, show=False, max_display=20)
+        else:
+            raise ValueError(f'Unknow {mode} mode')
+        
+        shap_values_abs = np.abs(shap_values.values).mean(axis=0)  # Importance moyenne absolue des SHAP values
+        top_features_indices = np.argsort(shap_values_abs)[-10:]  # Indices des 10 plus importantes
+        top_features_ = df_set.columns[top_features_indices].tolist()  # Noms des 10 features
+            
+        
+        plt.tight_layout()
+        plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
+        plt.close('all')
+        if samples is not None and samples_name is not None:
+            for i, sample in enumerate(samples):
+                plt.figure(figsize=(30,15))
+                shap.plots.force(shap_values[sample], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
+                plt.tight_layout()
+                plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
+                plt.close('all')
+
+    except Exception as e:
+        print(f'Error {e} with shapley_additive_explanation')
+        if 'top_features_' in locals():
+            return top_features_
+        else:
+            return None
+    return top_features_
+
+def make_model(model_name, in_dim, scale, dropout, act_func, k_days, binary, device, num_lstm_layers):
+    """
+    Renvoie un modèle en fonction du nom spécifié.
+    
+    Parameters:
+    - model_name: Nom du modèle à retourner.
+    - in_dim: Dimensions d'entrée.
+    - scale: Non utilisé dans l'exemple, mais pourrait être utilisé pour la normalisation.
+    - dropout: Taux de dropout pour le modèle.
+    - act_func: Fonction d'activation.
+    - k_days: Nombre de séquences/jours pour la prédiction.
+    - binary: Indicateur pour un problème de classification binaire.
+
+    Returns:
+    - Modèle spécifié.
+    """
+
+    if model_name == 'GAT':
+        return GAT(in_dim=[in_dim, 64, 64, 64],
+                   heads=[4, 4, 2],
+                   dropout=dropout,
+                   bias=True,
+                   device=device,
+                   act_func=act_func,
+                   n_sequences=k_days + 1,
+                   binary=binary)
+
+    elif model_name == 'DST-GCN':
+        return DSTGCN(n_sequences=k_days+1,
+                      in_channels=in_dim,
+                      end_channels=64,
+                      dilation_channels=[256, 64],
+                      dilations=[1],
+                      dropout=dropout,
+                      act_func=act_func,
+                      device=device,
+                      binary=binary)
+    
+    elif model_name == 'ST-GAT':
+        return STGAT(n_sequences=k_days + 1,
+                     in_channels=in_dim,
+                     hidden_channels=[256, 64],
+                     end_channels=64,
+                     dropout=dropout, heads=6,
+                     act_func=act_func, device=device,
+                     binary=binary)
+
+    elif model_name == 'ST-GCN':
+        return STGCN(n_sequences=k_days + 1,
+                     in_channels=in_dim,
+                     hidden_channels=[256, 64],
+                     end_channels=64,
+                     dropout=dropout,
+                     act_func=act_func,
+                     device=device,
+                     binary=binary)
+
+    elif model_name == 'SDT-GCN':
+        return SDSTGCN(n_sequences=k_days + 1,
+                       in_channels=in_dim,
+                       hidden_channels_temporal=[256, 64],
+                       dilations=[1],
+                       hidden_channels_spatial=[256, 64],
+                       end_channels=64,
+                       dropout=dropout,
+                       act_func=act_func,
+                       device=device,
+                       binary=binary)
+
+    elif model_name == 'ATGN':
+        return TemporalGNN(in_channels=in_dim,
+                           hidden_channels=64,
+                           out_channels=64,
+                           n_sequences=k_days + 1,
+                           device=device,
+                           act_func=act_func,
+                           dropout=dropout,
+                           binary=binary)
+
+    elif model_name == 'ST-GATLSTM':
+        return ST_GATLSTM(in_channels=in_dim,
+                          hidden_channels=64,
+                          residual_channels=64,
+                          end_channels=32,
+                          n_sequences=k_days + 1,
+                          num_layers=num_lstm_layers,
+                          device=device, act_func=act_func, heads=6, dropout=dropout,
+                          concat=False,
+                          binary=binary)
+
+    elif model_name == 'LSTM':
+        return LSTM(in_channels=in_dim, residual_channels=64,
+                    hidden_channels=64,
+                    end_channels=32, n_sequences=k_days + 1,
+                    device=device, act_func=act_func, binary=binary,
+                    dropout=dropout, num_layers=num_lstm_layers)
+
+    elif model_name == 'Zhang':
+        return Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 15 * 15, 128, 64, 32],
+                     dropout=dropout, binary=binary, device=device, n_sequences=k_days)
+
+    elif model_name == 'UNet':
+        return UNet(n_channels=in_dim, n_classes=1, bilinear=False)
+
+    elif model_name == 'ConvGraphNet':
+        return ConvGraphNet(Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
+                                  dropout=dropout, binary=binary, device=device, n_sequences=k_days, return_hidden=True),
+                            STGCN(n_sequences=k_days + 1,
+                                  in_channels=in_dim,
+                                  hidden_channels=[256, 64],
+                                  end_channels=64,
+                                  dropout=dropout,
+                                  act_func=act_func,
+                                  device=device,
+                                  binary=binary,
+                                  return_hidden=True),
+                            output_layer_in_channels=64,
+                            output_layer_end_channels=32,
+                            n_sequence=k_days+1,
+                            binary=binary,
+                            device=device,
+                            act_func=act_func)
+    
+    elif model_name == 'HybridConvGraphNet':
+        return HybridConvGraphNet(Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
+                                  dropout=dropout, binary=binary, device=device, n_sequences=k_days, return_hidden=True),
+                                    GAT(n_dim=[in_dim, 64, 64, 64],
+                                    heads=[4, 4, 2],
+                                    dropout=dropout,
+                                    bias=True,
+                                    device=device,
+                                    act_func=act_func,
+                                    n_sequences=k_days + 1,
+                                    binary=binary),
+                                    output_layer_in_channels=64,
+                                    output_layer_end_channels=32,
+                                    n_sequence=k_days+1,
+                                    binary=binary,
+                                    device=device,
+                                    act_func=act_func)
+
+    else:
+        raise ValueError(f"Modèle '{model_name}' non reconnu.")
