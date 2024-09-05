@@ -19,15 +19,20 @@ from skopt import Optimizer, BayesSearchCV
 from skopt.space import Integer, Real
 import logging
 import sys
-from typing import Union
+from typing import List, Union
 import shap
+from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
+from skopt import BayesSearchCV
+from skopt.space import Real, Integer
+from skopt import Optimizer
 import matplotlib.pyplot as plt
 import numpy as np
 import math
 from pathlib import Path
+import pandas as pd
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
-    def __init__(self, model, loss='log_loss', name='Model'):
+    def __init__(self, model, loss: Union[str, List[str]] = 'log_loss', name='Model'):
         """
         Initialize the CustomModel class.
 
@@ -36,14 +41,14 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - name: The name of the model.
         - loss: Loss function to use ('log_loss', 'hinge_loss', etc.).
         """
-        self.best_estimator_ = model
+        self.best_estimator_: BaseEstimator = model
         self.name = self.best_estimator_.__class__.__name__ if name == 'Model' else name
         self.loss = loss
         self.X_train = None
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
 
-    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}, params={}):
+    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}, cv_folds=3):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
 
@@ -57,13 +62,13 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.X_train = X
         self.y_train = y
 
-        self.best_estimator_.set_params(**params)
+        # self.best_estimator_.set_params(**params)
         # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
-            grid_search = GridSearchCV(
-                self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=5)
+            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=True)
             grid_search.fit(X, y, **fit_params)
+            best_params = grid_search.best_estimator_.get_params()
             self.best_estimator_ = grid_search.best_estimator_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
@@ -85,25 +90,36 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     param_space[param_name] = Integer(
                         param_range[0], param_range[-1])
                 elif isinstance(param_range[0], float):
-                    param_space[param_name] = Real(
-                        param_range[0], param_range[-1], prior='log-uniform')
-
-            opt = Optimizer(param_space, base_estimator='GP',
-                            acq_func='gp_hedge')
-            bayes_search = BayesSearchCV(
-                self.best_estimator_, opt, scoring=self.get_scorer(), cv=5)
+                    param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
+                
+            opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
+            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, refit=True)
             bayes_search.fit(X, y, **fit_params)
+            best_params = bayes_search.best_estimator_.get_params()
             self.best_estimator_ = bayes_search.best_estimator_
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
+            best_params = self.best_estimator_.get_params()
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
+        # print(best_params)
+        self.set_params(**best_params)
+        # Perform cross-validation with the specified number of folds
+        # cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        # cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
         
-        # mlflow.sklearn.log_model(self.best_estimator_, self.name)
-        # mlflow.log_params(fit_params)
-        # mlflow.log_params(self.best_estimator_.get_params())
+        # Fit the model on the entire dataset
+        self.best_estimator_.fit(X, y, **fit_params)
+        
+        # Save the best estimator as the one that had the highest cross-validation score
+        """self.cv_results_['mean_cv_score'] = np.mean(cv_scores)
+        self.cv_results_['std_cv_score'] = np.std(cv_scores)
+        self.cv_results_['cv_scores'] = cv_scores"""
 
+        cv_resuluts_df = pd.DataFrame(self.cv_results_)
+        cv_resuluts_df.to_csv(f'{self.name}_cv_results.csv')
+        
     def predict(self, X):
         """
         Predict labels for input data.
@@ -145,21 +161,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - The model's score on the provided data.
         """
         y_pred = self.predict(X)
-        if self.loss == 'log_loss':
+        scores = {}
+        if 'log_loss' in self.loss:
             proba = self.predict_proba(X)
-            return -log_loss(y, proba)
-        elif self.loss == 'hinge_loss':
-            return hinge_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'accuracy':
-            return accuracy_score(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'mse':
-            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'rmse':
-            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
-        elif self.loss == 'rmsle':
-            return -math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
-        else:
-            raise ValueError(f"Unknown loss function: {self.loss}")
+            scores['neg_log_loss'] = -1*log_loss(y, proba)
+        if 'hinge_loss' in self.loss:
+            scores['hinge_loss'] = hinge_loss(y, y_pred)
+        if 'accuracy' in self.loss:
+            scores['accuracy'] = accuracy_score(y, y_pred)
+        if 'mse' in self.loss:
+            scores['neg_mean_squared_error'] = -1*mean_squared_error(y, y_pred)
+        if 'rmse' in self.loss:
+            scores['neg_root_mean_squared_error'] = -1*math.sqrt(mean_squared_error(y, y_pred))
+        if 'rmsle' in self.loss:
+            scores['neg_root_mean_squared_log_error'] = -1*math.sqrt(mean_squared_log_error(y, y_pred))
+        return scores
 
     def get_params(self, deep=True):
         """
@@ -209,18 +225,22 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         Return the scoring function based on the chosen loss function.
         """
-        if self.loss == 'log_loss':
-            return 'neg_log_loss'
-        elif self.loss == 'hinge_loss':
-            return 'hinge'
-        elif self.loss == 'accuracy':
-            return 'accuracy'
-        elif self.loss == 'rmse':
+
+        scorers = []
+        if 'log_loss' in self.loss:
+            scorers.append('neg_log_loss')
+        if 'hinge_loss' in self.loss:
+            scorers.append('hinge')
+        if 'accuracy' in self.loss:
+            scorers.append('accuracy')
+        if 'mse' in self.loss:
+            scorers.append('neg_mean_squared_error')
+        if 'rmse' in self.loss:
+            scorers.append('neg_root_mean_squared_error')
             return 'neg_root_mean_squared_error'
-        elif self.loss == 'rmsle':
-            return 'neg_root_mean_squared_log_error'
-        else:
-            raise ValueError(f"Unknown loss function: {self.loss}")
+        if 'rmsle' in self.loss:
+            scorers.append('neg_root_mean_squared_log_error')
+        return scorers
 
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """
@@ -263,45 +283,44 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                         f"{outname}_permutation_importances_{mode}.png")
             plt.close('all')
         else:
-            raise ValueError(
-                f'Unknown {mode} for ploting features importance but feel free to add new one')
+            raise ValueError(f'Unknown {mode} for ploting features importance but feel free to add new one')
+        
+        save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
-        save_object(
-            result, f"{outname}_permutation_importances.pkl", dir_output)
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+        dir_output = Path(dir_output)
+        check_and_create_path(dir_output / 'sample')
+        try:
+            explainer = shap.Explainer(self.best_estimator_)
+            shap_values = explainer(df_set, check_additivity=False)
+            plt.figure(figsize=figsize)
+            if mode == 'bar':
+                shap.plots.bar(shap_values, show=False, max_display=20)
+            elif mode == 'beeswarm':
+                shap.plots.beeswarm(shap_values, show=False, max_display=20)
+            else:
+                raise ValueError(f'Unknow {mode} mode')
+            
+            shap_values_abs = np.abs(shap_values.values).mean(axis=0)  # Importance moyenne absolue des SHAP values
+            top_features_indices = np.argsort(shap_values_abs)[-10:]  # Indices des 10 plus importantes
+            self.top_features_ = df_set.columns[top_features_indices].tolist()  # Noms des 10 features
+            
+            plt.tight_layout()
+            plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
+            plt.close('all')
+            if samples is not None and samples_name is not None:
+                for i, sample in enumerate(samples):
+                    plt.figure(figsize=(30,15))
+                    shap.plots.force(shap_values[sample], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
+                    plt.tight_layout()
+                    plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
+                    plt.close('all')
 
-#     def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None):
-#         try:
-#             explainer = shap.Explainer(self.best_estimator_)
-#             shap_values = explainer(df_set)
-#             plt.figure(figsize=figsize)
-# <<<<<<< Updated upstream
-#             if mode == 'bar':
-#                 shap.plots.bar(shap_values, show=False)
-#             elif mode == 'beeswarm':
-#                 shap.plots.besrc/__init__.pyeswarm(shap_values, show=False)
-#             else:
-#                 raise ValueError(f'Unknow {mode} mode')
+        except Exception as e:
+            print(f'Error {e} with shapley_additive_explanation')
+            return
 
-#             plt.tight_layout()
-#             plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
-#             plt.close('all')
-#             if samples is not None:
-#                 plt.figure(figsize=figsize)
-#                 shap.plots.force(shap_values[:samples], show=False)
-#                 plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
-#                 plt.tight_layout()
-#                 plt.close('all')
-
-#         except Exception as e:
-#             print(f'Error {e} with shapley_additive_explanation')
-#             return
-# =======
-#             shap.plots.force(shap_values[:samples])
-#             plt.savefig(dir_output / f'{outname}_{samples}_shapley_additive_explanation.png')
-#             plt.close('all')
-# >>>>>>> Stashed changes
-
-    def plot_param_influence(self, param, dir_output, figsize=(25, 25)):
+    def plot_param_influence(self, param, dir_output, figsize=(25,25)):
         """
         Display the influence of parameters on model performance.
 

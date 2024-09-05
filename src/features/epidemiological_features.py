@@ -81,9 +81,8 @@ class EpidemiologicalFeatures(BaseFeature):
 
         self.logger.info("Données sentinelles intégralement récupérées")
 
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_sentinelles()
-        super().fetch_data()
 
     def get_data(self, from_date: str | dt.datetime | None = None, to_date: str | dt.datetime | None = None, features_names: List[str] | None = None, region: str | None = None) -> pd.DataFrame:
         data = super().get_data(from_date, to_date, features_names)

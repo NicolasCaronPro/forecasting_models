@@ -140,6 +140,5 @@ class GoogleTrendFeatures(BaseFeature):
 
         return self.data
     
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_google_trends()
-        super().fetch_data()

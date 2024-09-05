@@ -137,6 +137,5 @@ class MeteorologicalFeatures(BaseFeature):
                 #         data[point] = copy.deepcopy(last_point)
         return self.data
 
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_weather()
-        super().fetch_data()

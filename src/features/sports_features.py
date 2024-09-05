@@ -22,6 +22,5 @@ class SportsCompetitionFeatures(BaseFeature):
         self.logger.info("Données de football intégrées")
         return self.data
     
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_foot()
-        super().fetch_data()

@@ -116,6 +116,5 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")
 
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.__include_air_quality()
-        super().fetch_data()

@@ -11,6 +11,8 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 import abc
 from sklearn.compose import make_column_transformer, make_column_selector
+import numpy as np
+from logging import Logger
 
 class BaseFeature(object):
     """
@@ -35,7 +37,7 @@ class BaseFeature(object):
     """
 
     __metaclass__ = abc.ABCMeta
-
+    
     @abc.abstractmethod
     def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
         """
@@ -49,7 +51,6 @@ class BaseFeature(object):
         # TODO: Est ce bien utile de passer le parent en paramètre ?
 
         self.name = self.__class__.__name__
-        print(f"Initialisation de la classe {self.name}")
 
         assert config is None or isinstance(
             config, Config), f"config must be of type Config, not {type(config)}"
@@ -66,10 +67,11 @@ class BaseFeature(object):
         self.parent = parent
 
         assert 'logger' in self.config, "logger must be provided in config"
-        self.logger = self.config.get('logger')
+        self.logger: Logger = self.config.get('logger')
         assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
         ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
 
+        self.logger.info(f"Initialisation de la classe {self.name}")
         assert 'root_dir' in self.config, "root_dir must be provided in config"
         self.data_dir = self.config.get("root_dir")
         assert isinstance(self.data_dir, str) or isinstance(self.data_dir, type(
@@ -151,6 +153,20 @@ class BaseFeature(object):
         self.date_min = None
         self.date_max = None
 
+        self.is_fetched = False
+        self.is_saved = False
+
+        # Check if the data is saved at the location "data_dir/data_{self.name}.feather"
+        if os.path.exists(self.data_dir / f'data_{self.name}.feather'):
+            self.data = pd.read_feather(self.data_dir / f'data_{self.name}.feather')
+            self.is_saved = True
+            self.is_fetched = True
+
+        # Décorateur pour fetch_data
+        # used to fetch data only if it's not already saved (then load it)
+        # then, save it if needed, format the data and set the is_fetched flag to True
+        self.fetch_data = self.fetch_decorator(self.fetch_data_function)
+
 
     def features_augmentation(self, features_names: Optional[List[str]] = None) -> None:
 
@@ -177,24 +193,49 @@ class BaseFeature(object):
         self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
         self.numeric_columns = self.data.select_dtypes(include=['number']).columns
 
+    def fetch_decorator(self, func):
+        def wrapper(*args, **kwargs):
+            if not self.is_saved:
+                self.logger.info(f"Fetching data for {self.name}...")
+
+                func(*args, **kwargs)
+
+                # if self.data.isnull().sum().sum() > self.max_nan:
+                #     raise ValueError(
+                #         f"Too many missing values in the data for {self.name}")
+                
+                save = True
+                if 'save' in kwargs:
+                    save = kwargs['save']
+
+                if save:
+                    self.save_data()
+            else:
+                self.logger.info(f"Data already saved for {self.name}, loading it...")
+                self.data = pd.read_feather(self.data_dir / f'data_{self.name}.feather')
+
+            # Identifier les colonnes catégorielles
+            self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
+            self.numeric_columns = self.data.select_dtypes(include=['number']).columns
+
+            # Définir les dates min et max (Période ou toutes les données sont disponibles)
+            self.date_min = self.data.dropna().index.min()
+            self.date_max = self.data.dropna().index.max()
+
+            self.is_fetched = True
+
+        return wrapper
+
     @abc.abstractmethod
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         """
         Récupère les données.
 
         Parameters:
         - None
         """
+        pass
 
-        # Identifier les colonnes catégorielles
-        self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
-        self.numeric_columns = self.data.select_dtypes(include=['number']).columns
-
-        # Définir les dates min et max (Période ou toutes les données sont disponibles)
-        self.date_min = self.data.dropna().index.min()
-        self.date_max = self.data.dropna().index.max()
-
-    @abc.abstractmethod
     def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Retourne les données.
@@ -237,7 +278,6 @@ class BaseFeature(object):
 
         return self.data.loc[(self.data.index >= from_date) & (self.data.index <= to_date), features_names]
 
-    @abc.abstractmethod
     def save_data(self, path: Optional[Union[str, pathlib.Path]] = None, filename: Optional[str] = None) -> None:
         """
         Sauvegarde les données.
@@ -245,7 +285,7 @@ class BaseFeature(object):
         Parameters:
         - None
         """
-
+        self.logger.info(f"Saving data for {self.name}...")
         if path is None:
             path = self.data_dir
         assert isinstance(path, str) or isinstance(
@@ -261,8 +301,8 @@ class BaseFeature(object):
             filename += '.feather'
 
         self.data.to_feather(path / filename)
+        self.is_saved = True
 
-    @abc.abstractmethod
     def get_features_names(self) -> List[str]:
         """
         Retourne les noms des features.
@@ -276,7 +316,6 @@ class BaseFeature(object):
 
         return self.data.columns.tolist()
 
-    @abc.abstractmethod
     def groupby(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
         """
         Groupe les données.
@@ -336,8 +375,11 @@ class BaseFeature(object):
     #     plt.legend(title=column)
     #     plt.show()
 
-    @abc.abstractmethod
-    def plot(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
+    def plot(self, from_date: Optional[Union[str, dt.datetime]] = None,
+             to_date: Optional[Union[str, dt.datetime]] = None,
+             features_names: Optional[List[str]] = None,
+             freq: str = '1D',
+             max_subplots: int = 4) -> pd.DataFrame:
         """
         Affiche les données.
 
@@ -352,9 +394,8 @@ class BaseFeature(object):
         #     data.iloc[:, i:i+5].plot()
         #     plt.show()
 
-        max_subplots = 4
-        num_cols = 2
-        num_rows = 2
+        num_rows = np.ceil(np.sqrt(max_subplots)).astype(int)
+        num_cols = np.ceil(max_subplots / num_rows).astype(int)
 
         # Calcul du nombre total de figures nécessaires
         num_vars = len(self.data.columns)
@@ -383,7 +424,7 @@ class BaseFeature(object):
                 # print(column)
                 if column in self.categorical_columns:
                     col = grouped_data.loc[:, [col for col in grouped_data.columns if col.startswith(f'{column}__')]]
-                    print(col)
+                    # print(col)
                     col.plot(kind='bar', stacked=True, ax=axes[i])
                     axes[i].set_title(f'{column} over time ({freq})')
                     axes[i].set_xlabel('Date')
@@ -407,7 +448,6 @@ class BaseFeature(object):
             plt.tight_layout()
             plt.show()
 
-    @abc.abstractmethod
     def dtypes(self) -> pd.Series:
         """
         Retourne les types des données.
@@ -421,7 +461,6 @@ class BaseFeature(object):
 
         return self.data.dtypes
 
-    @abc.abstractmethod
     def get_dtypes(self) -> List[str]:
         """
         Retourne les types des données.
@@ -435,7 +474,6 @@ class BaseFeature(object):
 
         return set(self.data.dtypes.tolist())
 
-    @abc.abstractmethod
     def describe(self) -> pd.DataFrame:
         """
         Retourne les statistiques descriptives des données.
@@ -449,7 +487,6 @@ class BaseFeature(object):
 
         return self.data.describe()
 
-    @abc.abstractmethod
     def info(self) -> pd.DataFrame:
         """
         Retourne les informations des données.
@@ -463,7 +500,6 @@ class BaseFeature(object):
 
         return self.data.info()
 
-    @abc.abstractmethod
     def head(self, n: int = 5) -> pd.DataFrame:
         """
         Retourne les premières lignes des données.
@@ -477,7 +513,6 @@ class BaseFeature(object):
 
         return self.data.head(n)
 
-    @abc.abstractmethod
     def tail(self, n: int = 5) -> pd.DataFrame:
         """
         Retourne les dernières lignes des données.
@@ -491,7 +526,6 @@ class BaseFeature(object):
 
         return self.data.tail(n)
 
-    @abc.abstractmethod
     def __str__(self) -> str:
         """
         Retourne une représentation de la classe.
@@ -505,7 +539,6 @@ class BaseFeature(object):
 
         return f"{self.name}({self.config})"
 
-    @abc.abstractmethod
     def __repr__(self) -> str:
         """
         Retourne une représentation de la classe.
@@ -519,7 +552,6 @@ class BaseFeature(object):
 
         return self.__str__()
 
-    @abc.abstractmethod
     def __len__(self) -> int:
         """
         Retourne la taille des données.
@@ -533,7 +565,6 @@ class BaseFeature(object):
 
         return len(self.data)
 
-    @abc.abstractmethod
     def __getitem__(self, key: str) -> pd.Series:
         """
         Retourne une colonne des données.

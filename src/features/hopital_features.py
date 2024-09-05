@@ -33,8 +33,11 @@ class HopitalFeatures(BaseFeature):
         etablissement (str): The name of the hospital.
     """
 
-    def __init__(self, config: Optional[Config] = None, parent: Optional[BaseFeature] = None) -> None:
+    def __init__(self, config: Optional[Config] = None, parent: Optional[BaseFeature] = None, include_emmergency_arrivals = True, include_nb_hospit = True, include_hnfc_moving = True) -> None:
         super().__init__(config, parent)
+        self.include_emmergency_arrivals = include_emmergency_arrivals
+        self.include_nb_hospit = include_nb_hospit
+        self.include_hnfc_moving = include_hnfc_moving
         assert 'etablissement' in self.config, "etablissement must be provided in config"
         self.etablissement = self.config.get('etablissement')
         assert isinstance(self.etablissement,
@@ -84,12 +87,17 @@ class HopitalFeatures(BaseFeature):
         hospitalized = pd.read_excel(self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
         self.data = self.data.join(hospitalized.set_index("date_entree")["nb_vers_hospit"])
 
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         """
         Fetches the data by adding the target and calling the parent's fetch_data method.
         """
-        self.add_target()
-        self.include_HNFC_moving()
-        self.include_nb_hospitalized()
-        super().fetch_data()
-        print(self.data)
+
+        if self.include_emmergency_arrivals:
+            self.add_target()
+        
+        if self.include_hnfc_moving:
+            self.include_HNFC_moving()
+
+        if self.include_nb_hospit:
+            self.include_nb_hospitalized()
+

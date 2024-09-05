@@ -122,7 +122,7 @@ class SociologicalFeatures(BaseFeature):
         self.data['ramadan'] = self.data.index.map(lambda x: 1 if convertdate.islamic.from_gregorian(x.year, x.month, x.day)[1] == 9 else 0).astype('category')
 
         
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         """
         Récupère les données.
         
@@ -132,5 +132,3 @@ class SociologicalFeatures(BaseFeature):
         self.include_holidays()
         self.include_lockdown()
         self.include_ramadan()
-
-        super().fetch_data()

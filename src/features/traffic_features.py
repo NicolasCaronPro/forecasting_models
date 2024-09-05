@@ -42,6 +42,5 @@ class TrafficFeatures(BaseFeature):
 
         # return features
     
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_trafic()
-        super().fetch_data()

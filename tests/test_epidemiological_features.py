@@ -19,5 +19,5 @@ config = Config({'max_nan': 0, "root_dir": root_dir, "start": dt.datetime.strpti
 epidemiologicalFeatures = EpidemiologicalFeatures(config)
 epidemiologicalFeatures.fetch_data()
 epidemiologicalFeatures.plot(freq='1ME')
-epidemiologicalFeatures.save_data()
+# epidemiologicalFeatures.save_data()
 print(epidemiologicalFeatures.get_data())

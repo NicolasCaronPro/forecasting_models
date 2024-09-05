@@ -32,9 +32,9 @@ baseTabularDataset = BaseTabularDataset(target_colomns='HopitalFeatures Total_CH
 
 baseTabularDataset.fetch_data()
 
-print(baseTabularDataset.data)
+# print(baseTabularDataset.data)
 
-# baseTabularDataset.plot(freq='1ME')
+baseTabularDataset.plot(freq='1ME', max_subplots=16)
 
 baseTabularDataset.data['date'] = baseTabularDataset.data.index
 

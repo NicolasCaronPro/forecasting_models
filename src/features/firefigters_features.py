@@ -59,7 +59,6 @@ class FireFightersFeatures(BaseFeature):
         grouped_df.to_csv(self.data_dir / "incendies_25.csv")
         self.data = pd.concat([self.data, grouped_df['nb_incendie']], axis=1)
     
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         self.include_pompier()
         self.include_fire()
-        super().fetch_data()

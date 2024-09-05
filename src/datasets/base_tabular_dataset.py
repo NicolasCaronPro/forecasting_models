@@ -25,22 +25,22 @@ class BaseTabularDataset(ft.BaseFeature):
         # Initialize each feature
         self.initialize_features(features_class)
 
-        self.enc_X_train = None
-        self.enc_X_val = None
-        self.enc_X_test = None
+        self.enc_X_train: pd.DataFrame = None
+        self.enc_X_val: pd.DataFrame = None
+        self.enc_X_test: pd.DataFrame = None
 
-        self.X_train = None
-        self.y_train = None
+        self.X_train: pd.DataFrame = None
+        self.y_train: pd.DataFrame = None
         
-        self.X_val = None
-        self.y_val = None
+        self.X_val: pd.DataFrame = None
+        self.y_val: pd.DataFrame = None
 
-        self.X_test = None
-        self.y_test = None
+        self.X_test: pd.DataFrame = None
+        self.y_test: pd.DataFrame = None
 
-        self.train_set = None
-        self.val_set = None
-        self.test_set = None
+        self.train_set: pd.DataFrame = None
+        self.val_set: pd.DataFrame = None
+        self.test_set: pd.DataFrame = None
 
     def initialize_features(self, features_class) -> None:
         """
@@ -50,10 +50,20 @@ class BaseTabularDataset(ft.BaseFeature):
         - None
         """
 
+        # Initialize each feature
         for feature_class in features_class:
+            # If the feature is a string, get the class from the features module
             if isinstance(feature_class, str):
                 feature_class = getattr(ft, feature_class)
-            feature = feature_class(config=self.config, parent=self)
+            
+            # If the feature is a class, instantiate it, otherwise if it's an instance, use it
+            if isinstance(feature_class, ft.BaseFeature):
+                feature = feature_class
+                feature.config = self.config
+                feature.parent = self
+            else:
+                feature = feature_class(config=self.config, parent=self)
+
             self.features.append(feature)
 
     def fetch_data(self) -> None:
@@ -67,7 +77,8 @@ class BaseTabularDataset(ft.BaseFeature):
         # Get data from each feature
         for feature in self.features:
             self.logger.info(f"Fetching data from {feature}")
-            feature.fetch_data()
+            if not feature.is_fetched:
+                feature.fetch_data()
             self.data = self.data.join(feature.data)
 
         # self.targets = self.data[self.targets]
@@ -79,7 +90,7 @@ class BaseTabularDataset(ft.BaseFeature):
         Encode les données.
 
         Parameters:
-        - pipeline: Pipeline
+        - pipeline: Pipeline - The pipeline to use for encoding the data
         """
         
         if pipeline is None:
@@ -112,7 +123,7 @@ class BaseTabularDataset(ft.BaseFeature):
         self.y_test = self.test_set[self.targets]
 
 
-    def split(self, test_size=None, train_size=None, val_size=None, random_state=None, shuffle=True, stratify=None):
+    def split(self, train_size=None, test_size=None, val_size=None, random_state=None, shuffle=True, stratify=None):
         """Split arrays or matrices into random train and test subsets.
 
         Quick utility that wraps input validation,
@@ -201,13 +212,13 @@ class BaseTabularDataset(ft.BaseFeature):
         train_val_set, test_set = train_test_split(self.data, test_size=test_size, train_size=train_size, random_state=random_state, shuffle=shuffle, stratify=stratify)
         self.train_set = train_val_set
         self.test_set = test_set
-        if val_size is None:
-            return train_val_set, test_set
+        self.val_set = None
         
-        train_set, val_set = train_test_split(train_val_set, test_size=val_size, train_size=train_size, random_state=random_state, shuffle=shuffle, stratify=stratify)
-        self.train_set = train_set
-        self.val_set = val_set
-        return train_set, val_set, test_set
+        if val_size is not None:     
+            train_set, val_set = train_test_split(train_val_set, test_size=val_size, train_size=train_size, random_state=random_state, shuffle=shuffle, stratify=stratify)
+            self.train_set = train_set
+            self.val_set = val_set
+        return self.train_set, self.val_set, self.test_set
     
     def get_dataset(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None) -> 'BaseTabularDataset':
         """
