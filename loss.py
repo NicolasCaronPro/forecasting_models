@@ -2,13 +2,6 @@ from tools import *
 from torch.nn.modules.loss import _Loss
 from torch.functional import F
 
-class WeightedMSELoss(_Loss):
-    def __init__(self, size_average=None, reduce=None, reduction='none'):
-        super(WeightedMSELoss, self).__init__(size_average, reduce, reduction)
-
-    def forward(self, input, target, weights):
-        return ((F.mse_loss(input, target, reduction='none')) * weights).sum() / weights.sum()
-
 class PoissonLoss(nn.Module):
     def __init__(self):
         super(PoissonLoss, self).__init__()

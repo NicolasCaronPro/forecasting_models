@@ -308,7 +308,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         elif self.loss == 'rmsle':
             return 'neg_root_mean_squared_log_error'
         elif self.loss == 'poisson_loss':
-            return 'neg_mean_poisson_deviance
+            return 'neg_mean_poisson_deviance'
         elif self.loss == 'huber_loss':
             return 'neg_mean_squared_error'
         elif self.loss == 'log_cosh_loss':
