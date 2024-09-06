@@ -1,6 +1,6 @@
 import sys
 
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/models')
+sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
 
 from forecasting_models.utils import *
 from conv_lstm import ConvLSTM
@@ -278,7 +278,7 @@ class ConvGraphNet(torch.nn.Module):
     
     def forward(self, gnn_X, cnn_X, edge_index):
 
-        cnn_x = self.cnn_layer(cnn_X)
+        cnn_x = self.cnn_layer(cnn_X, edge_index)
         gnn_x = self.gnn_layer(gnn_X, edge_index)
         
         x = torch.concat(cnn_x, gnn_x)
@@ -302,9 +302,10 @@ class HybridConvGraphNet(torch.nn.Module):
     
     def forward(self, gnn_X, cnn_X, edge_index):
 
-        cnn_x = self.cnn_layer(cnn_X)
-        gnn_x = self.gnn_layer(cnn_x, edge_index)
-        
+        output_cnn, cnn_x = self.cnn_layer(cnn_X, edge_index)
+
+        output_gnn, gnn_x = self.gnn_layer(cnn_x, edge_index)
+
         output = self.output(gnn_x)
 
         return output

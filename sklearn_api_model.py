@@ -1,4 +1,4 @@
-from tools import *
+from forecasting_models.tools import *
 from xgboost import XGBClassifier, XGBRegressor
 from ngboost import NGBClassifier, NGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -29,6 +29,65 @@ import matplotlib.pyplot as plt
 import numpy as np
 import math
 from pathlib import Path
+
+# 1. Weighted MSE Loss
+def weighted_mse_loss(y_true, y_pred, sample_weights=None):
+    squared_error = (y_pred - y_true) ** 2
+    if sample_weights is not None:
+        return np.sum(squared_error * sample_weights) / np.sum(sample_weights)
+    else:
+        return np.mean(squared_error)
+
+# 2. Poisson Loss
+def poisson_loss(y_true, y_pred, sample_weights=None):
+    y_pred = np.clip(y_pred, 1e-8, None)  # Éviter log(0)
+    loss = y_pred - y_true * np.log(y_pred)
+    if sample_weights is not None:
+        return np.sum(loss * sample_weights) / np.sum(sample_weights)
+    else:
+        return np.mean(loss)
+
+# 3. RMSLE Loss
+def rmsle_loss(y_true, y_pred, sample_weights=None):
+    log_pred = np.log1p(y_pred)
+    log_true = np.log1p(y_true)
+    squared_log_error = (log_pred - log_true) ** 2
+    if sample_weights is not None:
+        return np.sqrt(np.sum(squared_log_error * sample_weights) / np.sum(sample_weights))
+    else:
+        return np.sqrt(np.mean(squared_log_error))
+
+# 4. RMSE Loss
+def rmse_loss(y_true, y_pred, sample_weights=None):
+    squared_error = (y_pred - y_true) ** 2
+    if sample_weights is not None:
+        return np.sqrt(np.sum(squared_error * sample_weights) / np.sum(sample_weights))
+    else:
+        return np.sqrt(np.mean(squared_error))
+
+# 5. Huber Loss
+def huber_loss(y_true, y_pred, delta=1.0):
+    error = y_pred - y_true
+    abs_error = np.abs(error)
+    quadratic = np.where(abs_error <= delta, 0.5 * error ** 2, delta * (abs_error - 0.5 * delta))
+    return np.mean(quadratic)
+
+# 6. Log-Cosh Loss
+def log_cosh_loss(y_true, y_pred):
+    error = y_pred - y_true
+    return np.mean(np.log(np.cosh(error)))
+
+# 7. Tukey's Biweight Loss
+def tukey_biweight_loss(y_true, y_pred, c=4.685):
+    error = y_pred - y_true
+    abs_error = np.abs(error)
+    mask = (abs_error <= c)
+    loss = (1 - (1 - (error / c) ** 2) ** 3) * mask
+    return np.mean((c ** 2 / 6) * loss)
+
+# 8. Exponential Loss
+def exponential_loss(y_true, y_pred):
+    return np.mean(np.exp(np.abs(y_pred - y_true)))
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
@@ -160,7 +219,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             proba = self.predict_proba(X)
             return -log_loss(y, proba)
         elif self.loss == 'hinge_loss':
-            return hinge_loss(y, y_pred, sample_weight=sample_weight)
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'accuracy':
             return accuracy_score(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'mse':
@@ -168,7 +227,17 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         elif self.loss == 'rmse':
             return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'rmsle':
-            return -math.sqrt(mean_squared_log_error(y, y_pred, sample_weight=sample_weight))
+            return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'poisson_loss':
+            return -poisson_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'huber_loss':
+            return -huber_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'log_cosh_loss':
+            return -log_cosh_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'tukey_biweight_loss':
+            return -tukey_biweight_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'exponential_loss':
+            return -exponential_loss(y, y_pred, sample_weight=sample_weight)
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
 
@@ -213,7 +282,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
     def get_scorer(self):
         """
-        Return the scoring function based on the chosen loss function.
+        Return the scoring function as a string based on the chosen loss function.
         """
         if self.loss == 'log_loss':
             return 'neg_log_loss'
@@ -221,13 +290,24 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             return 'hinge'
         elif self.loss == 'accuracy':
             return 'accuracy'
+        elif self.loss == 'mse':
+            return 'neg_mean_squared_error'
         elif self.loss == 'rmse':
             return 'neg_root_mean_squared_error'
         elif self.loss == 'rmsle':
             return 'neg_root_mean_squared_log_error'
+        elif self.loss == 'poisson_loss':
+            return 'neg_mean_poisson_deviance
+        elif self.loss == 'huber_loss':
+            return 'neg_mean_squared_error'
+        elif self.loss == 'log_cosh_loss':
+            return 'neg_mean_squared_error'
+        elif self.loss == 'tukey_biweight_loss':
+            return 'neg_mean_squared_error'
+        elif self.loss == 'exponential_loss':
+            return 'neg_mean_squared_error'
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
-
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """
         Display the importance of features using feature permutation.

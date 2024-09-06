@@ -149,7 +149,7 @@ def shapley_additive_explanation_neural_network(model, df_set, outname, dir_outp
             return None
     return top_features_
 
-def make_model(model_name, in_dim, scale, dropout, act_func, k_days, binary, device, num_lstm_layers):
+def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, binary, device, num_lstm_layers):
     """
     Renvoie un modèle en fonction du nom spécifié.
     
@@ -247,14 +247,18 @@ def make_model(model_name, in_dim, scale, dropout, act_func, k_days, binary, dev
                     dropout=dropout, num_layers=num_lstm_layers)
 
     elif model_name == 'Zhang':
-        return Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 15 * 15, 128, 64, 32],
+        return Zhang(in_channels=in_dim_2D, conv_channels=[64, 128, 256], fc_channels=[256 * 15 * 15, 128, 64, 32],
                      dropout=dropout, binary=binary, device=device, n_sequences=k_days)
+    
+    elif model_name == 'ConvLSTM':
+        return CONVLSTM(in_channels=in_dim_2D, hidden_dim=[64, 128, 256], end_channels=32,
+        n_sequences=k_days+1, device=device, act_func=act_func, dropout=dropout, binary=binary)
 
     elif model_name == 'UNet':
-        return UNet(n_channels=in_dim, n_classes=1, bilinear=False)
+        return UNet(n_channels=in_dim_2D, n_classes=1, bilinear=False)
 
     elif model_name == 'ConvGraphNet':
-        return ConvGraphNet(Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
+        return ConvGraphNet(Zhang(in_channels=in_dim_2D, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
                                   dropout=dropout, binary=binary, device=device, n_sequences=k_days, return_hidden=True),
                             STGCN(n_sequences=k_days + 1,
                                   in_channels=in_dim,
@@ -273,22 +277,24 @@ def make_model(model_name, in_dim, scale, dropout, act_func, k_days, binary, dev
                             act_func=act_func)
     
     elif model_name == 'HybridConvGraphNet':
-        return HybridConvGraphNet(Zhang(in_channels=in_dim, conv_channels=[64, 128, 256], fc_channels=[256 * 7 * 7, 128, 64, 32],
+        return HybridConvGraphNet(Zhang(in_channels=in_dim_2D, conv_channels=[64, 128, 256], fc_channels=[256 * 15 * 15, 128, 64, 32],
                                   dropout=dropout, binary=binary, device=device, n_sequences=k_days, return_hidden=True),
-                                    GAT(n_dim=[in_dim, 64, 64, 64],
-                                    heads=[4, 4, 2],
+                                    GAT(in_dim=[32, 64, 64],
+                                    heads=[4, 4],
                                     dropout=dropout,
                                     bias=True,
                                     device=device,
                                     act_func=act_func,
                                     n_sequences=k_days + 1,
-                                    binary=binary),
+                                    binary=binary, 
+                                    return_hidden=True),
                                     output_layer_in_channels=64,
                                     output_layer_end_channels=32,
                                     n_sequence=k_days+1,
                                     binary=binary,
                                     device=device,
-                                    act_func=act_func)
+                                    act_func=act_func,
+                                    )
 
     else:
         raise ValueError(f"Modèle '{model_name}' non reconnu.")

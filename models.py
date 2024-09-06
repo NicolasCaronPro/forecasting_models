@@ -601,6 +601,14 @@ class LSTM(torch.nn.Module):
         self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels,
                                   n_steps=n_sequences, device=device, act_func=act_func,
                                   binary=binary)
+        
+        self.batchNorm = torch.nn.BatchNorm1d(hidden_channels).to(device)
+        self.dropout = torch.nn.Dropout(dropout)
+
+        self.act = torch.nn.ReLU()
+        
+        self.output = nn.Linear(in_channels=hidden_channels, out_channels=1, weight_initializer='glorot', bias=True).to(device)
+        
         self.device = device
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
@@ -614,6 +622,8 @@ class LSTM(torch.nn.Module):
         x = torch.movedim(x, 2, 1)
         x, _ = self.lstm(x, (h0, c0))
         x = torch.squeeze(x[:, -1, :])
+        x = self.batchNorm(x)
+        x = self.act(x)
         output = self.output(x)
 
         if self.return_hidden:
