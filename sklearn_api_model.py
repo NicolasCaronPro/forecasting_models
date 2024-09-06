@@ -30,7 +30,6 @@ import numpy as np
 import math
 from pathlib import Path
 
-# 1. Weighted MSE Loss
 def weighted_mse_loss(y_true, y_pred, sample_weights=None):
     squared_error = (y_pred - y_true) ** 2
     if sample_weights is not None:
@@ -38,7 +37,6 @@ def weighted_mse_loss(y_true, y_pred, sample_weights=None):
     else:
         return np.mean(squared_error)
 
-# 2. Poisson Loss
 def poisson_loss(y_true, y_pred, sample_weights=None):
     y_pred = np.clip(y_pred, 1e-8, None)  # Éviter log(0)
     loss = y_pred - y_true * np.log(y_pred)
@@ -47,7 +45,6 @@ def poisson_loss(y_true, y_pred, sample_weights=None):
     else:
         return np.mean(loss)
 
-# 3. RMSLE Loss
 def rmsle_loss(y_true, y_pred, sample_weights=None):
     log_pred = np.log1p(y_pred)
     log_true = np.log1p(y_true)
@@ -57,7 +54,6 @@ def rmsle_loss(y_true, y_pred, sample_weights=None):
     else:
         return np.sqrt(np.mean(squared_log_error))
 
-# 4. RMSE Loss
 def rmse_loss(y_true, y_pred, sample_weights=None):
     squared_error = (y_pred - y_true) ** 2
     if sample_weights is not None:
@@ -65,19 +61,16 @@ def rmse_loss(y_true, y_pred, sample_weights=None):
     else:
         return np.sqrt(np.mean(squared_error))
 
-# 5. Huber Loss
 def huber_loss(y_true, y_pred, delta=1.0):
     error = y_pred - y_true
     abs_error = np.abs(error)
     quadratic = np.where(abs_error <= delta, 0.5 * error ** 2, delta * (abs_error - 0.5 * delta))
     return np.mean(quadratic)
 
-# 6. Log-Cosh Loss
 def log_cosh_loss(y_true, y_pred):
     error = y_pred - y_true
     return np.mean(np.log(np.cosh(error)))
 
-# 7. Tukey's Biweight Loss
 def tukey_biweight_loss(y_true, y_pred, c=4.685):
     error = y_pred - y_true
     abs_error = np.abs(error)
@@ -85,7 +78,6 @@ def tukey_biweight_loss(y_true, y_pred, c=4.685):
     loss = (1 - (1 - (error / c) ** 2) ** 3) * mask
     return np.mean((c ** 2 / 6) * loss)
 
-# 8. Exponential Loss
 def exponential_loss(y_true, y_pred):
     return np.mean(np.exp(np.abs(y_pred - y_true)))
 
