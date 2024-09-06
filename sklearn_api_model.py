@@ -61,25 +61,44 @@ def rmse_loss(y_true, y_pred, sample_weights=None):
     else:
         return np.sqrt(np.mean(squared_error))
 
-def huber_loss(y_true, y_pred, delta=1.0):
+def huber_loss(y_true, y_pred, delta=1.0, sample_weight=None):
     error = y_pred - y_true
     abs_error = np.abs(error)
     quadratic = np.where(abs_error <= delta, 0.5 * error ** 2, delta * (abs_error - 0.5 * delta))
-    return np.mean(quadratic)
+    
+    if sample_weight is not None:
+        return np.average(quadratic, weights=sample_weight)
+    else:
+        return np.mean(quadratic)
 
-def log_cosh_loss(y_true, y_pred):
+def log_cosh_loss(y_true, y_pred, sample_weight=None):
     error = y_pred - y_true
-    return np.mean(np.log(np.cosh(error)))
+    log_cosh = np.log(np.cosh(error))
+    
+    if sample_weight is not None:
+        return np.average(log_cosh, weights=sample_weight)
+    else:
+        return np.mean(log_cosh)
 
-def tukey_biweight_loss(y_true, y_pred, c=4.685):
+def tukey_biweight_loss(y_true, y_pred, c=4.685, sample_weight=None):
     error = y_pred - y_true
     abs_error = np.abs(error)
     mask = (abs_error <= c)
     loss = (1 - (1 - (error / c) ** 2) ** 3) * mask
-    return np.mean((c ** 2 / 6) * loss)
+    tukey_loss = (c ** 2 / 6) * loss
+    
+    if sample_weight is not None:
+        return np.average(tukey_loss, weights=sample_weight)
+    else:
+        return np.mean(tukey_loss)
 
-def exponential_loss(y_true, y_pred):
-    return np.mean(np.exp(np.abs(y_pred - y_true)))
+def exponential_loss(y_true, y_pred, sample_weight=None):
+    exp_loss = np.exp(np.abs(y_pred - y_true))
+
+    if sample_weight is not None:
+        return np.average(exp_loss, weights=sample_weight)
+    else:
+        return np.mean(exp_loss)
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
