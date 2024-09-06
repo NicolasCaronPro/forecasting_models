@@ -1,8 +1,7 @@
 from tools import *
-from torch.nn.modules.loss import _Loss
 from torch.functional import F
 
-class PoissonLoss(nn.Module):
+class PoissonLoss(torch.nn.Module):
     def __init__(self):
         super(PoissonLoss, self).__init__()
 
@@ -23,7 +22,7 @@ class PoissonLoss(nn.Module):
         
         return mean_loss
 
-class RMSLELoss(nn.Module):
+class RMSLELoss(torch.nn.Module):
     def __init__(self):
         super(RMSLELoss, self).__init__()
 
@@ -48,7 +47,7 @@ class RMSLELoss(nn.Module):
         
         return rmsle
 
-class RMSELoss(nn.Module):
+class RMSELoss(torch.nn.Module):
     def __init__(self):
         super(RMSELoss, self).__init__()
 
@@ -69,52 +68,71 @@ class RMSELoss(nn.Module):
         
         return rmse
 
-# 1. MSE Loss (Mean Squared Error Loss)
-class MSELoss(nn.Module):
+class MSELoss(torch.nn.Module):
     def __init__(self):
         super(MSELoss, self).__init__()
 
-    def forward(self, y_pred, y_true):
-        return torch.mean((y_pred - y_true) ** 2)
+    def forward(self, y_pred, y_true, sample_weights=None):
+        error = (y_pred - y_true) ** 2
+        if sample_weights is not None:
+            weighted_error = error * sample_weights
+            return torch.mean(weighted_error)
+        else:
+            return torch.mean(error)
 
-# 2. Huber Loss
-class HuberLoss(nn.Module):
+class HuberLoss(torch.nn.Module):
     def __init__(self, delta=1.0):
         super(HuberLoss, self).__init__()
         self.delta = delta
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, sample_weights=None):
         error = y_pred - y_true
         abs_error = torch.abs(error)
         quadratic = torch.where(abs_error <= self.delta, 0.5 * error ** 2, self.delta * (abs_error - 0.5 * self.delta))
-        return torch.mean(quadratic)
+        if sample_weights is not None:
+            weighted_error = quadratic * sample_weights
+            return torch.mean(weighted_error)
+        else:
+            return torch.mean(quadratic)
 
-# 3. Log-Cosh Loss
-class LogCoshLoss(nn.Module):
+class LogCoshLoss(torch.nn.Module):
     def __init__(self):
         super(LogCoshLoss, self).__init__()
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, sample_weights=None):
         error = y_pred - y_true
-        return torch.mean(torch.log(torch.cosh(error + 1e-12)))  # Adding epsilon to avoid log(0)
+        log_cosh = torch.log(torch.cosh(error + 1e-12))  # Adding epsilon to avoid log(0)
+        if sample_weights is not None:
+            weighted_error = log_cosh * sample_weights
+            return torch.mean(weighted_error)
+        else:
+            return torch.mean(log_cosh)
 
-# 4. Tukey's Biweight Loss
-class TukeyBiweightLoss(nn.Module):
+class TukeyBiweightLoss(torch.nn.Module):
     def __init__(self, c=4.685):
         super(TukeyBiweightLoss, self).__init__()
         self.c = c
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, sample_weights=None):
         error = y_pred - y_true
         abs_error = torch.abs(error)
         mask = (abs_error <= self.c).float()
-        loss = (1 - (1 - (error / self.c) ** 2) ** 3) * mask
-        return torch.mean((self.c ** 2 / 6) * loss)
+        tukey_loss = (1 - (1 - (error / self.c) ** 2) ** 3) * mask
+        tukey_loss = (self.c ** 2 / 6) * tukey_loss
+        if sample_weights is not None:
+            weighted_error = tukey_loss * sample_weights
+            return torch.mean(weighted_error)
+        else:
+            return torch.mean(tukey_loss)
 
-# 5. Exponential Loss
-class ExponentialLoss(nn.Module):
+class ExponentialLoss(torch.nn.Module):
     def __init__(self):
         super(ExponentialLoss, self).__init__()
 
-    def forward(self, y_pred, y_true):
-        return torch.mean(torch.exp(torch.abs(y_pred - y_true)))
+    def forward(self, y_pred, y_true, sample_weights=None):
+        exp_loss = torch.exp(torch.abs(y_pred - y_true))
+        if sample_weights is not None:
+            weighted_error = exp_loss * sample_weights
+            return torch.mean(weighted_error)
+        else:
+            return torch.mean(exp_loss)
