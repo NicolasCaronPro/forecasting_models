@@ -32,6 +32,9 @@ class BaseExperiment:
         self.model = model
         self.logger = config.get('logger')
         mlflow.set_tracking_uri('http://127.0.0.1:8080')
+        # experiments = mlflow.search_experiments()
+        # print(experiments)
+        # exit()
         experiment = mlflow.set_experiment(self.experiment_name)
         self.experiment_id = experiment.experiment_id
         self.dir_runs = pathlib.Path(os.path.abspath(os.path.join(os.path.dirname(__file__), f'../../mlruns/{self.experiment_id}')))
@@ -49,7 +52,7 @@ class BaseExperiment:
         - None
         """
         
-        with mlflow.start_run(run_name='run_' + str(self.run_nb), log_system_metrics=False) as run:
+        with mlflow.start_run(run_name='run_' + str(self.run_nb), log_system_metrics=True) as run:
 
             run_dir = self.dir_runs / f'{run.info.run_id}'
             run_dir = pathlib.Path(run_dir)
@@ -59,6 +62,7 @@ class BaseExperiment:
 
 
             dataset = self.dataset.get_dataset(**dataset_config)
+            print(dataset.data.columns)
             dataset.split(test_size=0.2, val_size=0.2, shuffle=False)
             dataset.create_X_y()
 
@@ -91,11 +95,11 @@ class BaseExperiment:
             model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val)]})
             self.fit(model_config, dataset)
 
-            self.model.plot_tree(dir_output=run_dir)
+            # self.model.plot_tree(dir_output=run_dir)
 
-            self.model.plot_param_influence(param='max_depth', dir_output=run_dir)
+            # self.model.plot_param_influence(param='max_depth', dir_output=run_dir)
 
-            self.model.plot_features_importance(X_set=dataset.enc_X_test, y_set=dataset.y_test, outname='features_importance.png', dir_output=run_dir)
+            # self.model.plot_features_importance(X_set=dataset.enc_X_test, y_set=dataset.y_test, outname='features_importance.png', dir_output=run_dir)
 
             # self.model.shapley_additive_explanation(df_set=cd.DataFrame(dataset.enc_X_test.join(dataset.y_test)), outname='shap.png', dir_output=run_dir)
 
@@ -105,7 +109,8 @@ class BaseExperiment:
             
             scores = self.score(dataset)
 
-            mlflow.log_metrics(scores)
+            # mlflow.log_metrics(scores)
+            mlflow.log_metric(self.model.get_scorer(), scores)
 
             y_pred = self.predict(dataset)
             figure = self.plot(dataset, y_pred)

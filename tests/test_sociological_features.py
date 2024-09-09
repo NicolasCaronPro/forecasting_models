@@ -19,5 +19,3 @@ config = Config({'max_nan': 0, "root_dir": root_dir, "start": dt.datetime.strpti
 sociologicalFeatures = SociologicalFeatures(config)
 sociologicalFeatures.fetch_data()
 sociologicalFeatures.plot(freq='1ME')
-sociologicalFeatures.save_data()
-# print(sociologicalFeatures.get_data())

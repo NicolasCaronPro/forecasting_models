@@ -21,9 +21,9 @@ hopitalFeatures = HopitalFeatures(config=config)
 hopitalFeatures.fetch_data()
 
 
-hopitalFeatures.features_augmentation()
-hopitalFeatures.plot(freq='1ME')
+# hopitalFeatures.features_augmentation()
+hopitalFeatures.plot(freq='1W')
 
-print(hopitalFeatures.get_data())
+# print(hopitalFeatures.get_data())
 
 

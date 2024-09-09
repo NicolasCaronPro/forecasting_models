@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
-    def __init__(self, model, loss: Union[str, List[str]] = 'log_loss', name='Model'):
+    def __init__(self, model, loss: str = 'log_loss', name='Model'):
         """
         Initialize the CustomModel class.
 
@@ -162,20 +162,23 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         y_pred = self.predict(X)
         scores = {}
-        if 'log_loss' in self.loss:
+        if self.loss == 'log_loss':
             proba = self.predict_proba(X)
             scores['neg_log_loss'] = -1*log_loss(y, proba)
-        if 'hinge_loss' in self.loss:
+        elif self.loss == 'hinge_loss':
             scores['hinge_loss'] = hinge_loss(y, y_pred)
-        if 'accuracy' in self.loss:
+        elif self.loss == 'accuracy':
             scores['accuracy'] = accuracy_score(y, y_pred)
-        if 'mse' in self.loss:
+        elif self.loss == 'mse':
             scores['neg_mean_squared_error'] = -1*mean_squared_error(y, y_pred)
-        if 'rmse' in self.loss:
+        elif self.loss == 'rmse':
             scores['neg_root_mean_squared_error'] = -1*math.sqrt(mean_squared_error(y, y_pred))
-        if 'rmsle' in self.loss:
+        elif self.loss == 'rmsle':
             scores['neg_root_mean_squared_log_error'] = -1*math.sqrt(mean_squared_log_error(y, y_pred))
-        return scores
+        
+        # return first score
+        score = list(scores.values())[0]
+        return score
 
     def get_params(self, deep=True):
         """
@@ -227,20 +230,20 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
 
         scorers = []
-        if 'log_loss' in self.loss:
+        if self.loss == 'log_loss':
             scorers.append('neg_log_loss')
-        if 'hinge_loss' in self.loss:
+        if self.loss == 'hinge_loss':
             scorers.append('hinge')
-        if 'accuracy' in self.loss:
+        if self.loss == 'accuracy':
             scorers.append('accuracy')
-        if 'mse' in self.loss:
+        if self.loss == 'mse':
             scorers.append('neg_mean_squared_error')
-        if 'rmse' in self.loss:
+        if self.loss == 'rmse':
             scorers.append('neg_root_mean_squared_error')
             return 'neg_root_mean_squared_error'
-        if 'rmsle' in self.loss:
+        if self.loss == 'rmsle':
             scorers.append('neg_root_mean_squared_log_error')
-        return scorers
+        return scorers[0]
 
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """

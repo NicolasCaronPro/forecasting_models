@@ -21,6 +21,6 @@ airQualityFeatures = AirQualityFeatures(config=config)
 airQualityFeatures.fetch_data()
 
 
-# airQualityFeatures.plot(freq='1ME')
+airQualityFeatures.plot(freq='1ME')
 
 # print(airQualityFeatures.get_data(from_date=dt.datetime.strptime('01-01-2018', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y')))

@@ -18,8 +18,9 @@ if __name__ == '__main__':
     sys.path.insert(0, script_path)
 
 from src.models.sklearn_models import *
+from src.models.loss import *
 
-def get_model(model_type, name, device, task_type, loss='log_loss', params=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics='log_loss', with_metric=None, params:dict=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -33,7 +34,11 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None)
     """
     model = None
 
+    if with_metric is not None:
+        eval_metric = metrics[with_metric]
+
     if model_type == 'xgboost':
+        params.update({'eval_metric': eval_metric})
         model = config_xgboost(device, task_type, params)
     elif model_type == 'lightgbm':
         model = config_lightGBM(device, task_type, params)
@@ -56,9 +61,9 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None)
                          NGBClassifier, NGBRegressor)
 
     if isinstance(model, tree_based_models):
-        return ModelTree(model, loss=loss, name=name)
+        return ModelTree(model, loss=test_metrics, name=name)
     else:
-        return Model(model, loss=loss, name=name)
+        return Model(model, loss=test_metrics, name=name)
 
 def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBClassifier]:
     """
@@ -68,6 +73,15 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
     :param task_type : regression or classification
     :params : config parameters
     """
+    loss_metrics = {
+        weighted_rmse: weighted_rmse_obj,
+        percentiles_weighted_rmse: percentiles_weighted_rmse_obj,
+        root_mean_squared_error: 'reg:squarederror',
+        mean_squared_error: 'reg:squarederror',
+        mean_absolute_error: 'reg:absoluteerror',
+        root_mean_squared_log_error: 'reg:squaredlogerror',
+        mean_squared_log_error: 'reg:squaredlogerror'
+    }
     if params is None:
         # Random parametring
         params = {
@@ -87,6 +101,23 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
             'tree_method':'hist',
         }
 
+    # Check if eval_metric and objective are compatible
+    if 'objective' in params:
+        objective = params['objective']
+        if 'eval_metric' not in params:
+            for metric, obj in loss_metrics.items():
+                if obj == objective:
+                    params['eval_metric'] = metric
+                    break
+        else:
+            if params['eval_metric'] not in loss_metrics or loss_metrics[params['eval_metric']] != objective:
+                raise ValueError(f"The eval_metric '{params['eval_metric']}' is not compatible with the custom objective function.")
+    elif 'eval_metric' in params:
+        eval_metric = params['eval_metric']
+        if eval_metric not in loss_metrics:
+            raise ValueError(f"The eval_metric '{eval_metric}' is not compatible with the custom objective function.")
+        params['objective'] = loss_metrics[eval_metric]
+            
     if device == 'cuda':
         params['device']='cuda'
 

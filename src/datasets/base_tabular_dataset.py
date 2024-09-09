@@ -1,7 +1,5 @@
 from typing import Optional, Union, List
-from sklearn.compose import ColumnTransformer, make_column_selector, make_column_transformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import FeatureUnion, Pipeline, make_pipeline
+from sklearn.pipeline import Pipeline
 import src.features as ft
 from src.encoding.tools import create_encoding_pipeline
 import pandas as pd
@@ -66,7 +64,7 @@ class BaseTabularDataset(ft.BaseFeature):
 
             self.features.append(feature)
 
-    def fetch_data(self) -> None:
+    def fetch_data_function(self) -> None:
         """
         Fetch les données.
 
@@ -82,8 +80,6 @@ class BaseTabularDataset(ft.BaseFeature):
             self.data = self.data.join(feature.data)
 
         # self.targets = self.data[self.targets]
-
-        super().fetch_data()
 
     def encode(self, pipeline: Pipeline = None) -> None:
         """
