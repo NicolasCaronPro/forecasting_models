@@ -28,6 +28,9 @@ class RMSLELoss(torch.nn.Module):
 
     def forward(self, y_pred, y_true, sample_weights=None):
         # On ajoute 1 aux prédictions et aux vraies valeurs pour éviter les log(0)
+        y_pred = torch.clamp(y_pred, min=1e-8)
+        y_true = torch.clamp(y_true, min=1e-8)
+        
         log_pred = torch.log1p(y_pred)
         log_true = torch.log1p(y_true)
         
@@ -136,3 +139,19 @@ class ExponentialLoss(torch.nn.Module):
             return torch.mean(weighted_error)
         else:
             return torch.mean(exp_loss)
+
+class WeightedCrossEntropyLoss(torch.nn.Module):
+    def __init__(self):
+        super(WeightedCrossEntropyLoss, self).__init__()
+
+    def forward(self, y_pred, y_true, sample_weights=None):
+        # Calculer la cross-entropy standard (non pondérée)
+        log_prob = F.log_softmax(y_pred, dim=-1)
+        loss = F.nll_loss(log_prob, y_true, reduction='none')  # Pas de réduction pour pouvoir appliquer les sample weights
+        
+        # Appliquer les sample weights si fournis
+        if sample_weights is not None:
+            weighted_loss = loss * sample_weights
+            return torch.mean(weighted_loss)
+        else:
+            return torch.mean(loss)

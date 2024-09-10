@@ -449,25 +449,25 @@ class SDSTGCN(torch.nn.Module):
                                                 end_channels=hidden_channels_spatial[si+1], dropout=dropout, act_func=act_func).to(device))
 
         self.spatial_layers = torch.nn.ModuleList(self.spatial_layers)
-        self.output = OutputLayer(in_channels=hidden_channels_spatial[-1] + hidden_channels_temporal[-1],
+        self.output = OutputLayer(in_channels=(hidden_channels_spatial[-1] + hidden_channels_temporal[-1]) * 4,
                                   end_channels=end_channels,
                                   n_steps=1,
                                   device=device, act_func=act_func,
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        
         xt = self.input_temporal(X)
         for i, layer in enumerate(self.temporal_layers):
             xt = layer(xt)
         
-        xs = self.input_spatial(X)
+        xs = self.input_spatial(X[:, :, -1])
         for i, layer in enumerate(self.spatial_layers):
             xs = layer(xs, edge_index)
 
-        xc = torch.cat((xs, xt))
+        for band in range(xt.shape[-1]):
+            xt[:, :, band] += xs
 
-        x = self.output(xc)
+        x = self.output(xt)
 
         if self.return_hidden:
             return x, xc
@@ -602,12 +602,12 @@ class LSTM(torch.nn.Module):
                                   n_steps=n_sequences, device=device, act_func=act_func,
                                   binary=binary)
         
-        self.batchNorm = torch.nn.BatchNorm1d(hidden_channels).to(device)
+        self.batchNorm = nn.BatchNorm(hidden_channels).to(device)
         self.dropout = torch.nn.Dropout(dropout)
 
-        self.act = torch.nn.ReLU()
+        #self.act = torch.nn.ReLU()
         
-        self.output = nn.Linear(in_channels=hidden_channels, out_channels=1, weight_initializer='glorot', bias=True).to(device)
+        #self.output = nn.Linear(in_channels=hidden_channels, out_channels=1, weight_initializer='glorot', bias=True).to(device)
         
         self.device = device
         self.hidden_channels = hidden_channels
@@ -623,7 +623,8 @@ class LSTM(torch.nn.Module):
         x, _ = self.lstm(x, (h0, c0))
         x = torch.squeeze(x[:, -1, :])
         x = self.batchNorm(x)
-        x = self.act(x)
+        x = self.dropout(x)
+        #x = self.act(x)
         output = self.output(x)
 
         if self.return_hidden:

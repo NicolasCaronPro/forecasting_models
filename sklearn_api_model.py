@@ -1,3 +1,4 @@
+import xgboost
 from forecasting_models.tools import *
 from xgboost import XGBClassifier, XGBRegressor
 from ngboost import NGBClassifier, NGBRegressor
@@ -169,8 +170,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
-        print(best_params)
+        
         self.set_params(**best_params)
+
         # Perform cross-validation with the specified number of folds
         #cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
         #cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
@@ -183,8 +185,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.cv_results_['std_cv_score'] = np.std(cv_scores)
         self.cv_results_['cv_scores'] = cv_scores"""
 
-        print(self.cv_results_)
-        
+        #data_dmatrix = xgboost.DMatrix(data=X, label=y, weight=fit_params['sample_weight'])
+        #self.best_estimator_ = xgboost.train(best_params, data_dmatrix)
+
     def predict(self, X):
         """
         Predict labels for input data.
@@ -195,7 +198,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Predicted labels.
         """
+        #dtest = xgboost.DMatrix(data=X)
+        #return self.best_estimator_.predict(dtest)
         return self.best_estimator_.predict(X)
+
 
     def predict_proba(self, X):
         """

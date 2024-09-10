@@ -56,8 +56,8 @@ class OutputLayer(torch.nn.Module):
         self.n_steps = n_steps
 
     def forward(self, x):
-        #x = self.activation(x)
         x = x.view(x.shape[0], -1)
+        x = self.activation(x)
         x = self.fc(x)
         x = self.activation(x)
         x = self.fc2(x)
