@@ -28,7 +28,8 @@ class MeteorologicalFeatures(BaseFeature):
     def include_weather(self):
         self.logger.info("On récupère les archives Meteostat")
 
-        dir_geo = pathlib.Path(self.config.get('root_dir')) / "src/geolocalisation"
+        dir_geo = pathlib.Path(self.config.get(
+            'root_dir')) / "src/geolocalisation"
 
         # On charge les données de géolocalisation des établissements
         etablissement_df = pd.read_csv(
@@ -110,9 +111,9 @@ class MeteorologicalFeatures(BaseFeature):
                                    axis=1, inplace=True)
                 data[point].set_index('date', inplace=True)
                 self.data = pd.merge(
-                    self.data, data[point], left_index=True,how='left', right_index=True)
+                    self.data, data[point], left_index=True, how='left', right_index=True)
                 self.data.rename({u: "meteo_" + str(etab) + "_" + str(index) + "_" +
-                                u for u in data[point]}, axis=1, inplace=True)
+                                  u for u in data[point]}, axis=1, inplace=True)
                 # Ajout des features décalés pour les 3 jours précédents et les 3 jours suiva + "_" + str(index)nts
                 # for col in data[point]:
                 #     if col != 'date_entree':
@@ -137,5 +138,5 @@ class MeteorologicalFeatures(BaseFeature):
                 #         data[point] = copy.deepcopy(last_point)
         return self.data
 
-    def fetch_data_function(self) -> None:
+    def fetch_data_function(self, *args, **kwargs) -> None:
         self.include_weather()

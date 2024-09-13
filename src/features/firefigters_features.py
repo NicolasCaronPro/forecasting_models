@@ -4,9 +4,12 @@ from typing import Optional, Dict
 import pandas as pd
 import datetime as dt
 
+
 class FireFightersFeatures(BaseFeature):
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
+    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None, include_calls=True, include_fire_data=True) -> None:
         super().__init__(config, parent)
+        self.include_calls = include_calls
+        self.include_fire_data = include_fire_data
 
     def include_pompier(self):
         self.logger.info("Intégration des données des pompiers")
@@ -15,24 +18,29 @@ class FireFightersFeatures(BaseFeature):
         # On groupe les appel par jour
         appel = appel.groupby(pd.Grouper(key='creneau', freq='D')).sum()
         # Définir la fonction à appliquer à chaque groupe
+
         def calculate_target(group):
-            target = group['interventions0'].sum() - group['en_cours0'].shift().fillna(0).sum()
+            target = group['interventions0'].sum(
+            ) - group['en_cours0'].shift().fillna(0).sum()
             return pd.Series([target], index=['target'])
         # On groupe les interventions par jour
-        tous_daily = tous.groupby([pd.Grouper(key='creneau', freq='D')]).apply(calculate_target).reset_index()
+        tous_daily = tous.groupby([pd.Grouper(key='creneau', freq='D')]).apply(
+            calculate_target).reset_index()
         # Intégration des données au dataframe
-        self.data['appels_25'] = appel.loc[appel.index.isin(self.data.index), 'target'].values
-        self.data['interventions_25'] = tous_daily.loc[tous_daily['creneau'].isin(self.data.index), 'target'].values
+        self.data['appels_25'] = appel.loc[appel.index.isin(
+            self.data.index), 'target'].values
+        self.data['interventions_25'] = tous_daily.loc[tous_daily['creneau'].isin(
+            self.data.index), 'target'].values
 
         # # Ajout des features décalés pour les DECALAGE_POMPIER jours précédents
         # for dec in range(1,DECALAGE_POMPIER+1):
         #     self.data['appels_25-'+str(dec)] = self.data['appels_25'].shift(dec)
         #     self.data['interventions_25-'+str(dec)] = self.data['interventions_25'].shift(dec)
-        
+
         # # Ajout de la moyenne glissante sur FENETRE_GLISSANTE jours
         # self.data['appels_25_rolling'] = self.data['appels_25'].rolling(window=FENETRE_GLISSANTE, closed="left").mean()
         # self.data['interventions_25_rolling'] = self.data['interventions_25'].rolling(window=FENETRE_GLISSANTE, closed="left").mean()
-    
+
     def include_fire(self):
         arra = pickle.load(open(self.data_dir / "Y_full_10.pkl", "rb"))
         df = pd.DataFrame(arra)
@@ -49,16 +57,22 @@ class FireFightersFeatures(BaseFeature):
             return res
 
         dates = find_dates_between('2017-06-12', '2023-09-11')
-        df.rename(columns={1: 'longitude', 2:'latitude', 3:'departement', 4:'date_index', 6:'nb_incendie', 7:'risque'}, inplace=True)
+        df.rename(columns={1: 'longitude', 2: 'latitude', 3: 'departement',
+                  4: 'date_index', 6: 'nb_incendie', 7: 'risque'}, inplace=True)
+
         def convert_to_date(date_index):
             return dates[int(date_index)]
 
         df['date'] = df['date_index'].apply(convert_to_date)
-        grouped_df = df.loc[df['departement'] == 25].groupby('date').agg({'nb_incendie': 'sum', 'risque': 'mean', 'longitude': 'mean', 'latitude': 'mean', 'departement': 'mean'}).reset_index()
+        grouped_df = df.loc[df['departement'] == 25].groupby('date').agg(
+            {'nb_incendie': 'sum', 'risque': 'mean', 'longitude': 'mean', 'latitude': 'mean', 'departement': 'mean'}).reset_index()
         grouped_df.set_index('date', inplace=True)
         grouped_df.to_csv(self.data_dir / "incendies_25.csv")
         self.data = pd.concat([self.data, grouped_df['nb_incendie']], axis=1)
-    
-    def fetch_data_function(self) -> None:
-        self.include_pompier()
-        self.include_fire()
+
+    def fetch_data_function(self, *args, **kwargs) -> None:
+        if self.include_calls:
+            self.include_pompier()
+
+        if self.include_fire:
+            self.include_fire()

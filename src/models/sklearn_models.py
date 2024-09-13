@@ -14,6 +14,7 @@ from sklearn.tree import plot_tree as sklearn_plot_tree
 from sklearn.model_selection import GridSearchCV
 from sklearn.base import clone
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor, RegressorChain, ClassifierChain
 from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error
 from skopt import Optimizer, BayesSearchCV
 from skopt.space import Integer, Real
@@ -63,10 +64,17 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.y_train = y
 
         # self.best_estimator_.set_params(**params)
+        # Check if the labels are 1D or 2D
+        if y.ndim > 1:
+            self.best_estimator_ = MultiOutputRegressor(self.best_estimator_)
+            grid_params = {'estimator__' + key: value for key, value in grid_params.items()}
+
         # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=True)
+            # grid_search.set_params(**fit_params)
+
             grid_search.fit(X, y, **fit_params)
             best_params = grid_search.best_estimator_.get_params()
             self.best_estimator_ = grid_search.best_estimator_
@@ -94,12 +102,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, refit=True)
+            # Check if the labels are 1D or 2D
+            if y.ndim > 1:
+                bayes_search = MultiOutputRegressor(bayes_search)
+
             bayes_search.fit(X, y, **fit_params)
             best_params = bayes_search.best_estimator_.get_params()
             self.best_estimator_ = bayes_search.best_estimator_
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
             best_params = self.best_estimator_.get_params()
+            
+            # Check if the labels are 1D or 2D
+            if y.ndim > 1:
+                self.best_estimator_ = RegressorChain(self.best_estimator_)
+
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
@@ -200,6 +217,11 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if deep and hasattr(self.best_estimator_, 'get_params'):
             deep_params = self.best_estimator_.get_params(deep=True)
             params.update(deep_params)
+
+            if isinstance(self.best_estimator_, XGBRegressor) or isinstance(self.best_estimator_, XGBClassifier):
+                deep_xgb_params = self.best_estimator_.get_xgb_params()
+                params.update(deep_xgb_params)
+                
         return params
 
     def set_params(self, **params):

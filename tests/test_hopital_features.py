@@ -19,11 +19,9 @@ config = Config({'max_nan': 0, "departement": "21", "root_dir": root_dir, "start
 hopitalFeatures = HopitalFeatures(config=config)
 
 hopitalFeatures.fetch_data()
+# print(hopitalFeatures.data)
+# data = hopitalFeatures.get_data(from_date=dt.datetime.strptime('01-01-2016', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), shift=7, rolling_window=[7, 14], freq='1D')
+# print(data)
 
-
-# hopitalFeatures.features_augmentation()
-hopitalFeatures.plot(freq='1W')
-
-# print(hopitalFeatures.get_data())
-
+hopitalFeatures.plot(freq='1D')
 

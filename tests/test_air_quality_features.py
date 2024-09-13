@@ -19,8 +19,9 @@ config = Config({'max_nan': 0, "departement": "21", "root_dir": root_dir, "start
 airQualityFeatures = AirQualityFeatures(config=config)
 
 airQualityFeatures.fetch_data()
+data = airQualityFeatures.get_data(from_date=dt.datetime.strptime('01-01-2018', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), shift=7, rolling_window=[7, 14], freq='1ME')
+print(data)
 
-
-airQualityFeatures.plot(freq='1ME')
+# airQualityFeatures.plot(freq='1ME')
 
 # print(airQualityFeatures.get_data(from_date=dt.datetime.strptime('01-01-2018', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y')))

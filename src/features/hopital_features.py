@@ -33,8 +33,8 @@ class HopitalFeatures(BaseFeature):
         etablissement (str): The name of the hospital.
     """
 
-    def __init__(self, config: Optional[Config] = None, parent: Optional[BaseFeature] = None, include_emmergency_arrivals = True, include_nb_hospit = True, include_hnfc_moving = True) -> None:
-        super().__init__(config, parent)
+    def __init__(self, config: Optional[Config] = None, parent: Optional[BaseFeature] = None, include_emmergency_arrivals=True, include_nb_hospit=True, include_hnfc_moving=True, load=False) -> None:
+        super().__init__(config, parent, load)
         self.include_emmergency_arrivals = include_emmergency_arrivals
         self.include_nb_hospit = include_nb_hospit
         self.include_hnfc_moving = include_hnfc_moving
@@ -66,7 +66,7 @@ class HopitalFeatures(BaseFeature):
                 self.data.drop(axis=1, columns="annee", inplace=True)
 
             self.data.rename(columns={
-                             "Total": f"{self.name} Total_{self.etablissement}", "date_entree": "date"}, inplace=True)
+                             "Total": f"Total_{self.etablissement}", "date_entree": "date"}, inplace=True)
 
             if self.data["date"].dtype != "datetime64[ns]":
                 self.data["date"] = pd.to_datetime(self.data["date"])
@@ -79,25 +79,27 @@ class HopitalFeatures(BaseFeature):
         start = dt.datetime(2017, 2, 28)
         end = dt.datetime(2018, 1, 1)
 
-        self.data["HNFC_moving"] = np.where(self.data.index < start, 'before', np.where(self.data.index >= end, 'after', 'during'))
+        self.data["HNFC_moving"] = np.where(self.data.index < start, 'before', np.where(
+            self.data.index >= end, 'after', 'during'))
         self.data["HNFC_moving"] = self.data["HNFC_moving"].astype("category")
         # self.data["2_HNFC_moving"] = self.data['HNFC_moving'].copy().shift(1).astype("category")
 
     def include_nb_hospitalized(self):
-        hospitalized = pd.read_excel(self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
-        self.data = self.data.join(hospitalized.set_index("date_entree")["nb_vers_hospit"])
+        hospitalized = pd.read_excel(
+            self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
+        self.data = self.data.join(
+            hospitalized.set_index("date_entree")["nb_vers_hospit"])
 
-    def fetch_data_function(self) -> None:
+    def fetch_data_function(self, *args, **kwargs) -> None:
         """
         Fetches the data by adding the target and calling the parent's fetch_data method.
         """
 
         if self.include_emmergency_arrivals:
             self.add_target()
-        
+
         if self.include_hnfc_moving:
             self.include_HNFC_moving()
 
         if self.include_nb_hospit:
             self.include_nb_hospitalized()
-

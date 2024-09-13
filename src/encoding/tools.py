@@ -12,13 +12,15 @@ def create_encoding_pipeline(encoders_dict: Dict[str, Dict[str, Dict[str, List[U
     encoders_dict (Dict[str, Dict[str, Dict[str, List[Union[SimpleImputer, Pipeline]]]]]): A dictionary containing the encoders to use for each data type.
         The dictionary should have the following structure:
         {
-            'data_type': {
-                'encoding_type': {
+            'dtype': {
+                'as_[dtype]': {
                     'imputers': [List of imputers],
                     'encoders': [List of encoders]
                 }
             }
         }
+        - with dype being one of 'number', 'category', 'datetime', specifying the data type to encode.
+        - with as_[dtype] specifying how to consider the data type. For example you might want to encode datetime as numbers or as categories.
 
     Returns:
     Pipeline: A sklearn pipeline that can be used to transform data.

@@ -2,6 +2,7 @@ from src.features.base_features import BaseFeature, Config
 from typing import Optional, Dict
 import pandas as pd
 
+
 class SportsCompetitionFeatures(BaseFeature):
     def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
         super().__init__(config, parent)
@@ -18,9 +19,9 @@ class SportsCompetitionFeatures(BaseFeature):
             # print(df)
             # print(self.data)
             self.data = pd.merge(self.data, df, how='left', on='date')
-        
+
         self.logger.info("Données de football intégrées")
         return self.data
-    
-    def fetch_data_function(self) -> None:
+
+    def fetch_data_function(self, *args, **kwargs) -> None:
         self.include_foot()

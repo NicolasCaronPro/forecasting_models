@@ -18,4 +18,5 @@ config = Config({'max_nan': 0, "root_dir": root_dir, "start": dt.datetime.strpti
                 "shift": 7, "rolling_window": 0, "departement": "21", 'region':'BOURGOGNE'})
 sociologicalFeatures = SociologicalFeatures(config)
 sociologicalFeatures.fetch_data()
-sociologicalFeatures.plot(freq='1ME')
+print(sociologicalFeatures.get_data(from_date=dt.datetime.strptime('15-01-2018', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2018', '%d-%m-%Y'), freq='1D', shift=7, rolling_window=[7, 14]))
+# sociologicalFeatures.plot(freq='1ME')

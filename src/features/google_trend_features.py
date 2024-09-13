@@ -5,11 +5,10 @@ import datetime as dt
 from serpapi import GoogleSearch
 
 
-
 class GoogleTrendFeatures(BaseFeature):
     def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
         super().__init__(config, parent)
-    
+
     def include_google_trends(self) -> pd.DataFrame:
         self.logger.info("On récupère les données de Google Trends")
         BATCH_SIZE = 270
@@ -28,6 +27,7 @@ class GoogleTrendFeatures(BaseFeature):
             "crise de panique", "schizophrénie", "trouble bipolaire", "démence", "tentative de suicide",
             "urgences", "urgence médicale", "SAMU", "douleur", "SOS médecin", "étourdissements", "paralysie"
         ]
+
         def date_range(start_date, stop_date, batch_size):
             current_date = start_date
             while current_date <= stop_date:
@@ -41,11 +41,12 @@ class GoogleTrendFeatures(BaseFeature):
             for date in date_range(start, end, batch_size):
                 end_date = min(date + dt.timedelta(days=batch_size-1), end)
                 group = ', '.join(bow[i:i+5])
-                self.logger.info(f"Récupération de {group} pour la période {date} - {end_date}")
+                self.logger.info(
+                    f"Récupération de {group} pour la période {date} - {end_date}")
                 params = {
                     "engine": "google_trends",
                     "q": f"{group}",
-                    "geo": "FR-D", # FR-D
+                    "geo": "FR-D",  # FR-D
                     "date": f"{date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}",
                     "tz": "0",
                     "data_type": "TIMESERIES",
@@ -58,8 +59,10 @@ class GoogleTrendFeatures(BaseFeature):
                     df = pd.DataFrame(interest_over_time)
                     for query in df.iloc[0]["values"]:
                         query = query["query"]
-                        df["trend_" + query] = df["values"].apply(lambda x: next(x[i]["value"] for i in range(len(x)) if x[i]["query"] == query))
-                        df["trend_" + query] = df["trend_" + query].apply(lambda x: x.replace('<', '').replace('>', ''))
+                        df["trend_" + query] = df["values"].apply(lambda x: next(
+                            x[i]["value"] for i in range(len(x)) if x[i]["query"] == query))
+                        df["trend_" + query] = df["trend_" +
+                                                  query].apply(lambda x: x.replace('<', '').replace('>', ''))
                         df["trend_" + query] = df["trend_" + query].astype(int)
                     df.drop(columns=["values", "timestamp"], inplace=True)
                     df["date"] = pd.to_datetime(df["date"], format="%b %d, %Y")
@@ -81,22 +84,25 @@ class GoogleTrendFeatures(BaseFeature):
                     # else:
                     #     self.logger.error(f"Problème avec {group} pour la période {date} - {end_date}")
                     continue
-                    
+
             return all_dates_df
         # On récupère les tendance par lot de 5 mots max et 270 jours max
-        additional_dates = pd.date_range(end=self.data.index.min() - dt.timedelta(**self.step), periods=max(self.config.get('shift'), self.config.get('rolling_window')), freq=dt.timedelta(**self.step))
+        additional_dates = pd.date_range(end=self.data.index.min() - dt.timedelta(**self.step), periods=max(
+            self.config.get('shift'), self.config.get('rolling_window')), freq=dt.timedelta(**self.step))
         additional_dates.set_names('date', inplace=True)
         additional_df = pd.DataFrame(index=additional_dates)
         self.data = pd.concat([self.data, additional_df])
         # self.data = pd.concat([pd.DataFrame({'date_entree': additional_dates}), self.data]).reset_index(drop=True)
 
         if not (self.data_dir / 'trends.csv').is_file():
-            self.logger.info("On récupère les données de Google Trends depuis l'API")
+            self.logger.info(
+                "On récupère les données de Google Trends depuis l'API")
             idx = self.data.index
             all_words_df = pd.DataFrame(index=idx)
             for i in range(0, len(bow), 5):
-                
-                all_dates_df = get_all_dates_df(bow, i, dt.datetime(2018, 1, 1), dt.datetime(2023, 12, 31) + dt.timedelta(days=1), BATCH_SIZE) # START - dt.timedelta(days=max(DECALAGE_TREND, FENETRE_GLISSANTE)), STOP_DATA
+
+                all_dates_df = get_all_dates_df(bow, i, dt.datetime(2018, 1, 1), dt.datetime(2023, 12, 31) + dt.timedelta(
+                    days=1), BATCH_SIZE)  # START - dt.timedelta(days=max(DECALAGE_TREND, FENETRE_GLISSANTE)), STOP_DATA
                 # Fill missing dates
                 self.logger.info(all_dates_df.index)
                 all_dates_df = all_dates_df.reset_index()
@@ -111,34 +117,36 @@ class GoogleTrendFeatures(BaseFeature):
             # for i in range(0, len(bow), 5):
             #     fig, ax = plt.subplots(figsize=(20, 10))
             #     all_words_df.plot(x="date_entree", y=all_words_df.loc[:, all_words_df.columns != "date_entree"].columns.tolist()[i:i + 5], title="Google Trends in France", ax=ax)
-            
+
             # On sauvegarde le dataframe
             all_words_df.to_csv(self.data_dir / 'trends.csv', index=False)
         else:
-            self.logger.info("On charge les données de Google Trends depuis le fichier")
-            all_words_df = pd.read_csv(self.data_dir / 'trends.csv', parse_dates=['date'])
+            self.logger.info(
+                "On charge les données de Google Trends depuis le fichier")
+            all_words_df = pd.read_csv(
+                self.data_dir / 'trends.csv', parse_dates=['date'])
             # all_words_df.drop(columns=["trend_tabac", "trend_alcool", "trend_drogue", "trend_diabète", "trend_obésité",
             #                            "trend_cancer", "trend_maladie rénale", "trend_maladie cardiaque", "trend_maladie de Crohn",
             #                            "trend_colite ulcéreuse"], inplace=True)
-        
+
         all_words_df.set_index('date', inplace=True)
-        self.data = self.data.merge(all_words_df, left_index=True, right_index=True, how='left')
+        self.data = self.data.merge(
+            all_words_df, left_index=True, right_index=True, how='left')
         del all_words_df
 
-        
         # On ajoute la moyenne glissante sur FENETRE_GLISSANTE joursn et les valeurs shiftées jusqu'à DECALAGE_TREND jours
         # for word in bow:
         #     self.data = features_augmentation(self.data, feature_name=word, feature_category="trend", shift=DECALAGE_TREND, isShifInDays=True)
 
-            # self.data[f"trend_{word}_mean"] = self.data[f"trend_{word}"].rolling(window=FENETRE_GLISSANTE, closed="left").mean()
+        # self.data[f"trend_{word}_mean"] = self.data[f"trend_{word}"].rolling(window=FENETRE_GLISSANTE, closed="left").mean()
 
-            # # On ajoute les valeurs shiftées jusqu'à DECALAGE_TREND jours
-            # for dec in range(1, DECALAGE_TREND+1):
-            #     self.data[f"trend_{word}-{dec}"] = self.data[f"trend_{word}"].shift(dec)
+        # # On ajoute les valeurs shiftées jusqu'à DECALAGE_TREND jours
+        # for dec in range(1, DECALAGE_TREND+1):
+        #     self.data[f"trend_{word}-{dec}"] = self.data[f"trend_{word}"].shift(dec)
 
         self.logger.info("Données de Google Trends intégrées")
 
         return self.data
-    
-    def fetch_data_function(self) -> None:
+
+    def fetch_data_function(self, *args, **kwargs) -> None:
         self.include_google_trends()

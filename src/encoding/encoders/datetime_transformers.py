@@ -1,7 +1,7 @@
 from sklearn.base import BaseEstimator, TransformerMixin
 import pandas as pd
-import numpy as np
 
+pd.set_option('future.no_silent_downcasting', True)
 
 def extract_date_features(X, date_columns=None, date_features_names=None, dtype='number'):
     """

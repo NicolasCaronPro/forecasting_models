@@ -13,6 +13,8 @@ import abc
 from sklearn.compose import make_column_transformer, make_column_selector
 import numpy as np
 from logging import Logger
+from warnings import simplefilter
+simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
 def relative_frequency(series: pd.Series) -> pd.Series:
     """
@@ -26,7 +28,6 @@ def relative_frequency(series: pd.Series) -> pd.Series:
     """
     # Compter les occurrences de chaque catégorie
     counts = (series.value_counts(normalize=True) * 100)
-    # print(counts)
     
     # Retourner la proportion (fréquence relative)
     return counts
@@ -62,7 +63,7 @@ class BaseFeature(object):
     __metaclass__ = abc.ABCMeta
     
     @abc.abstractmethod
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
+    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None, load:bool = False) -> None:
         """
         Initialisation de la classe.
 
@@ -72,8 +73,9 @@ class BaseFeature(object):
         """
 
         # TODO: Est ce bien utile de passer le parent en paramètre ?
-
         self.name = self.__class__.__name__
+        if hasattr(self, 'targets'):
+            self.name += f"_{'_'.join(self.targets)}"
 
         assert config is None or isinstance(
             config, Config), f"config must be of type Config, not {type(config)}"
@@ -170,8 +172,15 @@ class BaseFeature(object):
             assert isinstance(
                 self.max_nan, int), f"max_nan must be an integer, not {type(self.max_nan)}"
             
-        # self.categorical_columns = []
-        # self.numeric_columns = []
+        # if 'drop_const_columns' in self.config:
+        #     self.drop_const_columns = self.config.get('drop_const_columns')
+        #     assert isinstance(
+        #         self.drop_const_columns, bool), f"drop_const_columns must be a boolean, not {type(self.drop_const_columns)}"
+        # else:
+        #     self.drop_const_columns = False
+            
+        self.categorical_columns = []
+        self.numeric_columns = []
 
         self.columns_types = {}
 
@@ -183,10 +192,10 @@ class BaseFeature(object):
 
         # Check if the data is saved at the location "data_dir/data_{self.name}.feather"
 
-        # if os.path.exists(self.data_dir / f'data_{self.name}.feather'):
-        #     self.data = pd.read_feather(self.data_dir / f'data_{self.name}.feather')
-        #     self.is_saved = True
-        #     self.is_fetched = True
+        if os.path.isfile(self.data_dir / f'data_{self.name}.feather') and load:
+            self.data = pd.read_feather(self.data_dir / f'data_{self.name}.feather')
+            self.is_saved = True
+            self.is_fetched = True
 
         # Décorateur pour fetch_data
         # used to fetch data only if it's not already saved (then load it)
@@ -194,45 +203,56 @@ class BaseFeature(object):
         self.fetch_data = self.fetch_decorator(self.fetch_data_function)
 
 
-    def features_augmentation(self, features_names: Optional[List[str]] = None) -> None:
+    def features_augmentation(self, features_names: Optional[List[str]] = None, shift:int = 0, rolling_window: Union[int, List[int]] = 0, data: pd.DataFrame = None) -> pd.DataFrame:
+        
+        self.logger.info("Augmentation des features...")
+        if data is None:
+            data = self.data.copy(deep=True)
 
         if features_names is None:
-            features_names = self.get_features_names()
+            features_names = data.columns.tolist()
 
         assert isinstance(
             features_names, List), f"features_names must be of type list, not {type(features_names)}"
+        
+        if isinstance(rolling_window, int):
+            rolling_window = [rolling_window]
 
         for feature_name in features_names:
+
+            # self.logger.info(f"Augmentation de la feature {feature_name}...")
             # On ajoute les valeurs passées
-            for dec in range(1, self.shift+1):
-                self.data[f"{feature_name}_J-{dec}"] = self.data[f"{feature_name}"].shift(
+            for dec in range(1, shift+1):
+                # self.logger.info(f"  - Ajout de la feature {feature_name}_J-{dec}")
+                data[f"{feature_name}_J-{dec}"] = data[f"{feature_name}"].shift(
                     dec)
 
             # On ajoute la moyenne glissante, standard deviation sur FENETRE_GLISSANTE jours
-            if self.rolling_window > 0 and feature_name in self.numeric_columns:
-                self.data[f"{feature_name}_mean"] = self.data[f"{feature_name}"].rolling(
-                    window=self.rolling_window, closed="left").mean()
-                self.data[f"{feature_name}_std"] = self.data[f"{feature_name}"].rolling(
-                    window=self.rolling_window, closed="left").std()
-                
-        # Identifier les colonnes catégorielles
-        self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
-        self.numeric_columns = self.data.select_dtypes(include=['number']).columns
+            for rw in rolling_window:
+                # self.logger.info(f"  - Ajout de la moyenne et de l'écart-type de la feature {feature_name} sur {rw} jours")
+                if rw > 0 and feature_name in self.numeric_columns:
+                    data[f"{feature_name}_mean_{rw}J"] = data[f"{feature_name}"].rolling(
+                        window=rw, closed="left").mean()
+                    data[f"{feature_name}_std_{rw}J"] = data[f"{feature_name}"].rolling(
+                        window=rw, closed="left").std()
+                    
+                    # TODO: Ajouter le mode, la valeur majoritaire, la fréquence relatives. pour les données catégorielles
+
+        return data
 
     def fetch_decorator(self, func):
         def wrapper(*args, **kwargs):
             if not self.is_saved:
                 self.logger.info(f"Fetching data for {self.name}...")
 
-                func(*args, **kwargs)
+                func(self, *args, **kwargs)
 
-                # if self.data.isnull().sum().sum() > self.max_nan:
-                #     raise ValueError(
-                #         f"Too many missing values in the data for {self.name}")
+                # #TODO: Remove columns with more than max_nan missing values
+                # if hasattr(self, 'drop_const_columns') and self.drop_const_columns:
+                #     print("Dropping constant columns")
+                #     self.data = self.drop_constant_columns()    
                 
-                save = True
-                if 'save' in kwargs:
-                    save = kwargs['save']
+                save = kwargs.get('save', True)
 
                 if save:
                     self.save_data()
@@ -253,7 +273,7 @@ class BaseFeature(object):
         return wrapper
 
     @abc.abstractmethod
-    def fetch_data_function(self) -> None:
+    def fetch_data_function(self, *args, **kwargs) -> None:
         """
         Récupère les données.
 
@@ -262,7 +282,7 @@ class BaseFeature(object):
         """
         pass
 
-    def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq='1D') -> pd.DataFrame:
+    def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None,  freq: Optional[str] = '1D', shift: Optional[int]  = 0, rolling_window: Optional[Union[int, List[int]]] = 0) -> pd.DataFrame:
         """
         Retourne les données.
 
@@ -295,16 +315,18 @@ class BaseFeature(object):
                 raise ValueError(
                     f"to_date must be of format %d-%m-%Y, not {to_date}")
 
+        
+        data = self.features_augmentation(features_names, shift=shift, rolling_window=rolling_window)
+        # data.dropna(inplace=True)
+
+        if (freq != pd.infer_freq(data.index)) and (freq is not None) and (freq != '1' + pd.infer_freq(data.index)) and (freq != '1' + pd.infer_freq(data.index)+'E') and (freq != pd.infer_freq(data.index)+'E'):
+            data = self.aggregate_data_by_dtype(agg_dict={'number': ['mean', 'std', 'min', 'max'], 'category': [relative_frequency]}, freq=freq, data=data)
+        
         if features_names is None:
-            features_names = self.get_features_names()
+            features_names = data.columns.tolist()
         assert isinstance(
             features_names, list), f"features_names must be of type list, not {type(features_names)}"
-        
-        # self.features_augmentation(features_names)
-
-        # self.groupby(from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
-
-        return self.data.loc[(self.data.index >= from_date) & (self.data.index <= to_date), features_names]
+        return data.loc[(data.index >= from_date) & (data.index <= to_date), features_names]
 
     def save_data(self, path: Optional[Union[str, pathlib.Path]] = None, filename: Optional[str] = None) -> None:
         """
@@ -366,7 +388,7 @@ class BaseFeature(object):
         return self.columns_types
 
     
-    def aggregate_data_by_dtype(self, agg_dict, data: pd.DataFrame = None, freq='1M'):   
+    def aggregate_data_by_dtype(self, agg_dict, data: pd.DataFrame = None, freq='1D', flatten=True) -> pd.DataFrame:   
         """
         Agrège les données d'un DataFrame selon une fréquence spécifiée et un dictionnaire d'agrégations
         basé sur le type de données.
@@ -379,13 +401,12 @@ class BaseFeature(object):
         Returns:
         - pd.DataFrame: Le DataFrame agrégé avec un MultiIndex pour les colonnes.
         """
-
-        # agg_dict = {'number': ['mean', 'sum', 'min', 'max', 'std', 'var', 'median'], 'category': [relative_frequency]}
-        # freq = '1ME'
+        
+        self.logger.info("Aggregating data by data type...")
 
         # Vérifier que le DataFrame est fourni
         if data is None:
-            data = self.data
+            data = self.data.copy()
 
         # Vérifier que le DataFrame a un index de type DateTime
         if not isinstance(data.index, pd.DatetimeIndex):
@@ -407,18 +428,21 @@ class BaseFeature(object):
             """
             results = {}
             for func in funcs:
+                # self.logger.info(f"Applying {func} to {series.name}...")
                 if callable(func):
                     # print("callable: ", func)
                     result = func(series)
+                    # print(result)
                     if isinstance(result, pd.Series):
-                        print("isinstance: series")
+                        # print("isinstance: series")
                         # Renommer les résultats de la série pour les inclure dans le MultiIndex
-                        results.update(result.rename(lambda x: f"{func.__name__}__{x}"))
+                        results.update(result.rename(lambda x: f"{func.__name__}____{x}"))
                     else:
                         results[func.__name__] = result
                 else:
                     # print("not callable: ", func)
                     result = getattr(series, func)()
+                    # print(result)
                     results[func] = result
             return pd.Series(results)
 
@@ -427,6 +451,7 @@ class BaseFeature(object):
             aggregated = {}
             for col, funcs in column_agg_dict.items():
                 # print(group[col])
+                # self.logger.info(f"Aggregating column {col}...")
                 aggregated[col] = unified_apply_func(group[col], funcs)
             
                 concat = pd.concat(aggregated, axis=0)
@@ -438,75 +463,132 @@ class BaseFeature(object):
         # Appliquer les agrégations
         aggregated_df = grouped_data.apply(apply_aggregations)
 
-        # # Réorganiser les colonnes pour avoir un MultiIndex
-        # def create_multiindex_from_columns(columns):
-        #     new_columns = []
-        #     for col in columns:
-        #         if '__' in col:
-        #             split_col = col.split('__')
-        #             if len(split_col) == 3:
-        #                 new_columns.append((split_col[0], split_col[1], split_col[2]))
-        #             else:
-        #                 new_columns.append((split_col[0], split_col[1], ''))
-        #         else:
-        #             new_columns.append((col, 'value', ''))
-        #     return pd.MultiIndex.from_tuples(new_columns, names=['Column', 'Aggregation', 'Category'])
-
-        # aggregated_df.columns = create_multiindex_from_columns(aggregated_df.columns)
-        if isinstance(aggregated_df, pd.DataFrame):
-            return aggregated_df
-        else:
-            return aggregated_df.to_frame().unstack(level=[1, 2]).droplevel(0, axis=1)
-
-
-
-    def groupby(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
-        """
-        Groupe les données.
-
-        Parameters:
-        - by: L'échelle à laquelle regrouper les données. (ex: 'day', 'week', 'month', 'year')
-        - features_names: Les features à grouper.
-
-        Returns:
-        - data: Les données groupées.
-        """
-
-        data = self.get_data(from_date=from_date,
-                             to_date=to_date, features_names=features_names)
         
-        # print(data.columns)
+        if not isinstance(aggregated_df, pd.DataFrame):
+            aggregated_df = aggregated_df.to_frame().unstack(level=[1, 2]).droplevel(0, axis=1)
 
-        # Grouper les données par la fréquence spécifiée
-        grouper = pd.Grouper(freq=freq, level='date')
+        if flatten:
+            aggregated_df.columns = ['___'.join(col).strip() for col in aggregated_df.columns.values]
 
-        grouped_data = data.groupby(grouper)
+        return aggregated_df
 
-        numeric_grouped_data = grouped_data[self.numeric_columns].mean()
 
-        categorical_grouped_data = (data.groupby(grouper)[self.categorical_columns]
-                                       .apply(lambda x: x.apply(lambda y: y.value_counts(normalize=True) * 100))
-                                       .fillna(0))
+    # def aggregate_data_by_dtype(self, agg_dict, data: pd.DataFrame = None, freq='1M'):
+    #     """
+    #     Aggregate DataFrame based on a specified frequency and aggregation dictionary by data type.
+
+    #     Parameters:
+    #     - data (pd.DataFrame): The DataFrame containing temporal data.
+    #     - freq (str): The aggregation frequency (e.g., 'D' for daily, 'H' for hourly, etc.).
+    #     - agg_dict (dict): Dictionary where keys are data types (e.g., 'float', 'int') and values are lists of aggregation functions.
+
+    #     Returns:
+    #     - pd.DataFrame: Aggregated DataFrame with a MultiIndex for columns.
+    #     """
+    #     self.logger.info(f"Resampling data by data type to {freq}...")
+
+    #     # Ensure data is provided
+    #     if data is None:
+    #         data = self.data
+
+    #     # Ensure index is a DatetimeIndex
+    #     if not isinstance(data.index, pd.DatetimeIndex):
+    #         raise ValueError("DataFrame must have a DateTime index.")
+
+    #     # Prepare column aggregation mappings
+    #     column_agg_dict = {col: funcs 
+    #                     for dtype, funcs in agg_dict.items() 
+    #                     for col in data.select_dtypes(include=[dtype]).columns}
+
+    #     # Function to apply multiple aggregation functions on a series
+    #     def unified_apply_func(series, funcs):
+    #         results = {}
+    #         for func in funcs:
+    #             if callable(func):
+    #                 result = func(series)
+    #                 name = func.__name__
+    #             else:
+    #                 result = getattr(series, func)()
+    #                 name = func
+
+    #             # Ensure result is a Series to allow concatenation
+    #             if isinstance(result, pd.Series):
+    #                 results[name] = result
+    #             else:
+    #                 # Wrap scalar values in a Series
+    #                 results[name] = pd.Series(result, index=[series.name])
+
+    #         return pd.concat(results, axis=1)
+
+    #     # Apply aggregations for each group
+    #     def apply_aggregations(group):
+    #         aggregated = {col: unified_apply_func(group[col], funcs) for col, funcs in column_agg_dict.items()}
+    #         return pd.concat(aggregated, axis=1)
+
+    #     # Group by time frequency
+    #     grouped_data = data.groupby(pd.Grouper(freq=freq))
+
+    #     # Apply the aggregation
+    #     aggregated_df = grouped_data.apply(apply_aggregations)
+
+    #     # Restructure the aggregated data with a MultiIndex for clarity
+    #     aggregated_df.columns = pd.MultiIndex.from_tuples(
+    #         [(col, func) for col in column_agg_dict.keys() for func in [f.__name__ if callable(f) else f for f in agg_dict[type(data[col].dtype).__name__]]],
+    #         names=['Column', 'Aggregation']
+    #     )
+
+    #     return aggregated_df.reset_index()
+
+
+
+
+    # def groupby(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
+    #     """
+    #     Groupe les données.
+
+    #     Parameters:
+    #     - by: L'échelle à laquelle regrouper les données. (ex: 'day', 'week', 'month', 'year')
+    #     - features_names: Les features à grouper.
+
+    #     Returns:
+    #     - data: Les données groupées.
+    #     """
+
+    #     data = self.get_data(from_date=from_date,
+    #                          to_date=to_date, features_names=features_names)
         
-        print(categorical_grouped_data)
+    #     # print(data.columns)
 
-        # Réorganiser les données catégorielles
-        categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0)
-        print(categorical_grouped_data)
+    #     # Grouper les données par la fréquence spécifiée
+    #     grouper = pd.Grouper(freq=freq, level='date')
 
-        categorical_grouped_data.columns = [f'{col[0]}__{col[1]}' for col in categorical_grouped_data.columns]
+    #     grouped_data = data.groupby(grouper)
 
-        # categorical_grouped_data = (data.groupby(grouper)[categorical_columns].value_counts(normalize=True)*100)
-        # print(categorical_grouped_data)
-        # categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0).rename(columns=lambda x: f'{x}_percentage')
-        # print(categorical_grouped_data)
+    #     numeric_grouped_data = grouped_data[self.numeric_columns].mean()
 
-        aggregated_data = pd.concat([numeric_grouped_data, categorical_grouped_data], axis=1)
+    #     categorical_grouped_data = (data.groupby(grouper)[self.categorical_columns]
+    #                                    .apply(lambda x: x.apply(lambda y: y.value_counts(normalize=True) * 100))
+    #                                    .fillna(0))
         
-        # print(aggregated_data)
+    #     print(categorical_grouped_data)
+
+    #     # Réorganiser les données catégorielles
+    #     categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0)
+    #     print(categorical_grouped_data)
+
+    #     categorical_grouped_data.columns = [f'{col[0]}__{col[1]}' for col in categorical_grouped_data.columns]
+
+    #     # categorical_grouped_data = (data.groupby(grouper)[categorical_columns].value_counts(normalize=True)*100)
+    #     # print(categorical_grouped_data)
+    #     # categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0).rename(columns=lambda x: f'{x}_percentage')
+    #     # print(categorical_grouped_data)
+
+    #     aggregated_data = pd.concat([numeric_grouped_data, categorical_grouped_data], axis=1)
+        
+    #     # print(aggregated_data)
     
 
-        return aggregated_data
+    #     return aggregated_data
 
     # def plot_numeric_over_time(self, df, column, resample_freq='1D'):
     #     df[column].resample(resample_freq).mean().plot(kind='line', figsize=(10, 6))
@@ -529,7 +611,8 @@ class BaseFeature(object):
              to_date: Optional[Union[str, dt.datetime]] = None,
              features_names: Optional[List[str]] = None,
              freq: str = '1D',
-             max_subplots: int = 4) -> pd.DataFrame:
+             max_subplots: int = 4,
+             data:pd.DataFrame=None) -> pd.DataFrame:
         """
         Affiche les données.
 
@@ -537,9 +620,19 @@ class BaseFeature(object):
         - features: Les features à afficher.
         """
 
-        grouped_data = self.aggregate_data_by_dtype(agg_dict={'number': ['mean', 'std', 'min', 'max'], 'category': [relative_frequency]}, freq=freq)
-        # print(grouped_data)
-        # grouped_data = self.groupby(from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
+        if data is None:
+            data = self.get_data(from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
+        
+        # # Identifier les colonnes catégorielles
+        # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
+        # categorical_data = data[categorical_columns]
+        # data = data.drop(columns=categorical_columns)
+        # numeric_columns = data.select_dtypes(include=['number']).columns
+
+        # elif not categorical_columns.empty:
+        #     data = data.join(self.aggregate_data_by_dtype(agg_dict={'category': [relative_frequency]}, freq=freq, data=categorical_data))
+        # print(data)
+        # data = self.groupby(from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
         # # data = self.get_data(from_date=from_date, to_date=to_date, features_names=features_names)
 
         # for i in range(0, len(data.columns), min(4, len(data.columns))):
@@ -550,18 +643,14 @@ class BaseFeature(object):
         num_cols = np.ceil(max_subplots / num_rows).astype(int)
 
         # Calcul du nombre total de figures nécessaires
-        num_vars = len(self.data.columns)
+        num_vars = len(data.columns)
 
-        # print(self.data.columns)
         num_figures = math.ceil(num_vars / max_subplots)
 
-        # print(num_figures)
-
-        # # Identifier les colonnes catégorielles
-        # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
-        # numeric_columns = data.select_dtypes(include=['number']).columns
-
-        # print(data)
+        # if (freq != pd.infer_freq(data.index)) and (freq is not None) and (freq != '1' + pd.infer_freq(data.index)) and (freq != '1' + pd.infer_freq(data.index)+'E') and (freq != pd.infer_freq(data.index)+'E'):
+        #     agg_data = self.aggregate_data_by_dtype(agg_dict={'number': ['mean', 'std', 'min', 'max'], 'category': [relative_frequency]}, freq=freq)
+        # else:
+        #     agg_data = data
 
         for fig_num in range(num_figures):
             fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 10))
@@ -570,28 +659,25 @@ class BaseFeature(object):
             start_idx = fig_num * max_subplots
             end_idx = min(start_idx + max_subplots, num_vars)
 
-            # print(start_idx, end_idx)
+            for i, variable_name in enumerate(data.columns[start_idx:end_idx]):
 
-            for i, column in enumerate(self.data.columns[start_idx:end_idx]):
-                print(column)
-                # if column in self.categorical_columns:
-                #     # col = grouped_data.loc[:, [col for col in grouped_data.columns if col.startswith(f'{column}__')]]
-                #     print(col)
-                #     col.plot(kind='bar', stacked=True, ax=axes[i])
-                #     axes[i].set_title(f'{column} over time ({freq})')
-                #     axes[i].set_xlabel('Date')
-                #     axes[i].set_ylabel('Count')
-                #     axes[i].legend(title=column)
+                for column in data.columns.to_list():
 
-                # elif column in self.numeric_columns:
-                #     # col = grouped_data.loc[:, [col for col in grouped_data.columns if col.startswith(f'{column}__')]]
-                col = grouped_data[column]
-                # print(col)
-                col.plot(kind='line', ax=axes[i])
-                axes[i].set_title(f'{column} over time ({freq})')
-                axes[i].set_xlabel('Date')
-                axes[i].set_ylabel('Count')
-                axes[i].legend(title=column)
+                    if '___' in column:
+                        column_name, agg_func = column.split('___', 1)
+                    else:
+                        column_name = column
+                        agg_func = column
+
+                    if variable_name == column_name:
+                        col = data[column]
+                        # col = data.loc[:, [col for col in data.columns if col.startswith(f'{column}__')]]
+                        axes[i].plot(col.index, col, label=agg_func)
+                        # col.plot(kind='line', ax=axes[i])
+                        axes[i].set_title(f'{variable_name} over time ({freq})')
+                        axes[i].set_xlabel('Date')
+                        axes[i].set_ylabel('Value')
+                        axes[i].legend()
 
             # Supprimer les axes inutilisés
             for j in range(end_idx - start_idx, len(axes)):
@@ -763,3 +849,42 @@ class BaseFeature(object):
     #     """
         
     #     self.ct.fit_transform(self.data)
+
+    def drop_constant_columns(self, data: pd.DataFrame = None, threshold: float = 0.8, exclude_categories: bool = True) -> pd.DataFrame:
+        """
+        Supprime les colonnes où une valeur unique représente plus de 80 % (par défaut) des lignes.
+        Les colonnes de type 'category' ne sont pas affectées.
+
+        Parameters:
+        data (pd.DataFrame): Le dataset à traiter.
+        threshold (float): Le seuil (entre 0 et 1) au-delà duquel une colonne est considérée comme constante.
+
+        Returns:
+        pd.DataFrame: Le dataset sans les colonnes constantes.
+        """
+        
+        if data is None:
+            data = self.data.copy()
+
+        if exclude_categories:
+            # Sélectionner les colonnes qui ne sont pas du type 'category'
+            selected_columns = data.select_dtypes(exclude=['category']).columns
+        
+        else:
+            selected_columns = data.columns
+        
+        # Liste pour stocker les colonnes à supprimer
+        cols_to_drop = []
+
+        for col in selected_columns:
+            # Calculer la proportion de la valeur la plus fréquente dans la colonne
+            most_frequent_value_ratio = data[col].value_counts(normalize=True).max()
+            
+            # Vérifier si cette proportion dépasse le seuil (threshold)
+            if most_frequent_value_ratio > threshold:
+                cols_to_drop.append(col)
+
+        # Supprimer les colonnes constantes
+        df_cleaned = data.drop(columns=cols_to_drop)
+        
+        return df_cleaned

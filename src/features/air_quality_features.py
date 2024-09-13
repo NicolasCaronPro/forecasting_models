@@ -18,10 +18,11 @@ class AirQualityFeatures(BaseFeature):
         archived_data_dir (Path): The path to the archived data directory.
     """
 
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
+    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None, drop_const_cols=True) -> None:
         super().__init__(config, parent)
         self.archived_data_dir = self.data_dir / 'archived'
         self.archived_data_dir.mkdir(exist_ok=True, parents=True)
+        self.drop_const_columns = drop_const_cols
 
         assert 'departement' in self.config, "departement must be provided in config"
         self.departement = self.config.get('departement')
@@ -104,7 +105,7 @@ class AirQualityFeatures(BaseFeature):
                     self.logger.error(
                         f"{k} possède trop de NaN ({self.data[k].isna().sum()})")
 
-                self.data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
+                # self.data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
 
             self.data.to_feather(self.archived_data_dir /
                                  'pollution_historique.feather')
@@ -116,5 +117,5 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")
 
-    def fetch_data_function(self) -> None:
+    def fetch_data_function(self, *args, **kwargs) -> None:
         self.__include_air_quality()
