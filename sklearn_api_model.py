@@ -1,5 +1,5 @@
 import xgboost
-from forecasting_models.tools import *
+from forecasting_models.tools_2 import *
 from xgboost import XGBClassifier, XGBRegressor
 from ngboost import NGBClassifier, NGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -135,7 +135,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
-            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self._get_scorer(), cv=cv_folds, refit=False)
+            grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
             grid_search.fit(X, y, **fit_params)
             best_params = grid_search.best_estimator_.get_params()
             self.cv_results_ = grid_search.cv_results_

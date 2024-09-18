@@ -54,6 +54,59 @@ class GAT(torch.nn.Module):
             return output, x
         else:
             return output
+        
+################################ GCN ################################################
+
+class GCN(torch.nn.Module):
+    def __init__(self, n_sequences, in_dim,
+                 dropout, 
+                 bias,
+                 device,
+                 act_func,
+                 binary, return_hidden=False):
+        super(GCN, self).__init__()
+
+        num_of_layers = len(in_dim) - 1
+        gcn_layers = []
+        self.return_hidden = return_hidden
+
+        self.dropout_layer = torch.nn.Dropout(dropout) if dropout > 0.0 else torch.nn.Identity()
+
+        for i in range(num_of_layers):
+            layer = GCNConv(
+                in_channels=in_dim[i],
+                out_channels=in_dim[i+1],
+                bias=bias,
+            ).to(device)
+            gcn_layers.append((layer, "x, edge_index -> x"))
+            if i < num_of_layers - 1:
+                if act_func == 'relu':
+                    gcn_layers.append((ReLU(), "x -> x"))
+                elif act_func == 'gelu':
+                    gcn_layers.append((GELU(), "x -> x"))
+                if dropout > 0.0:
+                    gcn_layers.append((self.dropout_layer, "x -> x"))
+
+        self.net = Sequential("x, edge_index", gcn_layers)
+
+        self.output = OutputLayer(
+            in_channels=in_dim[-1],
+            end_channels=in_dim[-1],
+            n_steps=n_sequences,
+            device=device,
+            act_func=act_func,
+            binary=binary
+        )
+
+    def forward(self, X, edge_index):
+        edge_index = edge_index[:2]
+        x = self.net(X, edge_index)
+        output = self.output(x)
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
+
 
 ################################### ST_GATCN ######################################
     
@@ -326,6 +379,8 @@ class SandiwchLayerGCN(torch.nn.Module):
             self.activation = torch.nn.GELU()
         elif act_func == 'relu':
             self.activation = torch.nn.ReLU()
+        elif self.activation == 'silu':
+            self.activation = torch.nn.SiLU()
             
     def forward(self, X, edge_index):
         residual = self.residual_proj(X)
