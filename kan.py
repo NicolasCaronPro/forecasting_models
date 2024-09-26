@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import math
 from utils import *
 from torch.nn import LSTMCell
+from models import *
 
 ######################################################################################################################
 #                                                                                                                    #
@@ -243,10 +244,10 @@ class KANLinear(torch.nn.Module):
             + regularize_entropy * regularization_loss_entropy
         )
 
-
 class KAN(torch.nn.Module):
     def __init__(
         self,
+        in_channels,
         layers_hidden,
         end_channels,
         k_days,
@@ -272,6 +273,7 @@ class KAN(torch.nn.Module):
         elif act_func == 'silu':
             self.base_activation = torch.nn.SiLU
 
+        #self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=layers_hidden[0], kernel_size=1).to(device)
         self.layers = torch.nn.ModuleList()
         for in_features, out_features in zip(layers_hidden, layers_hidden[1:]):
             self.layers.append(
@@ -294,25 +296,52 @@ class KAN(torch.nn.Module):
                                   n_steps=k_days,
                                   device=device, act_func=act_func,
                                   binary=binary)
+        
+        self.calibrator_layer = torch.nn.Conv1d(
+            in_channels=layers_hidden[0] + 1,
+            out_channels=1,
+            kernel_size=1,
+            bias=True,
+            device=device
+        )
+        
+        """self.calibrator_layer = GCNConv(
+            in_channels=layers_hidden[0] + (2 if binary else 1),
+            out_channels=2 if binary else 1,
+            bias=True,
+            # Additional parameters can be added if needed
+        )"""
 
     def forward(self, x: torch.Tensor, edge_index, update_grid=False):
+        
+        #x = self.input(x)
+        
         if len(x.shape) == 3:
             x = x[:, :, -1]
+        
+        original_input = x
+
         for layer in self.layers:
             if update_grid:
                 layer.update_grid(x)
             x = layer(x)
-                        
-        return self.output(x)
+
+        x = self.output(x)
+        
+        """x = torch.concat((original_input, x), dim=1)
+        x = self.calibrator_layer(x, edge_index)
+        x = torch.clamp(x, min=0)"""
+              
+        return x
 
     def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
         return sum(
             layer.regularization_loss(regularize_activation, regularize_entropy)
             for layer in self.layers
         )
-    
+        
 ###############################################################################################################################
-#                                                                                                                             #
+#                                                Temporal KAN                                                                 #
 #                                                                                                                             #
 #                                          https://github.com/remigenet/TKAN/blob/main/                                       #
 #                                                                                                                             #
@@ -379,6 +408,7 @@ class TKANCELL(torch.nn.Module):
         hy = outgate * F.tanh(cy)
 
         return hy, cy
+    
      
 class TKAN(torch.nn.Module):
     def __init__(self, input_size, hidden_size, end_channels, act_func, dropout, binary, k_days, return_hidden, device, kan_config):

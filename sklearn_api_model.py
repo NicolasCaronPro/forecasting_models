@@ -1,64 +1,97 @@
-import xgboost
-from forecasting_models.tools_2 import *
-from xgboost import XGBClassifier, XGBRegressor
-from ngboost import NGBClassifier, NGBRegressor
-from lightgbm import LGBMClassifier, LGBMRegressor
-from sklearn.svm import SVR, SVC
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
-from xgboost import plot_tree as xgb_plot_tree
-from lightgbm import plot_tree as lgb_plot_tree
-from ngboost.distns import Normal
-from ngboost.scores import LogScore
-from sklearn.tree import plot_tree as sklearn_plot_tree
-from sklearn.model_selection import GridSearchCV
-from sklearn.base import clone
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
-from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error
-from skopt import Optimizer, BayesSearchCV
-from skopt.space import Integer, Real
+import copy
 import logging
+import math
 import sys
+from pathlib import Path
 from typing import Union
-import shap
-from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
-from skopt import BayesSearchCV
-from skopt.space import Real, Integer
-from skopt import Optimizer
+
 import matplotlib.pyplot as plt
 import numpy as np
-import math
-from pathlib import Path
+import shap
+import xgboost
 
-def weighted_mse_loss(y_true, y_pred, sample_weights=None):
+from forecasting_models.tools_2 import *
+
+from lightgbm import LGBMClassifier, LGBMRegressor, plot_tree as lgb_plot_tree
+
+from ngboost import NGBClassifier, NGBRegressor
+from ngboost.distns import Normal
+from ngboost.scores import LogScore
+
+from scipy import stats
+
+from skopt import BayesSearchCV, Optimizer
+from skopt.space import Integer, Real
+
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
+
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    RandomForestRegressor,
+    StackingClassifier,
+    StackingRegressor,
+)
+
+from sklearn.linear_model import LinearRegression, LogisticRegression
+
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    hinge_loss,
+    log_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    mean_squared_log_error,
+    precision_score,
+    r2_score,
+    recall_score,
+)
+
+from sklearn.model_selection import GridSearchCV, KFold, cross_val_score
+
+from sklearn.svm import SVC, SVR
+
+from sklearn.tree import (
+    DecisionTreeClassifier,
+    DecisionTreeRegressor,
+    plot_tree as sklearn_plot_tree,
+)
+
+from sklearn.utils.validation import check_is_fitted
+
+from xgboost import XGBClassifier, XGBRegressor, plot_tree as xgb_plot_tree
+
+
+#from scripts.probability_distribution import weight
+
+def weighted_mse_loss(y_true, y_pred, sample_weight=None):
     squared_error = (y_pred - y_true) ** 2
-    if sample_weights is not None:
-        return np.sum(squared_error * sample_weights) / np.sum(sample_weights)
+    if sample_weight is not None:
+        return np.sum(squared_error * sample_weight) / np.sum(sample_weight)
     else:
         return np.mean(squared_error)
 
-def poisson_loss(y_true, y_pred, sample_weights=None):
+def poisson_loss(y_true, y_pred, sample_weight=None):
     y_pred = np.clip(y_pred, 1e-8, None)  # Éviter log(0)
     loss = y_pred - y_true * np.log(y_pred)
-    if sample_weights is not None:
-        return np.sum(loss * sample_weights) / np.sum(sample_weights)
+    if sample_weight is not None:
+        return np.sum(loss * sample_weight) / np.sum(sample_weight)
     else:
         return np.mean(loss)
 
-def rmsle_loss(y_true, y_pred, sample_weights=None):
+def rmsle_loss(y_true, y_pred, sample_weight=None):
     log_pred = np.log1p(y_pred)
     log_true = np.log1p(y_true)
     squared_log_error = (log_pred - log_true) ** 2
-    if sample_weights is not None:
-        return np.sqrt(np.sum(squared_log_error * sample_weights) / np.sum(sample_weights))
+    if sample_weight is not None:
+        return np.sqrt(np.sum(squared_log_error * sample_weight) / np.sum(sample_weight))
     else:
         return np.sqrt(np.mean(squared_log_error))
 
-def rmse_loss(y_true, y_pred, sample_weights=None):
+def rmse_loss(y_true, y_pred, sample_weight=None):
     squared_error = (y_pred - y_true) ** 2
-    if sample_weights is not None:
-        return np.sqrt(np.sum(squared_error * sample_weights) / np.sum(sample_weights))
+    if sample_weight is not None:
+        return np.sqrt(np.sum(squared_error * sample_weight) / np.sum(sample_weight))
     else:
         return np.sqrt(np.mean(squared_error))
 
@@ -100,6 +133,12 @@ def exponential_loss(y_true, y_pred, sample_weight=None):
         return np.average(exp_loss, weights=sample_weight)
     else:
         return np.mean(exp_loss)
+    
+##########################################################################################
+#                                                                                        #
+#                                   Base class                                           #
+#                                                                                        #
+##########################################################################################
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss='log_loss', name='Model'):
@@ -137,7 +176,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             assert grid_params is not None
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
             grid_search.fit(X, y, **fit_params)
-            best_params = grid_search.best_estimator_.get_params()
+            best_params = grid_search.best_params_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
             assert grid_params is not None
@@ -188,6 +227,160 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #data_dmatrix = xgboost.DMatrix(data=X, label=y, weight=fit_params['sample_weight'])
         #self.best_estimator_ = xgboost.train(best_params, data_dmatrix)
 
+    def recursive_fit(self, X_train, y_train, eval_set, features, n_steps, early_stopping_rounds, **fit_params):
+        """
+        Custom training method that replaces model.fit in the Model class.
+        Implements recursive prediction and early stopping.
+
+        Parameters:
+        - model: The base estimator (must follow the sklearn API).
+        - X_train: Training features.
+        - y_train: Training targets.
+        - eval_set: Tuple of (X_val, y_val) for validation.
+        - n_steps: Number of recursive prediction steps.
+        - early_stopping_rounds: Number of rounds without improvement to trigger early stopping.
+        - fit_params: Additional parameters for the fit function.
+
+        """
+        # Clone the model to avoid modifying the original
+        model = clone(self.best_estimator_)
+
+        # Initialize variables for early stopping
+        best_score = math.inf
+        stopping_rounds = 0
+        num_boost_round = fit_params.get('n_estimators', 1000)  # Maximum number of iterations
+
+        X_val, y_val = eval_set if eval_set else (None, None)
+
+        # Check if validation set is provided
+        if X_val is None or y_val is None:
+            raise ValueError("eval_set must be provided for early stopping.")
+
+        # Initialize lists to store scoreS
+        val_scores = []
+
+        # Custom training loop
+        for i in range(1, num_boost_round + 1):
+
+            # Fit the model incrementally
+            model.set_params(n_estimators=i)
+            model.fit(X_train, y_train, **fit_params)
+
+            # Perform recursive predictions on validation set
+            val_score = self.evaluate_recursive_predictions(
+                model, X_val, y_val, features, n_steps)
+
+            val_scores.append(val_score)
+
+            # Early stopping check
+            if val_score < best_score:
+                best_score = val_score
+                stopping_rounds = 0
+                best_model = copy.deepcopy(model)
+            else:
+                stopping_rounds += 1
+                if stopping_rounds >= early_stopping_rounds:
+                    print(f"Early stopping at iteration {i}")
+                    break
+
+            # Optional: Print progress
+            print(f"Iteration {i}, Validation Score: {val_score:.4f}")
+
+        # Return the best model
+        self.best_estimator_ = best_model
+
+    def evaluate_recursive_predictions(self, model, X_val, y_val, features, n_steps):
+        """
+        Evaluate the model using recursive predictions on the validation set,
+        handling multiple time series identified by 'id'.
+
+        Parameters:
+        - model: The trained model.
+        - X_val: Validation features, including 'id' and 'date' columns.
+        - y_val: Validation targets.
+        - n_steps: Number of recursive prediction steps.
+        - loss: Loss function to use ('rmse', 'mae', etc.).
+
+        Returns:
+        - The evaluation score.
+
+        """
+
+        forecasts = []
+        y_vals = []
+        y_weight = []
+
+        # Reset index to ensure proper alignment
+        X_val = X_val.reset_index(drop=True)
+        y_val = y_val.reset_index(drop=True)
+
+        val_data = X_val[features].copy(deep=True)
+
+        # Get the unique ids
+        unique_ids = y_val['id'].unique()
+
+        for uid in unique_ids:
+            # Filter data for the current id
+            id_data = val_data[y_val['id'] == uid].reset_index(drop=True)
+            id_target = y_val[y_val['id'] == uid].reset_index(drop=True)
+
+            # Determine how many predictions we can make
+            len_id = len(id_data) - n_steps
+            if len_id <= 0:
+                continue  # Not enough data for this id
+
+            # Loop over the data for this id
+            for index in range(len_id):
+                # Initialize current input with known features
+                current_input = id_data.iloc[index].copy()
+
+                preds = []
+                true_vals = []
+                weight = []
+
+                for step in range(n_steps):
+                    # Predict
+                    pred = model.predict(current_input.values.reshape(1, -1))[0]
+                    preds.append(pred)
+
+                    # Update current_input for next prediction
+                    # Shift lag features
+                    lag_features = [col for col in current_input.index if 'y_lag' in col]
+                    print(lag_features)
+                    max_lag = max([int(col.split('_')[-1]) for col in lag_features])
+
+                    # Shift lags
+                    for lag in range(max_lag, 1, -1):
+                        lag_col = f'y_lag_{lag}'
+                        prev_lag_col = f'y_lag_{lag-1}'
+                        if lag_col in current_input and prev_lag_col in current_input:
+                            current_input[lag_col] = current_input[prev_lag_col]
+
+                    # Update the first lag with the latest prediction
+                    if 'y_lag_1' in current_input:
+                        current_input['y_lag_1'] = pred
+
+                    # Append the true value
+                    if index + step + 1 < len(id_data):
+                        true_val = id_target['y_true'].iloc[index + step + 1]
+                        true_vals.append(true_val)
+                        weight.append(id_target['weight'].iloc[index + step + 1])
+                    else:
+                        break  # No more true values
+
+                forecasts.extend(preds)
+                y_vals.extend(true_vals)
+                y_weight.extend(weight)
+
+        # Calculate the evaluation metric
+        score = self.score_with_prediction(forecasts, y_vals, sample_weight=y_weight)
+
+        return score
+    
+    def simulate_fit(self, X_train, y_train, eval_set, features, n_steps, early_stopping_rounds, **fit_params):
+        pass
+
+
     def predict(self, X):
         """
         Predict labels for input data.
@@ -235,6 +428,32 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if self.loss == 'log_loss':
             proba = self.predict_proba(X)
             return -log_loss(y, proba)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'poisson_loss':
+            return -poisson_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'huber_loss':
+            return -huber_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'log_cosh_loss':
+            return -log_cosh_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'tukey_biweight_loss':
+            return -tukey_biweight_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'exponential_loss':
+            return -exponential_loss(y, y_pred, sample_weight=sample_weight)
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")
+        
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
+        if self.loss == 'log_loss':
+            return -log_loss(y, y_pred)
         elif self.loss == 'hinge_loss':
             return -hinge_loss(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'accuracy':
@@ -325,6 +544,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             return 'neg_mean_squared_error'
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
+        
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """
         Display the importance of features using feature permutation.
@@ -452,6 +672,12 @@ class MeanFeaturesModel(Model):
         return 1 - (A * B)
 
 
+##########################################################################################
+#                                                                                        #
+#                                   Tree                                                 #
+#                                                                                        #
+##########################################################################################
+
 class ModelTree(Model):
     def __init__(self, model, loss='log_loss', name='ModelTree'):
         """
@@ -522,6 +748,11 @@ class ModelTree(Model):
             raise AttributeError(
                 "The chosen model does not support tree plotting.")
 
+##########################################################################################
+#                                                                                        #
+#                                   Fusion                                               #
+#                                   (Not used)                                           #
+##########################################################################################
 
 class ModelFusion(Model):
     def __init__(self, model_list, model, loss='log_loss', name='ModelFusion'):
@@ -763,3 +994,459 @@ class ModelFusion(Model):
         else:
             raise AttributeError(
                 "The chosen model does not support tree plotting.")
+        
+##########################################################################################
+#                                                                                        #
+#                                   Votting                                              #
+#                                                                                        #
+##########################################################################################
+
+class ModelVoting(Model):
+    def __init__(self, models, loss='mse', name='ModelVoting'):
+        """
+        Initialize the ModelVoting class.
+
+        Parameters:
+        - models: A list of base models to use (must follow the sklearn API).
+        - name: The name of the model.
+        - loss: Loss function to use ('log_loss', 'hinge_loss', 'mse', 'rmse', etc.).
+        """
+        super().__init__(model=None, loss=loss, name=name)
+        self.best_estimator_ = models  # Now a list of models
+        self.name = name
+        self.loss = loss
+        self.X_train = None
+        self.y_train = None
+        self.cv_results_ = None  # Adding the cv_results_ attribute
+        self.is_fitted_ = [False] * len(models)  # Keep track of fitted models
+
+    def fit(self, X_list, y_list, optimization='skip', grid_params_list=None, fit_params_list=None, cv_folds=10):
+        """
+        Train each model on the corresponding data.
+
+        Parameters:
+        - X_list: List of training data for each model.
+        - y_list: List of labels for the training data for each model.
+        - optimization: Optimization method to use ('grid' or 'bayes').
+        - grid_params_list: List of parameters to optimize for each model.
+        - fit_params_list: List of additional parameters for the fit function for each model.
+        - cv_folds: Number of cross-validation folds.
+        """
+        if not isinstance(X_list, list) or not isinstance(y_list, list):
+            raise ValueError("X_list and y_list must be lists of datasets.")
+        if len(self.best_estimator_) != len(X_list) or len(X_list) != len(y_list):
+            raise ValueError("The length of models, X_list, and y_list must be the same.")
+
+        if grid_params_list is None:
+            grid_params_list = [None] * len(self.best_estimator_)
+        if fit_params_list is None:
+            fit_params_list = [{}] * len(self.best_estimator_)
+
+        self.X_train = X_list
+        self.y_train = y_list
+        self.cv_results_ = []
+        self.is_fitted_ = [False] * len(self.best_estimator_)
+
+        for i, estimator in enumerate(self.best_estimator_):
+            if self.is_fitted_[i]:
+                print(f"Model {i} is already fitted. Skipping retraining.")
+                continue
+
+            X = X_list[i]
+            y = y_list[i]
+            grid_params = grid_params_list[i]
+            fit_params = fit_params_list[i]
+
+            # Train the final model with all selected features
+            if optimization == 'grid':
+                assert grid_params is not None
+                grid_search = GridSearchCV(estimator, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
+                grid_search.fit(X, y, **fit_params)
+                best_params = grid_search.best_params_
+                self.cv_results_.append(grid_search.cv_results_)
+                estimator.set_params(**best_params)
+            elif optimization == 'bayes':
+                # For simplicity, bayesian optimization is not implemented here
+                raise NotImplementedError("Bayesian optimization is not implemented in ModelVoting.")
+            elif optimization == 'skip':
+                estimator.fit(X, y, **fit_params)
+            else:
+                raise ValueError("Unsupported optimization method")
+
+            estimator.fit(X, y, **fit_params)
+            self.is_fitted_[i] = True
+
+    def predict(self, X_list):
+        """
+        Predict labels for input data using each model and aggregate the results.
+
+        Parameters:
+        - X_list: List of data to predict labels for.
+
+        Returns:
+        - Aggregated predicted labels.
+        """
+        if not isinstance(X_list, list):
+            raise ValueError("X_list must be a list of datasets.")
+        if len(self.best_estimator_) != len(X_list):
+            raise ValueError("The length of models and X_list must be the same.")
+
+        predictions = []
+        for i, estimator in enumerate(self.best_estimator_):
+            X = X_list[i]
+            pred = estimator.predict(X)
+            predictions.append(pred)
+
+        # Aggregate predictions
+        aggregated_pred = self.aggregate_predictions(predictions)
+        return aggregated_pred
+
+    def predict_proba(self, X_list):
+        """
+        Predict probabilities for input data using each model and aggregate the results.
+
+        Parameters:
+        - X_list: List of data to predict probabilities for.
+
+        Returns:
+        - Aggregated predicted probabilities.
+        """
+        if not isinstance(X_list, list):
+            raise ValueError("X_list must be a list of datasets.")
+        if len(self.best_estimator_) != len(X_list):
+            raise ValueError("The length of models and X_list must be the same.")
+
+        probas = []
+        for i, estimator in enumerate(self.best_estimator_):
+            X = X_list[i]
+            if hasattr(estimator, "predict_proba"):
+                proba = estimator.predict_proba(X)
+                probas.append(proba)
+            else:
+                raise AttributeError(f"The model at index {i} does not support predict_proba.")
+
+        # Aggregate probabilities
+        aggregated_proba = self.aggregate_probabilities(probas)
+        return aggregated_proba
+
+    def aggregate_predictions(self, predictions_list):
+        """
+        Aggregate predictions from multiple models.
+
+        Parameters:
+        - predictions_list: List of predictions from each model.
+
+        Returns:
+        - Aggregated predictions.
+        """
+        # Determine if it's a classification or regression task
+        if self.loss in ['log_loss', 'hinge_loss', 'accuracy']:
+            # Classification: Use majority vote
+            predictions_array = np.array(predictions_list)
+            aggregated_pred = stats.mode(predictions_array, axis=0)[0].flatten()
+        else:
+            # Regression: Average the predictions
+            predictions_array = np.array(predictions_list)
+            aggregated_pred = np.mean(predictions_array, axis=0)
+        return aggregated_pred
+
+    def aggregate_probabilities(self, probas_list):
+        """
+        Aggregate probabilities from multiple models.
+
+        Parameters:
+        - probas_list: List of probability predictions from each model.
+
+        Returns:
+        - Aggregated probabilities.
+        """
+        # Average probabilities
+        probas_array = np.array(probas_list)
+        aggregated_proba = np.mean(probas_array, axis=0)
+        return aggregated_proba
+
+    def score(self, X_list, y_list, sample_weight_list=None):
+        """
+        Evaluate the ensemble model's performance.
+
+        Parameters:
+        - X_list: List of input data.
+        - y_list: List of true labels.
+        - sample_weight_list: List of sample weights for each dataset.
+
+        Returns:
+        - The model's score on the provided data.
+        """
+        y_pred = self.predict(X_list)
+        y_true = np.concatenate(y_list)
+
+        if sample_weight_list is not None:
+            sample_weight = np.concatenate(sample_weight_list)
+        else:
+            sample_weight = None
+
+        return self.score_with_prediction(y_pred, y_true, sample_weight=sample_weight)
+
+    def get_params(self, deep=True):
+        """
+        Get the ensemble model's parameters.
+
+        Parameters:
+        - deep: If True, return the parameters for this model and nested models.
+
+        Returns:
+        - Dictionary of parameters.
+        """
+        params = {'models': self.best_estimator_,
+                  'loss': self.loss, 'name': self.name}
+        if deep:
+            for i, estimator in enumerate(self.best_estimator_):
+                params.update({f'model_{i}': estimator})
+                if hasattr(estimator, 'get_params'):
+                    estimator_params = estimator.get_params(deep=True)
+                    params.update({f'model_{i}__{key}': value for key, value in estimator_params.items()})
+        return params
+
+    def set_params(self, **params):
+        """
+        Set the ensemble model's parameters.
+
+        Parameters:
+        - params: Dictionary of parameters to set.
+
+        Returns:
+        - Self.
+        """
+        models_params = {}
+        for key, value in params.items():
+            if key in ['models', 'loss', 'name']:
+                setattr(self, key, value)
+            elif key.startswith('model_'):
+                idx_and_param = key.split('__')
+                if len(idx_and_param) == 1:
+                    idx = int(idx_and_param[0].split('_')[1])
+                    self.best_estimator_[idx] = value
+                else:
+                    idx = int(idx_and_param[0].split('_')[1])
+                    param_name = idx_and_param[1]
+                    if hasattr(self.best_estimator_[idx], 'set_params'):
+                        self.best_estimator_[idx].set_params(**{param_name: value})
+            else:
+                # General parameter, set to all models
+                for estimator in self.best_estimator_:
+                    if hasattr(estimator, 'set_params'):
+                        estimator.set_params(**{key: value})
+        return self
+    
+#################################################################################
+#                                                                               #
+#                                Stacking                                       #
+#                                                                               #
+#################################################################################
+
+class ModelStacking(Model):
+    def __init__(self, models, final_estimator=None, loss='mse', name='ModelStacking'):
+        """
+        Initialize the ModelStacking class.
+
+        Parameters:
+        - models: A list of base models to use (must follow the sklearn API).
+        - final_estimator: The final estimator to use in stacking.
+        - name: The name of the model.
+        - loss: Loss function to use ('log_loss', 'hinge_loss', 'mse', 'rmse', etc.).
+        """
+        super().__init__(model=None, loss=loss, name=name)
+        self.base_estimators = models
+        self.final_estimator = final_estimator
+        self.name = name
+        self.loss = loss
+        self.is_classifier = self.loss in ['log_loss', 'hinge_loss', 'accuracy']
+        self.best_estimator_ = None  # Replaced self.stack_model with self.best_estimator_
+        self.X_train = None
+        self.y_train = None
+        self.cv_results_ = None  # Adding the cv_results_ attribute
+        self.is_fitted_ = False  # Keep track of whether the stacking model is fitted
+
+    def fit(self, X_list, y_list, optimization='skip', grid_params=None, fit_params=None, cv_folds=10):
+        """
+        Train the stacking model on the data.
+
+        Parameters:
+        - X_list: List of training data for each base model.
+        - y_list: List of labels for the training data for each base model.
+        - optimization: Optimization method to use ('grid' or 'bayes').
+        - grid_params: Parameters to optimize for the stacking model.
+        - fit_params: Additional parameters for the fit function.
+        - cv_folds: Number of cross-validation folds.
+        """
+        if not isinstance(X_list, list) or not isinstance(y_list, list):
+            raise ValueError("X_list and y_list must be lists of datasets.")
+        if len(self.base_estimators) != len(X_list) or len(X_list) != len(y_list):
+            raise ValueError("The length of models, X_list, and y_list must be the same.")
+
+        if fit_params is None:
+            fit_params = {}
+
+        self.X_train = X_list
+        self.y_train = y_list
+        estimators = []
+
+        # Prepare estimators as a list of (name, estimator) tuples
+        for idx, estimator in enumerate(self.base_estimators):
+            estimators.append((f'estimator_{idx}', estimator))
+
+        # Choose stacking model based on whether it's a classifier or regressor
+        if self.is_classifier:
+            self.best_estimator_ = StackingClassifier(
+                estimators=estimators,
+                final_estimator=self.final_estimator,
+                cv=cv_folds,
+                n_jobs=-1
+            )
+        else:
+            self.best_estimator_ = StackingRegressor(
+                estimators=estimators,
+                final_estimator=self.final_estimator,
+                cv=cv_folds,
+                n_jobs=-1
+            )
+
+        # Combine X_list and y_list into single X and y
+        X = np.concatenate(X_list, axis=0)
+        y = np.concatenate(y_list, axis=0)
+
+        # Train the stacking model
+        if optimization == 'grid':
+            assert grid_params is not None
+            grid_search = GridSearchCV(
+                self.best_estimator_,
+                grid_params,
+                scoring=self.get_scorer(),
+                cv=cv_folds,
+                refit=True,
+                n_jobs=-1
+            )
+            grid_search.fit(X, y, **fit_params)
+            self.best_estimator_ = grid_search.best_estimator_
+            self.cv_results_ = grid_search.cv_results_
+        elif optimization == 'skip':
+            self.best_estimator_.fit(X, y, **fit_params)
+        else:
+            raise ValueError("Unsupported optimization method")
+
+        self.is_fitted_ = True
+
+    def predict(self, X_list):
+        """
+        Predict labels for input data using the stacking model.
+
+        Parameters:
+        - X_list: List of data to predict labels for.
+
+        Returns:
+        - Predicted labels.
+        """
+        assert self.best_estimator_ is not None
+        check_is_fitted(self.best_estimator_)
+        if not isinstance(X_list, list):
+            raise ValueError("X_list must be a list of datasets.")
+        if len(self.base_estimators) != len(X_list):
+            raise ValueError("The length of models and X_list must be the same.")
+
+        # Combine X_list into single X
+        X = np.concatenate(X_list, axis=0)
+
+        # Predict using the stacking model
+        return self.best_estimator_.predict(X)
+
+    def predict_proba(self, X_list):
+        """
+        Predict probabilities for input data using the stacking model.
+
+        Parameters:
+        - X_list: List of data to predict probabilities for.
+
+        Returns:
+        - Predicted probabilities.
+        """
+        assert self.best_estimator_ is not None
+        assert self.is_classifier is True
+        check_is_fitted(self.best_estimator_)
+        if not self.is_classifier:
+            raise AttributeError("predict_proba is not available for regression problems.")
+        if not isinstance(X_list, list):
+            raise ValueError("X_list must be a list of datasets.")
+        if len(self.base_estimators) != len(X_list):
+            raise ValueError("The length of models and X_list must be the same.")
+
+        # Combine X_list into single X
+        X = np.concatenate(X_list, axis=0)
+
+        # Predict probabilities using the stacking model
+        return self.best_estimator_.predict_proba(X)
+
+    def score(self, X_list, y_list, sample_weight_list=None):
+        """
+        Evaluate the stacking model's performance.
+
+        Parameters:
+        - X_list: List of input data.
+        - y_list: List of true labels.
+        - sample_weight_list: List of sample weights for each dataset.
+
+        Returns:
+        - The model's score on the provided data.
+        """
+        y_pred = self.predict(X_list)
+        y_true = np.concatenate(y_list)
+
+        if sample_weight_list is not None:
+            sample_weight = np.concatenate(sample_weight_list)
+        else:
+            sample_weight = None
+
+        return self.score_with_prediction(y_pred, y_true, sample_weight=sample_weight)
+
+    def get_params(self, deep=True):
+        """
+        Get the stacking model's parameters.
+
+        Parameters:
+        - deep: If True, return the parameters for this model and nested models.
+
+        Returns:
+        - Dictionary of parameters.
+        """
+        params = {
+            'models': self.base_estimators,
+            'final_estimator': self.final_estimator,
+            'loss': self.loss,
+            'name': self.name
+        }
+        if deep and self.best_estimator_ is not None:
+            params.update(self.best_estimator_.get_params(deep=True))
+        return params
+
+    def set_params(self, **params):
+        """
+        Set the stacking model's parameters.
+
+        Parameters:
+        - params: Dictionary of parameters to set.
+
+        Returns:
+        - Self.
+        """
+        if 'models' in params:
+            self.base_estimators = params.pop('models')
+        if 'final_estimator' in params:
+            self.final_estimator = params.pop('final_estimator')
+        if 'loss' in params:
+            self.loss = params.pop('loss')
+            self.is_classifier = self.loss in ['log_loss', 'hinge_loss', 'accuracy']
+        if 'name' in params:
+            self.name = params.pop('name')
+
+        if self.best_estimator_ is not None:
+            self.best_estimator_.set_params(**params)
+        return self

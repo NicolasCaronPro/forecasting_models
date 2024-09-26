@@ -653,16 +653,16 @@ class LSTM(torch.nn.Module):
 
         self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, dropout=dropout, batch_first=True).to(device)
         
-        self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels,
+        self.output = OutputLayer(in_channels=hidden_channels+residual_channels, end_channels=end_channels,
                                   n_steps=n_sequences, device=device, act_func=act_func,
                                   binary=binary)
         
         self.batchNorm = nn.BatchNorm(hidden_channels).to(device)
         self.dropout = torch.nn.Dropout(dropout)
 
-        #self.act = torch.nn.ReLU()
-        
-        #self.output = nn.Linear(in_channels=hidden_channels, out_channels=1, weight_initializer='glorot', bias=True).to(device)
+        #self.calibrator_layer = torch.nn.Linear(in_features=residual_channels+(2 if binary else 1),
+        #                                    out_features=2 if binary else 1, bias=True, device=device)
+
         
         self.device = device
         self.hidden_channels = hidden_channels
@@ -674,14 +674,18 @@ class LSTM(torch.nn.Module):
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         x = self.input(X)
+        original_input = x[:, :, -1]
         x = torch.movedim(x, 2, 1)
         x, _ = self.lstm(x, (h0, c0))
         x = torch.squeeze(x[:, -1, :])
         x = self.batchNorm(x)
         x = self.dropout(x)
-        #x = self.act(x)
+        x = torch.concat((original_input, x), dim=1)
         output = self.output(x)
-
+        #x = torch.concat((original_input, x), dim=1)
+        #output = self.calibrator_layer(x)
+        #output = torch.clamp(output, min=0)
+   
         if self.return_hidden:
             return output, x
         else:
