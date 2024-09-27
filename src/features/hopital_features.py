@@ -43,7 +43,7 @@ class HopitalFeatures(BaseFeature):
         assert isinstance(self.etablissement,
                           str), "etablissement must be a string"
 
-    def add_target(self):
+    def include_nb_emmergencies(self, initial_shift: int = 0) -> None:
         """
         Adds the target to the features.
         """
@@ -56,23 +56,29 @@ class HopitalFeatures(BaseFeature):
         if target_file_path.exists():
             self.logger.info(
                 f"  - Chargement des données de {self.etablissement} depuis le fichier")
-            self.data = pd.read_feather(target_file_path)
+            data = pd.read_feather(target_file_path)
         else:
             self.logger.info(
                 f"  - Chargement des données de {self.etablissement} depuis le fichier Excel")
-            self.data = pd.read_excel(self.data_dir / file_name, sheet_name=1)
+            data = pd.read_excel(self.data_dir / file_name, sheet_name=1)
 
-            if "annee" in self.data:
-                self.data.drop(axis=1, columns="annee", inplace=True)
+            if "annee" in data:
+                data.drop(axis=1, columns="annee", inplace=True)
 
-            self.data.rename(columns={
-                             "Total": f"Total_{self.etablissement}", "date_entree": "date"}, inplace=True)
+            data.rename(columns={
+                "Total": f"Total_{self.etablissement}", "date_entree": "date"}, inplace=True)
 
-            if self.data["date"].dtype != "datetime64[ns]":
-                self.data["date"] = pd.to_datetime(self.data["date"])
+            if data["date"].dtype != "datetime64[ns]":
+                data["date"] = pd.to_datetime(data["date"])
 
-            self.data.sort_values(by="date", inplace=True)
-            self.data.set_index('date', inplace=True)
+            data.sort_values(by="date", inplace=True)
+            data.set_index('date', inplace=True)
+        # print(data)
+        data[f"Total_{self.etablissement}"] = data[f"Total_{self.etablissement}"].shift(initial_shift)
+        data.dropna(subset=[f"Total_{self.etablissement}"], inplace=True)
+        # print(data)
+        self.data = self.data.join(data)
+        # print(self.data)
 
     def include_HNFC_moving(self):
         self.logger.info("Intégration du déménagement de l'HNFC")
@@ -82,13 +88,21 @@ class HopitalFeatures(BaseFeature):
         self.data["HNFC_moving"] = np.where(self.data.index < start, 'before', np.where(
             self.data.index >= end, 'after', 'during'))
         self.data["HNFC_moving"] = self.data["HNFC_moving"].astype("category")
-        # self.data["2_HNFC_moving"] = self.data['HNFC_moving'].copy().shift(1).astype("category")
 
-    def include_nb_hospitalized(self):
+    def include_nb_hospitalized(self, initial_shift: int = 0):
         hospitalized = pd.read_excel(
             self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
-        self.data = self.data.join(
-            hospitalized.set_index("date_entree")["nb_vers_hospit"])
+        hospitalized['date_entree'] = pd.to_datetime(hospitalized['date_entree'], unit='D', origin='1899-12-30')
+
+        hospitalized.rename(columns={"date_entree": "date"}, inplace=True)
+        hospitalized.set_index("date", inplace=True)
+        hospitalized.rename(columns={"Total": "nb_vers_hospit"}, inplace=True)
+        # print(hospitalized)
+        hospitalized['nb_vers_hospit'] = hospitalized['nb_vers_hospit'].shift(initial_shift)
+        self.data = self.data.join(hospitalized)
+        # print(self.data)
+        # self.data["nb_vers_hospit"] = self.data["nb_vers_hospit"].shift(initial_shift)
+        self.data.dropna(subset=["nb_vers_hospit"], inplace=True)
 
     def fetch_data_function(self, *args, **kwargs) -> None:
         """
@@ -96,10 +110,12 @@ class HopitalFeatures(BaseFeature):
         """
 
         if self.include_emmergency_arrivals:
-            self.add_target()
+            self.include_nb_emmergencies(initial_shift=-1)
 
         if self.include_hnfc_moving:
             self.include_HNFC_moving()
 
         if self.include_nb_hospit:
-            self.include_nb_hospitalized()
+            self.include_nb_hospitalized(initial_shift=-1)
+
+        # print(self.data)

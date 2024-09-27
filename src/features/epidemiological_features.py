@@ -102,9 +102,9 @@ class EpidemiologicalFeatures(BaseFeature):
     def fetch_data_function(self, *args, **kwargs) -> None:
         self.include_sentinelles()
 
-    def get_data(self, from_date: str | dt.datetime | None = None, to_date: str | dt.datetime | None = None, features_names: List[str] | None = None, region: str | None = None) -> pd.DataFrame:
-        data = super().get_data(from_date, to_date, features_names)
-        # if region is None:
-        #     region = self.region
-        # data = data.loc[data['region'] == region]
-        return data
+    # def get_data(self, from_date: str | dt.datetime | None = None, to_date: str | dt.datetime | None = None, features_names: List[str] | None = None, region: str | None = None) -> pd.DataFrame:
+    #     data = super().get_data(from_date, to_date, features_names)
+    #     # if region is None:
+    #     #     region = self.region
+    #     # data = data.loc[data['region'] == region]
+    #     return data

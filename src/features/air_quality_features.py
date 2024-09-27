@@ -22,7 +22,7 @@ class AirQualityFeatures(BaseFeature):
         super().__init__(config, parent)
         self.archived_data_dir = self.data_dir / 'archived'
         self.archived_data_dir.mkdir(exist_ok=True, parents=True)
-        self.drop_const_columns = drop_const_cols
+        self.drop_const_cols = drop_const_cols
 
         assert 'departement' in self.config, "departement must be provided in config"
         self.departement = self.config.get('departement')

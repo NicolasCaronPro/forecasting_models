@@ -26,6 +26,7 @@ import os
 import matplotlib.pyplot as plt
 import cudf as cd
 import numpy as np
+import re
 
 
 class BaseExperiment:
@@ -65,22 +66,20 @@ class BaseExperiment:
 
             # Get a dataset object corresponding to the dataset_config
             dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
-            # dataset.plot(freq='1D', max_subplots=16)
-
-            # Encode the dataset if needed
-            if encoding_pipeline is not None:
-                if isinstance(encoding_pipeline, dict):
-                    encoding_pipeline = create_encoding_pipeline(encoding_pipeline)
-            
-                dataset.encode(pipeline=encoding_pipeline)
-
-            
-            # TODO: Remove this line, it's just for testing
-            # return dataset
+            # print(dataset.targets)
 
             if find_best_features:
-                selected_features = self.get_important_features(dataset=dataset, model=self.model)
+                selected_features = self.get_important_features(dataset=dataset, model=self.model, model_config=model_config)
+                # dataset.enc_X_train = dataset.enc_X_train[selected_features]
+                # dataset.enc_X_val = dataset.enc_X_val[selected_features]
+                # dataset.enc_X_test = dataset.enc_X_test[selected_features]
+                
                 dataset: BaseTabularDataset = dataset.get_dataset(features_names=selected_features)
+
+            # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
+            # print(dataset.targets)
+            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]})
+            # print(model_config['fit_params'])
 
             mlflow.log_table(data=dataset.train_set, artifact_file='datasets/train_set.json')
             mlflow.log_table(data=dataset.val_set, artifact_file='datasets/val_set.json')
@@ -97,8 +96,7 @@ class BaseExperiment:
             mlflow.log_params(dataset_config)
 
 
-            # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
-            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]})
+
 
             mlflow.log_params({f'grid_{key}': value for key, value in model_config['grid_params'].items()})
             # mlflow.log_params(model_config['params'])
@@ -106,6 +104,7 @@ class BaseExperiment:
             mlflow.log_param('optimization', model_config['optimization'])
 
             self.model.fit(cd.DataFrame(dataset.enc_X_train), dataset.y_train, **model_config)
+            self.logger.info("Model fitted.")
 
             # self.model.plot_tree(dir_output=run_dir)
 
@@ -125,17 +124,47 @@ class BaseExperiment:
             
             scores = self.score(dataset)
 
-            # mlflow.log_metrics(scores)
-            mlflow.log_metric(self.model.get_scorer(), scores)
+            mlflow.log_metrics(scores)
+            # mlflow.log_metric(self.model.get_scorer(), scores)
 
             y_pred = self.predict(dataset)
-            figure = self.plot(dataset, y_pred)
+            # y_pred = self.predict_at_horizon(dataset, horizon=7)
+            figure = self.plot(dataset, y_pred, scores)
 
             mlflow.log_figure(figure, 'predictions.png')
 
             self.run_nb += 1
     
-    def plot(self, dataset: BaseTabularDataset, y_pred: pd.DataFrame) -> plt.Figure:
+    def get_bjml(self) -> pd.DataFrame:
+        df = pd.read_csv('/home/maxime/Documents/WORKSPACES/forecasting_models/bjml.csv', sep=';')
+        # Define a function to get the start (Monday) of each ISO week
+        def get_start_of_week(year, week):
+            # Use pd.Timestamp and isocalendar to get the first date of each ISO week in 2022
+            first_day_of_year = pd.Timestamp(f'{year}-01-01')
+            # Find the Monday of that week
+            start_of_week = first_day_of_year + pd.offsets.Week(weekday=0) * (week - 1)
+            return start_of_week
+
+        # Add a column 'Start Date' to df by calculating the start (Monday) of each week in 2022
+        df['Start Date'] = df['Semaine'].apply(lambda x: get_start_of_week(2022, x))
+
+        # Create a DataFrame with daily data by expanding each week into daily rows
+        daily_df = pd.DataFrame({
+            'date': pd.date_range(start='2022-01-01', end='2022-12-31', freq='D')
+        })
+
+        # Merge weekly data with daily data by matching each date to its corresponding ISO week
+        daily_df['Semaine'] = daily_df['date'].apply(lambda x: x.isocalendar()[1])
+
+        # Merge daily DataFrame with weekly values
+        daily_df = pd.merge(daily_df, df[['Semaine', 'Min.', 'BJML', 'Méd.', 'P75', 'Max.']], on='Semaine', how='left')
+
+        # Now daily_df contains a row for each day of 2022 with the corresponding weekly value
+        daily_df.drop('Semaine', axis=1, inplace=True)
+        daily_df.set_index('date', inplace=True)
+        return daily_df
+
+    def plot(self, dataset: BaseTabularDataset, y_pred: pd.DataFrame, scores:dict) -> plt.Figure:
         """
         Plot the results.
 
@@ -144,18 +173,23 @@ class BaseExperiment:
         """
         self.logger.info("Plotting the results...")
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(20, 10))
         ax.set_title('True vs Predicted')
         ax.set_xlabel('Date')
         ax.set_ylabel('Value')
+        ax.legend()
+        ax.text(0.5, 0.5, str(scores))
+        ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
 
         dataset.y_test.plot(ax=ax, label='True', use_index=True)
         y_pred.plot(ax=ax, label='Predicted', use_index=True)
-        ax.legend()
+        if 'nb_vers_hospit' in self.dataset.targets and dataset.y_test.index[0].year == 2022:
+            bjml = self.get_bjml()
+            bjml.plot(ax=ax, label='BJML', use_index=True)
 
         return fig
     
-    def get_important_features(self, dataset: BaseTabularDataset = None, model:Model = None, preselection: List[str] = []) -> List[str]:
+    def get_important_features(self, dataset: BaseTabularDataset = None, model:Model = None, preselection: List[str] = [], model_config:dict=None) -> List[str]:
         selected_features = []
 
         if dataset is None:
@@ -164,22 +198,26 @@ class BaseExperiment:
         if model is None:
             model = self.model
 
-        variables = dataset.get_features_names()
+        variables = dataset.enc_data.columns.to_list()
         targets = dataset.targets
 
         encoded_data = dataset.enc_data
 
         data = pd.concat([encoded_data, dataset.data[targets]], axis=1)
 
+        # afficher le nombre de colonnes portant le même nom si il est supérieur à 1
+        # print(data.columns.value_counts().loc[lambda x: x > 1])
+
+        # TODO: ne marchera pas pour du multi-target car le modèle passé à explore_features attendra plusieurs targets
         for target in targets:
             # print(data, variables, target)
-            important_features = get_features(data, variables, target, logger=self.logger, num_feats=100)
+            important_features = get_features(data, variables, target, logger=self.logger, num_feats=200)
 
             # On transforme le dictionaire de tupples en dictionaire de listes de features importantes
             features_to_test = [f[0] for f in important_features]
-            print(features_to_test)
+            # print(features_to_test)
 
-            selected_features.extend([item for item in explore_features(model=model, features=features_to_test,
+            selected_features.extend([item for item in explore_features(model=model, model_config=model_config, features=features_to_test,
                              df_train=pd.concat([dataset.enc_X_train, dataset.y_train], axis=1),
                              df_val=pd.concat([dataset.enc_X_val, dataset.y_val], axis=1),
                              df_test=pd.concat([dataset.enc_X_test, dataset.y_test], axis=1),
@@ -195,9 +233,81 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Testing the model...")
+
         y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
         
         return y_pred
+    
+    def predict_at_horizon(self, dataset: BaseTabularDataset, horizon: int = 1):
+        """
+        Fonction qui prédit les valeurs de la colonne target pour chaque groupe de n jours.
+        Le premier jour d'un groupe est prédit avec les vraies données,
+        les jours suivants sont prédit avec des dépendances sur les prédictions précédentes.
+        
+        Parameters:
+        df (DataFrame): Dataset contenant les colonnes features et target.
+        horizon (int): Taille du groupe de jours.
+        
+        Returns:
+        DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
+        """
+        df = cd.DataFrame(dataset.enc_X_train)
+        predictions = pd.DataFrame()
+        
+        # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles
+        rolling_window_cols = [col for col in df.columns if re.search(r'%%(mean|std)_(\d+)J', col)]
+        rolling_window_sizes = {col: int(re.search(r'_(\d+)J', col).group(1)) for col in rolling_window_cols}
+
+        # Parcourir le dataset en groupes de n jours
+        for i in range(0, len(df), horizon):
+            # Définir les limites du groupe de n jours
+            groupe: pd.DataFrame = df.iloc[i:i+horizon].copy()  # Copier le groupe pour éviter de modifier df
+            
+            for j in range(horizon):
+                # Si c'est le premier jour, utiliser les vraies données
+                # Si c'est un jour suivant, utiliser les prédictions précédentes
+
+                if j > 0:
+                    # Pour les jours suivants, remplacer les colonnes target%%J-1, target%%J-2 par les prédictions
+                    for k in range(1, j+1):
+                        for target in dataset.targets:
+                            colonne_a_remplacer = f'{target}%%J-{k}'
+                            # Simuler l'existence des colonnes target%%J-k en utilisant les features (ajuster selon ton dataset réel)
+                            if colonne_a_remplacer in groupe.columns:
+                                self.logger.info(f"Remplacement de la colonne {colonne_a_remplacer} par la prédiction {f'y_pred_{target}'}")
+                                groupe[colonne_a_remplacer].iloc[j] = groupe[f'y_pred_{target}'].iloc[j-k]
+                            
+                    # TODO: aussi recalculer les colonnes features%%mean_nJ, features%%std_nJ, etc. si elles existent
+
+
+                    # Recalculer dynamiquement les colonnes basées sur des rolling windows (moyenne, écart-type, etc.)
+                    for feature in dataset.features:
+                        for col in rolling_window_cols:
+                            if feature in col:
+                                window_size = rolling_window_sizes[col]
+
+                                # Vérifier si la taille de la fenêtre est suffisante pour calculer la moyenne/l'écart-type
+                                if j >= window_size:
+                                    # Recalcul des moyennes/écarts-types
+                                    if 'mean' in col:
+                                        self.logger.info(f"Recalcul de {col} (mean sur {window_size} jours) pour le jour {j}")
+                                        groupe[col].iloc[j] = groupe[feature].iloc[j - window_size:j].mean()
+
+                                    if 'std' in col:
+                                        self.logger.info(f"Recalcul de {col} (std sur {window_size} jours) pour le jour {j}")
+                                        groupe[col].iloc[j] = groupe[feature].iloc[j - window_size:j].std()
+                                        
+                features = groupe.iloc[j]
+                print(features)
+                pred = pd.DataFrame(self.model.predict(features), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
+
+                predictions = pd.concat([predictions, pred], axis=0)
+                
+            
+            # # Mettre à jour les prédictions dans le dataset d'origine
+            # df['target_pred'].iloc[i:i+horizon] = groupe['target_pred']
+        
+        return predictions
     
     def score(self, dataset: BaseTabularDataset) -> None:
         """
@@ -208,7 +318,7 @@ class BaseExperiment:
         """
         self.logger.info("Scoring the model...")
 
-        scores = self.model.score(dataset.enc_X_test, dataset.y_test)
+        scores = self.model.score(dataset.enc_X_test, dataset.y_test, single_score=False)
         # scorer = self.model.get_scorer()
 
         return scores

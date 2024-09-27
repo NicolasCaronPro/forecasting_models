@@ -15,7 +15,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.base import clone
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor, RegressorChain, ClassifierChain
-from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error
+from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error, make_scorer
 from skopt import Optimizer, BayesSearchCV
 from skopt.space import Integer, Real
 import logging
@@ -31,6 +31,7 @@ import numpy as np
 import math
 from pathlib import Path
 import pandas as pd
+from src.models.loss import metrics
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def __init__(self, model, loss: str = 'log_loss', name='Model'):
@@ -65,7 +66,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         # self.best_estimator_.set_params(**params)
         # Check if the labels are 1D or 2D
-        if y.ndim > 1:
+        if y.ndim > 1 and y.shape[1] > 1:
+            print('Running with MultiOutputRegressor')
             self.best_estimator_ = MultiOutputRegressor(self.best_estimator_)
             grid_params = {'estimator__' + key: value for key, value in grid_params.items()}
 
@@ -165,7 +167,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             raise AttributeError(
                 "The chosen model does not support predict_proba.")
 
-    def score(self, X, y, sample_weight=None):
+    def score(self, X, y, sample_weight=None, single_score=True):
         """
         Evaluate the model's performance.
 
@@ -177,25 +179,20 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - The model's score on the provided data.
         """
-        y_pred = self.predict(X)
-        scores = {}
-        if self.loss == 'log_loss':
-            proba = self.predict_proba(X)
-            scores['neg_log_loss'] = -1*log_loss(y, proba)
-        elif self.loss == 'hinge_loss':
-            scores['hinge_loss'] = hinge_loss(y, y_pred)
-        elif self.loss == 'accuracy':
-            scores['accuracy'] = accuracy_score(y, y_pred)
-        elif self.loss == 'mse':
-            scores['neg_mean_squared_error'] = -1*mean_squared_error(y, y_pred)
-        elif self.loss == 'rmse':
-            scores['neg_root_mean_squared_error'] = -1*math.sqrt(mean_squared_error(y, y_pred))
-        elif self.loss == 'rmsle':
-            scores['neg_root_mean_squared_log_error'] = -1*math.sqrt(mean_squared_log_error(y, y_pred))
         
-        # return first score
-        score = list(scores.values())[0]
-        return score
+        y_pred = self.predict(X)
+        if single_score:
+            # print("Scoring with single score")
+            for metric_name, func in metrics.items():
+                if self.loss == metric_name:
+                    return func(y, y_pred)
+            raise ValueError(f"Unknown loss function: {self.loss}")
+        scores = {}
+
+        for metric_name, func in metrics.items():
+            scores[metric_name] = func(y, y_pred)
+
+        return scores
 
     def get_params(self, deep=True):
         """
@@ -251,21 +248,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Return the scoring function based on the chosen loss function.
         """
 
-        scorers = []
-        if self.loss == 'log_loss':
-            scorers.append('neg_log_loss')
-        if self.loss == 'hinge_loss':
-            scorers.append('hinge')
-        if self.loss == 'accuracy':
-            scorers.append('accuracy')
-        if self.loss == 'mse':
-            scorers.append('neg_mean_squared_error')
-        if self.loss == 'rmse':
-            scorers.append('neg_root_mean_squared_error')
-            return 'neg_root_mean_squared_error'
-        if self.loss == 'rmsle':
-            scorers.append('neg_root_mean_squared_log_error')
-        return scorers[0]
+        for metric_name, func in metrics.items():
+            if self.loss == metric_name:
+                return make_scorer(func, greater_is_better=False)
 
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """

@@ -178,3 +178,6 @@ mlartifacts/
 
 # geodata
 src/geolocalisation/
+
+# miscelaneous
+misc/

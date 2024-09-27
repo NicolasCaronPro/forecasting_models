@@ -216,7 +216,7 @@ def get_features(df: pd.DataFrame, variables: List[str], target:str='appels', nu
     return final
 
 
-def explore_features(model: Model, features: List[str], df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.DataFrame, target: str, weight_col: str = None, logger:logging.Logger = None, preselection: List[str] = []) -> List[str]:
+def explore_features(model: Model, model_config:dict, features: List[str], df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.DataFrame, target: str, weight_col: str = None, logger:logging.Logger = None, preselection: List[str] = []) -> List[str]:
     """
     Explore and select the most important features for a given model.
     This function iteratively adds features to the model and evaluates their importance
@@ -249,7 +249,7 @@ def explore_features(model: Model, features: List[str], df_train: pd.DataFrame, 
     logger.info("=> Exploration des features")
     features_importance = []
     selected_features_ = preselection
-    base_score = -math.inf
+    base_score = math.inf
     count_max = math.inf
     c = 0
 
@@ -265,6 +265,8 @@ def explore_features(model: Model, features: List[str], df_train: pd.DataFrame, 
                 # 'sample_weight' : df_train[weight_col],
                 'verbose' : False
                 }
+        
+        model_config['fit_params'].update({'eval_set': [(X_train_single, df_train[target]), (df_val[selected_features_], df_val[target])]})
 
         model.fit(X=X_train_single, y=df_train[target], fit_params=fitparams)
 
@@ -273,12 +275,13 @@ def explore_features(model: Model, features: List[str], df_train: pd.DataFrame, 
 
         # Si le score ne s'améliore pas, on retire la variable de la liste
         if single_feature_score <= base_score:
-            selected_features_.pop(-1)
-            c += 1
-        else:
             logger.info(f'With {fet} number {i}: {base_score} -> {single_feature_score}')
             base_score = single_feature_score
             c = 0
+        else:
+            selected_features_.pop(-1)
+            c += 1
+
 
         if c > count_max:
             logger.warning(f'Score didn t improve for {count_max} features, we break')

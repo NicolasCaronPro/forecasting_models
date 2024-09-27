@@ -90,7 +90,7 @@ class SociologicalFeatures(BaseFeature):
         d = vacances_scolaires_france.SchoolHolidayDates()
         academie = [k for k in self.academies if self.config.get(
             'departement') in self.academies[k]][0]
-        print(academie)
+        # print(academie)
         # print(academie[int(self.config.get('departement'))])
         self.data['holidays'] = self.data.index.map(lambda x: 1 if d.is_holiday_for_zone(
             x.date(), get_academic_zone(academie, x)) else 0).astype('category')

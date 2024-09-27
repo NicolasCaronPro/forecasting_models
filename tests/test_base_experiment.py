@@ -15,6 +15,7 @@ from src.datasets.base_tabular_dataset import BaseTabularDataset
 from src.experiments.base_experiment import BaseExperiment
 import src.features as ft
 import logging
+import pandas as pd
 
 # mlflow.set_tracking_uri("http://localhost:5000")
 
@@ -29,13 +30,14 @@ config = ft.Config({'max_nan': 15, "departement": "21", "root_dir": root_dir, "s
                     "stop": '31-12-2023', "logger": logger, "step_unit": 'days', "step_value": 1,
                     "shift": 0, "rolling_window": 0, "etablissement": "CHU Dijon", 'region':'BOURGOGNE'})
 
-ars_features_class = [ft.AirQualityFeatures, ft.HopitalFeatures(config=config, include_emmergency_arrivals=True, include_nb_hospit=False), ft.EpidemiologicalFeatures, ft.FireFightersFeatures(config=config, include_calls=False),
+ars_features_class = [ft.AirQualityFeatures(config=config, drop_const_cols=True), ft.HopitalFeatures(config=config, include_emmergency_arrivals=True, include_nb_hospit=True), ft.EpidemiologicalFeatures, ft.FireFightersFeatures(config=config, include_calls=False),
                       ft.GoogleTrendFeatures, ft.MeteorologicalFeatures, ft.SociologicalFeatures,
                       ft.SportsCompetitionFeatures, ft.TrafficFeatures]
-
-arsTabularDataset = BaseTabularDataset(target_colomns=['Total_CHU Dijon'],  # ,  'nb_vers_hospit'
+# target_colomns = ['nb_vers_hospit']
+target_colomns = ['Total_CHU Dijon']
+arsTabularDataset = BaseTabularDataset(target_colomns=target_colomns,
                                        config=config, features_class=ars_features_class)
-arsTabularDataset.fetch_data(save=True) # Fetch data from the features, do this only once, if you need smaller datasets, use the get_dataset method
+arsTabularDataset.fetch_data(save=False) # Fetch data from the features, do this only once, if you need smaller datasets, use the get_dataset method
 
 model_params = {
     'early_stopping_rounds': 10,
@@ -47,7 +49,7 @@ model_params = {
     # 'multi_strategy': 'one_output_per_tree',
     # 'multi_strategy': 'multi_output_tree' 
 }
-model = get_model(model_type='xgboost', name='XGBRegressor', device='cuda', task_type='regression', test_metrics='rmse', with_metric='w_rmse', params=model_params)
+model = get_model(model_type='xgboost', name='XGBRegressor', device='cuda', task_type='regression', test_metrics='w_rmse', with_metric='w_rmse', params=model_params)
 
 ars_experiment = BaseExperiment(dataset=arsTabularDataset, model=model, config=config)
 
@@ -107,11 +109,11 @@ encoders_dict = {
 
 split_config = {'test_size': 0.2, 'val_size': 0.2, 'shuffle': False}
 
-dataset_config={'from_date': '01-01-2019', 'to_date': '31-12-2023', 'shift':7, 'rolling_window':[7, 14], 'freq':'1D', 'split_config': split_config}
 model_config={"optimization": "grid", "grid_params": grid_params, "fit_params": fit_params}
 encoding_pipeline = create_encoding_pipeline(encoders_dict=encoders_dict)
+dataset_config={'from_date': '15-01-2019', 'to_date': '30-12-2023', 'shift':[1, 2, 3, 4, 5, 6, 7], 'rolling_window':[7, 14], 'freq':'1D', 'split_config': split_config, 'encoding_pipeline': encoding_pipeline}
 
-ars_experiment.run(dataset_config=dataset_config, model_config=model_config, encoding_pipeline=encoding_pipeline, find_best_features=True)
+ars_experiment.run(dataset_config=dataset_config, model_config=model_config, find_best_features=True)
 
 # dataset = ars_experiment.dataset
 # data = dataset.data

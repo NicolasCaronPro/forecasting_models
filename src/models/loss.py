@@ -1,6 +1,6 @@
 from typing import Tuple
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, root_mean_squared_error, mean_squared_error, root_mean_squared_log_error, mean_squared_log_error
-
+import pandas as pd
 
 # mae, mse, rmse, msle, mape, huber, logcosh
 import numpy as np
@@ -71,7 +71,7 @@ def percentiles_weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     
     return grad, hess
 
-def weighted_rmse(y_true, y_pred):
+def weighted_rmse(y_true, y_pred, sample_weight=None):
     """
     Custom evaluation metric for RMSE weighted by deviation from mean.
     
@@ -82,7 +82,12 @@ def weighted_rmse(y_true, y_pred):
     Returns:
     weighted_rmse_value (float): Value of the weighted RMSE.
     """
+    if isinstance(y_true, pd.DataFrame):
+        y_true = y_true.values
 
+    # Ensure y_true and y_pred are 1D arrays
+    y_true = np.ravel(y_true)
+    y_pred = np.ravel(y_pred)
     
     mean = np.mean(y_true)
     std = np.std(y_true)
@@ -92,13 +97,14 @@ def weighted_rmse(y_true, y_pred):
 
     # print(weights)
 
+
     errors = y_pred - y_true
     weighted_squared_errors = weights * errors ** 2
     weighted_rmse_value = np.sqrt(np.mean(weighted_squared_errors))
     
     return weighted_rmse_value
 
-def percentiles_weighted_rmse(y_true, y_pred):
+def percentiles_weighted_rmse(y_true, y_pred, sample_weight=None):
     """
     Custom evaluation metric for percentiles weighted RMSE.
     
@@ -110,6 +116,13 @@ def percentiles_weighted_rmse(y_true, y_pred):
     weighted_rmse_value (float): Value of the weighted RMSE.
     """
     
+    if isinstance(y_true, pd.DataFrame):
+        y_true = y_true.values
+
+    # Ensure y_true and y_pred are 1D arrays
+    y_true = np.ravel(y_true)
+    y_pred = np.ravel(y_pred)
+
     percentile_95 = np.percentile(y_true, 95)
     percentile_90 = np.percentile(y_true, 90)
     percentile_85 = np.percentile(y_true, 85)

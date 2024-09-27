@@ -37,7 +37,7 @@ class MultiTargetEncoder(BaseEstimator, TransformerMixin):
         encoded_X = []
         for target in self.targets:
             df = self.encoders[target].transform(X)
-            df.columns = [f"{col}_{target}" for col in df.columns]
+            df.columns = [f"{col}##{target}" for col in df.columns]
             encoded_X.append(df)
 
         encoded_X = pd.concat(encoded_X, axis=1)
