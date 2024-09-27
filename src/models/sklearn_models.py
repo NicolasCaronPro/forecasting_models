@@ -71,7 +71,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         # Train the final model with all selected features
         if optimization == 'grid':
-            assert grid_params is not None
+            assert grid_params is not None, "Grid parameters must be provided for grid search."
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=True)
             # grid_search.set_params(**fit_params)
 

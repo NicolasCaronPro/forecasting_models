@@ -20,7 +20,7 @@ if __name__ == '__main__':
 from src.models.sklearn_models import *
 from src.models.loss import *
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', with_metric=None, params:dict=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics='rmse', with_metric=None, params:dict=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 

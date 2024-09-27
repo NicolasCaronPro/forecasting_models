@@ -24,7 +24,7 @@ import mlflow.data.pandas_dataset
 from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
-import cudf as cd
+#import cudf as cd
 import numpy as np
 
 
@@ -105,7 +105,7 @@ class BaseExperiment:
             mlflow.log_params(model_config['fit_params'])
             mlflow.log_param('optimization', model_config['optimization'])
 
-            self.model.fit(cd.DataFrame(dataset.enc_X_train), dataset.y_train, **model_config)
+            self.model.fit(pd.DataFrame(dataset.enc_X_train), dataset.y_train, **model_config)
 
             # self.model.plot_tree(dir_output=run_dir)
 
@@ -195,7 +195,7 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Testing the model...")
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
+        y_pred = pd.DataFrame(self.model.predict(pd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
         
         return y_pred
     

@@ -89,6 +89,8 @@ class HopitalFeatures(BaseFeature):
             self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
         self.data = self.data.join(
             hospitalized.set_index("date_entree")["nb_vers_hospit"])
+        
+    
 
     def fetch_data_function(self, *args, **kwargs) -> None:
         """
