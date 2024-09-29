@@ -1,7 +1,7 @@
 import sys
 #sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-sys.path.insert(0, '/Home/Users/ncaron/WORK/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-from forecasting_models.utils import *
+sys.path.insert(0, '/Home/Users/ncaron/WORK/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
+from forecasting_models.pytorch.utils import *
 
 ################################ GAT ###########################################
 class GAT(torch.nn.Module):

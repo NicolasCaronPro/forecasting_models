@@ -221,7 +221,7 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
             in_channels=in_dim,
             end_channels=64,
             dilation_channels=[128, 256, 512, 256, 128],
-            dilations=[1],
+            dilations=[1, 1, 2, 1, 1],
             dropout=dropout,
             act_func=act_func,
             device=device,
@@ -229,8 +229,8 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
         )
         model_params.update({
             'end_channels': 64,
-            'dilation_channels': [256, 64],
-            'dilations': [1],
+            'dilation_channels': [128, 256, 512, 256, 128],
+            'dilations': [1, 1, 2, 1, 1],
         })
     
     elif model_name == 'ST-GAT':

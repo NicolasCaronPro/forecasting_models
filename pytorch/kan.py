@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 import math
-from utils import *
+from forecasting_models.pytorch.utils import *
+from forecasting_models.pytorch.models import *
 from torch.nn import LSTMCell
-from models import *
 
 ######################################################################################################################
 #                                                                                                                    #
@@ -392,7 +392,7 @@ class TKANCELL(torch.nn.Module):
             cx = torch.zeros(X.size(0), self.hidden_size, device=X.device)
         else:
             hx, cx = hx
-                    
+
         forgetgate = F.linear(X, self.weight_ih, self.b_ih)
         ingate = F.linear(hx, self.weight_hh, self.b_hh)
         kan_input = F.linear(X, self.weight_io, self.b_io)
@@ -409,7 +409,6 @@ class TKANCELL(torch.nn.Module):
 
         return hy, cy
     
-     
 class TKAN(torch.nn.Module):
     def __init__(self, input_size, hidden_size, end_channels, act_func, dropout, binary, k_days, return_hidden, device, kan_config):
         super(TKAN, self).__init__()

@@ -1,8 +1,8 @@
 import sys
 
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
+sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
 
-from forecasting_models.utils import *
+from forecasting_models.pytorch.utils import *
 from conv_lstm import ConvLSTM
 
 class Zhang(torch.nn.Module):

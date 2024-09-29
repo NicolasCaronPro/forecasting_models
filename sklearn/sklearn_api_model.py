@@ -1,6 +1,7 @@
 import copy
 import logging
 import math
+from re import sub
 import sys
 from pathlib import Path
 from typing import Union
@@ -591,6 +592,20 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
     def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+        """
+        Perform shapley additive explanation features on df_set using best_estimator
+        
+        Parameters:
+        - df_set_list : a list for len(self.best_estiamtor) size, with ieme element being the dataframe for ieme estimator 
+        - outname : outname of the figure
+        - mode : mode of ploting
+        - figsize : figure size
+        - samples : use for additional plot where the shapley additive explanation is done on each sample
+        - samples_name : name of each sample 
+
+        Returns:
+        - None
+        """
         dir_output = Path(dir_output)
         check_and_create_path(dir_output / 'sample')
         try:
@@ -1048,6 +1063,10 @@ class ModelVoting(Model):
         self.is_fitted_ = [False] * len(self.best_estimator_)
 
         for i, estimator in enumerate(self.best_estimator_):
+            
+            if hasattr(estimator, 'feature_importances_'):
+                self.is_fitted_[i] = True
+                
             if self.is_fitted_[i]:
                 print(f"Model {i} is already fitted. Skipping retraining.")
                 continue
@@ -1094,6 +1113,7 @@ class ModelVoting(Model):
         predictions = []
         for i, estimator in enumerate(self.best_estimator_):
             X = X_list[i]
+
             pred = estimator.predict(X)
             predictions.append(pred)
 
@@ -1206,6 +1226,26 @@ class ModelVoting(Model):
                     estimator_params = estimator.get_params(deep=True)
                     params.update({f'model_{i}__{key}': value for key, value in estimator_params.items()})
         return params
+    
+    def shapley_additive_explanation(self, df_set_list, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+        """
+        Perform shapley additive explanation features on each estimator
+        
+        Parameters:
+        - df_set_list : a list for len(self.best_estiamtor) size, with ieme element being the dataframe for ieme estimator 
+        - outname : outname of the figure
+        - mode : mode of ploting
+        - figsize : figure size
+        - samples : use for additional plot where the shapley additive explanation is done on each sample
+        - samples_name : name of each sample 
+
+        Returns:
+        - None
+        """
+
+        for i, estimator in enumerate(self.best_estimator_):
+            sub_model = Model(estimator, self.loss, name=f'estimator_{i}')
+            sub_model.shapley_additive_explanation(df_set_list[i], f'{outname}_{i}', dir_output, mode, figsize, samples, samples_name)
 
     def set_params(self, **params):
         """
