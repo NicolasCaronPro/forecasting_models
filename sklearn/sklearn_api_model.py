@@ -1167,7 +1167,9 @@ class ModelVoting(Model):
         else:
             # Regression: Average the predictions
             predictions_array = np.array(predictions_list)
+            print(predictions_array.shape)
             aggregated_pred = np.mean(predictions_array, axis=0)
+            print(aggregated_pred.shape)
         return aggregated_pred
 
     def aggregate_probabilities(self, probas_list):
@@ -1185,7 +1187,7 @@ class ModelVoting(Model):
         aggregated_proba = np.mean(probas_array, axis=0)
         return aggregated_proba
 
-    def score(self, X_list, y_list, sample_weight_list=None):
+    def score(self, X_list, y_true, sample_weight):
         """
         Evaluate the ensemble model's performance.
 
@@ -1198,12 +1200,6 @@ class ModelVoting(Model):
         - The model's score on the provided data.
         """
         y_pred = self.predict(X_list)
-        y_true = np.concatenate(y_list)
-
-        if sample_weight_list is not None:
-            sample_weight = np.concatenate(sample_weight_list)
-        else:
-            sample_weight = None
 
         return self.score_with_prediction(y_pred, y_true, sample_weight=sample_weight)
 
