@@ -66,3 +66,26 @@ class OutputLayer(torch.nn.Module):
         if self.binary:
             x = self.softmax(x)
         return x
+    
+
+######################################## TIME2VEC ######################################
+
+class Time2Vec(torch.nn.Module):
+    def __init__(self, kernel_size=1):
+        super(Time2Vec, self).__init__()
+        self.kernel_size = kernel_size
+        # Linear component parameters
+        self.wb = torch.nn.Parameter(torch.Tensor(1))
+        self.bb = torch.nn.Parameter(torch.Tensor(1))
+        # Periodic component parameters
+        self.wa = torch.nn.Parameter(torch.Tensor(kernel_size))
+        self.ba = torch.nn.Parameter(torch.Tensor(kernel_size))
+
+    def forward(self, x):
+        # x has shape (batch_size, time_steps, 1)
+        # Linear component computation
+        v_linear = self.wb * x + self.bb  # Shape: (batch_size, time_steps, 1)
+        # Periodic components computation
+        v_periodic = torch.sin(x * self.wa + self.ba)  # Shape: (batch_size, time_steps, kernel_size)
+        # Concatenate linear and periodic components
+        return torch.cat([v_linear, v_periodic], dim=-1)  # Shape: (batch_size, time_steps, kernel_size + 1)

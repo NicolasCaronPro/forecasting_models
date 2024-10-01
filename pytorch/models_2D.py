@@ -53,7 +53,7 @@ class Zhang(torch.nn.Module):
             if i != self.num_conv - 1:
                 x = self.activation(x)
                 x = self.pooling(x)
-
+        
         x = x.reshape(x.shape[0], -1)
 
         for i, layer in enumerate(self.fc_list):
@@ -76,7 +76,7 @@ class Zhang(torch.nn.Module):
 ########################### ConvLTSM ####################################    
 
 class CONVLSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_dim, end_channels, n_sequences, device, act_func, dropout, binary):
+    def __init__(self, in_channels, hidden_dim, end_channels, size, n_sequences, device, act_func, dropout, binary):
         super(CONVLSTM, self).__init__()
 
         num_layer = len(hidden_dim)
@@ -92,20 +92,19 @@ class CONVLSTM(torch.nn.Module):
 
         self.conv1 = torch.nn.Conv2d(hidden_dim[-1], 1, kernel_size=(3,3), padding=1, stride=1).to(device)
         
-        self.output = OutputLayer(in_channels=hidden_dim[-1] * 25 * 25, end_channels=end_channels,
+        self.output = OutputLayer(in_channels=hidden_dim[-1] * size[0] * size[1], end_channels=end_channels,
                         n_steps=n_sequences, device=device, act_func=act_func,
                         binary=binary)
-
+        
     def forward(self, X, edge_index):
         # edge Index is used for api facility but it is ignore
-
-        X = X.permute(0, 4, 3, 1, 2)
+        X = X.permute(0, 4, 1, 3, 2)
         x, _ = self.convlstm(X)
         x = x[0][:, -1, :, :]
         x = self.dropout(x)
         x = self.output(x)
 
-        return x
+        return x 
 
 ########################### ST-GATCONVLSTM ####################################    
 

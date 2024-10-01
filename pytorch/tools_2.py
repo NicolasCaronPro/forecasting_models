@@ -169,6 +169,12 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
     Returns:
     - Tuple (modèle, paramètres) où 'modèle' est le modèle spécifié et 'paramètres' est un dictionnaire des paramètres utilisés.
     """
+
+    shape2D = {10: (9, 9),
+           30 : (30, 30),
+           3 : (15,15),
+            8 : (30,30),
+            'departement' : (64,64)}
     
     model_params = {
         'model_name': model_name,
@@ -184,114 +190,136 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
     }
     
     if model_name == 'GAT':
+        in_dim_layer = [in_dim, 64, 64, 64]
+        heads = [4, 4, 2]
+        bias = True
         model = GAT(
-            in_dim=[in_dim, 64, 64, 64],
-            heads=[4, 4, 2],
+            in_dim=in_dim_layer,
+            heads=heads,
             dropout=dropout,
-            bias=True,
+            bias=bias,
             device=device,
             act_func=act_func,
             n_sequences=k_days + 1,
             binary=binary
         )
+
         model_params.update({
-            'in_dim_layers': [in_dim, 64, 64, 64],
-            'heads': [4, 4, 2],
-            'bias': True,
+            'hidden_channels': in_dim_layer,
+            'end_channels': heads,
+            'bias': bias,
         })
     
     elif model_name == 'GCN':
+        in_dim_layer = [in_dim, 64, 64, 64]
+        bias = True
         model = GCN(
             n_sequences=k_days + 1,
-            in_dim=[in_dim, 64, 64, 64],
+            in_dim=in_dim_layer,
             dropout=dropout,
-            bias=True,
+            bias=bias,
             device=device,
             act_func=act_func,
             binary=binary
         )
+
         model_params.update({
-            'in_dim_layers': [in_dim, 64, 64, 64],
-            'bias': True,
+            'in_dim_layer': in_dim_layer,
+            'biais': bias,
         })
-    
+
     elif model_name == 'DST-GCN':
+        dilation_channels = [128, 256, 512, 256, 128]
+        dilations = [1, 1, 2, 1, 1]
+        end_channels = 64
         model = DSTGCN(
             n_sequences=k_days + 1,
             in_channels=in_dim,
-            end_channels=64,
-            dilation_channels=[128, 256, 512, 256, 128],
-            dilations=[1, 1, 2, 1, 1],
+            end_channels=end_channels,
+            dilation_channels=dilation_channels,
+            dilations=dilations,
             dropout=dropout,
             act_func=act_func,
             device=device,
             binary=binary
         )
+
         model_params.update({
-            'end_channels': 64,
-            'dilation_channels': [128, 256, 512, 256, 128],
-            'dilations': [1, 1, 2, 1, 1],
+            'dilation_channels': dilation_channels,
+            'dilations': dilations,
+            'end_channels': end_channels,
         })
     
     elif model_name == 'ST-GAT':
+        hidden_channels = [256, 64]
+        end_channels = 64
+        heads = 6
         model = STGAT(
             n_sequences=k_days + 1,
             in_channels=in_dim,
-            hidden_channels=[256, 64],
-            end_channels=64,
+            hidden_channels=hidden_channels,
+            end_channels=end_channels,
             dropout=dropout,
-            heads=6,
+            heads=heads,
             act_func=act_func,
             device=device,
             binary=binary
         )
         model_params.update({
-            'hidden_channels': [256, 64],
-            'end_channels': 64,
-            'heads': 6,
+            'hidden_channels': hidden_channels,
+            'end_channels': end_channels,
+            'heads': heads,
         })
     
     elif model_name == 'ST-GCN':
+        hidden_channels = [256,64]
+        end_channels = 64
         model = STGCN(
             n_sequences=k_days + 1,
             in_channels=in_dim,
-            hidden_channels=[256, 64],
-            end_channels=64,
+            hidden_channels=hidden_channels,
+            end_channels=end_channels,
             dropout=dropout,
             act_func=act_func,
             device=device,
             binary=binary
         )
         model_params.update({
-            'hidden_channels': [256, 64],
-            'end_channels': 64,
+            'hidden_channels': hidden_channels,
+            'end_channels': end_channels,
         })
     
     elif model_name == 'SDT-GCN':
+        hidden_channels_temporal = [256,64]
+        hidden_channels_spatial = [256,64]
+        end_channels = 64
+        dilations = [1]
         model = SDSTGCN(
             n_sequences=k_days + 1,
             in_channels=in_dim,
-            hidden_channels_temporal=[256, 64],
+            hidden_channels_temporal=hidden_channels_temporal,
             dilations=[1],
-            hidden_channels_spatial=[256, 64],
-            end_channels=64,
+            hidden_channels_spatial=hidden_channels_spatial,
+            end_channels=end_channels,
             dropout=dropout,
             act_func=act_func,
             device=device,
             binary=binary
         )
         model_params.update({
-            'hidden_channels_temporal': [256, 64],
-            'hidden_channels_spatial': [256, 64],
-            'end_channels': 64,
-            'dilations': [1],
+            'hidden_channels_temporal': hidden_channels_temporal,
+            'hidden_channels_spatial': hidden_channels_spatial,
+            'end_channels': end_channels,
+            'dilations': dilations,
         })
     
     elif model_name == 'ATGN':
+        hidden_channels = 64
+        out_channels = 64
         model = TemporalGNN(
             in_channels=in_dim,
-            hidden_channels=64,
-            out_channels=64,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
             n_sequences=k_days + 1,
             device=device,
             act_func=act_func,
@@ -299,40 +327,47 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
             binary=binary
         )
         model_params.update({
-            'hidden_channels': 64,
-            'out_channels': 64,
+            'hidden_channels': hidden_channels,
+            'out_channels': out_channels,
         })
     
     elif model_name == 'ST-GATLSTM':
+        hidden_channels = 64
+        residual_channels = 64
+        end_channels = 32
+        heads = 6
         model = ST_GATLSTM(
             in_channels=in_dim,
-            hidden_channels=64,
-            residual_channels=64,
-            end_channels=32,
+            hidden_channels=hidden_channels,
+            residual_channels=residual_channels,
+            end_channels=end_channels,
             n_sequences=k_days + 1,
             num_layers=num_lstm_layers,
             device=device,
             act_func=act_func,
-            heads=6,
+            heads=heads,
             dropout=dropout,
             concat=False,
             binary=binary
         )
         model_params.update({
-            'hidden_channels': 64,
-            'residual_channels': 64,
-            'end_channels': 32,
+            'hidden_channels': hidden_channels,
+            'residual_channels': residual_channels,
+            'end_channels': end_channels,
             'num_layers': num_lstm_layers,
-            'heads': 6,
+            'heads': heads,
             'concat': False,
         })
     
     elif model_name == 'LSTM':
+        residual_channels = 64
+        hidden_channels = 64
+        end_channels = 32
         model = LSTM(
             in_channels=in_dim,
-            residual_channels=64,
-            hidden_channels=64,
-            end_channels=32,
+            residual_channels=residual_channels,
+            hidden_channels=hidden_channels,
+            end_channels=end_channels,
             n_sequences=k_days + 1,
             device=device,
             act_func=act_func,
@@ -341,41 +376,53 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
             num_layers=num_lstm_layers
         )
         model_params.update({
-            'residual_channels': 64,
-            'hidden_channels': 64,
-            'end_channels': 32,
+            'residual_channels': residual_channels,
+            'hidden_channels': hidden_channels,
+            'end_channels': end_channels,
             'num_layers': num_lstm_layers,
         })
     
     elif model_name == 'Zhang':
+        zhang_layer_conversion = { # Fire project, if you try this model you need to adpat it
+        8 : 15,
+        10 : 4,
+        9 : 15,
+        }
+        conv_channels = [64, 128, 256]
+        fc_channels = [256 * zhang_layer_conversion[scale] * zhang_layer_conversion[scale], 128, 64, 32]
         model = Zhang(
             in_channels=in_dim_2D,
-            conv_channels=[64, 128, 256],
-            fc_channels=[256 * 15 * 15, 128, 64, 32],
+            conv_channels=conv_channels,
+            fc_channels=fc_channels,
             dropout=dropout,
             binary=binary,
             device=device,
             n_sequences=k_days
         )
         model_params.update({
-            'conv_channels': [64, 128, 256],
-            'fc_channels': [256 * 15 * 15, 128, 64, 32],
+            'conv_channels': conv_channels,
+            'fc_channels': fc_channels
         })
     
     elif model_name == 'ConvLSTM':
+        hidden_dim = [64]
+        end_channels = 32
+        size = shape2D[scale]
         model = CONVLSTM(
             in_channels=in_dim_2D,
-            hidden_dim=[64, 128, 256],
-            end_channels=32,
+            hidden_dim=hidden_dim,
+            end_channels=end_channels,
             n_sequences=k_days + 1,
+            size=size,
             device=device,
             act_func=act_func,
             dropout=dropout,
             binary=binary
         )
         model_params.update({
-            'hidden_dim': [64, 128, 256],
-            'end_channels': 32,
+            'hidden_dim': hidden_dim,
+            'end_channels': end_channels,
+            'size':size,
         })
     
     elif model_name == 'Unet':
@@ -467,32 +514,40 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
     
     elif model_name == 'KAN':
         output_layer = 1 if not binary else 2
+        layers_hidden = [in_dim, 256, 512, 256, 64]
+        grid_size=5
+        spline_order=3
+        scale_noise=0.1
+        scale_base=1
+        scale_spline=1
+        grid_eps=0.02
+        grid_range=[-1, 1]
         model = KAN(
             in_channels=in_dim,
             end_channels=64,
             device=device,
             binary=binary,
             k_days=0,
-            layers_hidden=[in_dim, 256, 512, 256, 64],
-            grid_size=5,
-            spline_order=3,
-            scale_noise=0.1,
-            scale_base=1,
-            scale_spline=1,
-            act_func='relu',
-            grid_eps=0.02,
-            grid_range=[-1, 1]
+            layers_hidden=layers_hidden,
+            grid_size=grid_size,
+            spline_order=spline_order,
+            scale_noise=scale_noise,
+            scale_base=scale_base,
+            scale_spline=scale_spline,
+            act_func=act_func,
+            grid_eps=grid_eps,
+            grid_range=grid_range
         )
         model_params.update({
-            'layers_hidden': [in_dim, 128, 64],
-            'grid_size': 5,
-            'spline_order': 3,
-            'scale_noise': 0.1,
-            'scale_base': 1,
-            'scale_spline': 1,
+            'layers_hidden': layers_hidden,
+            'grid_size': grid_size,
+            'spline_order': spline_order,
+            'scale_noise': scale_noise,
+            'scale_base': scale_base,
+            'scale_spline': scale_spline,
             'base_activation': act_func,
-            'grid_eps': 0.02,
-            'grid_range': [-1, 1],
+            'grid_eps': grid_eps,
+            'grid_range': grid_range,
         })
         
     elif model_name == 'TKAN':

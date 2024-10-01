@@ -189,18 +189,29 @@ class DSTGCN(torch.nn.Module):
         
         super(DSTGCN, self).__init__()
         
-        num_of_layers = len(dilation_channels) - 1
-        self.return_hidden=return_hidden
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
+        self.return_hidden = return_hidden
+        self.device = device
+
+        # Parameters for Time2Vec
+        self.time2vec_kernel_size = 1  # Adjust as needed
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Update input channels
+        total_in_channels = in_channels + self.time2vec_output_size
+
+        self.input = torch.nn.Conv1d(in_channels=total_in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
         self.n_sequences = n_sequences
         self.layers = []
 
+        num_of_layers = len(dilation_channels) - 1
+
         for i in range(num_of_layers):
-        
             self.layers.append(SpatioTemporalLayer(n_sequences=n_sequences,
-                                            in_channels=dilation_channels[i],
-                                            out_channels=dilation_channels[i + 1],
-                                            dilation=dilations[i], dropout=dropout).to(device))
+                                                   in_channels=dilation_channels[i],
+                                                   out_channels=dilation_channels[i + 1],
+                                                   dilation=dilations[i],
+                                                   dropout=dropout).to(device))
             
         self.layers = torch.nn.ModuleList(self.layers)
         self.output = OutputLayer(in_channels=dilation_channels[-1] * n_sequences,
@@ -211,7 +222,18 @@ class DSTGCN(torch.nn.Module):
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        x = self.input(X)
+        # Extract time indices (assuming time is the first channel)
+        time_steps = X[:, 0, :].unsqueeze(2)  # Shape: (batch_size, sequence_length, 1)
+        # Remove time from features
+        X = X[:, 1:, :]  # Shape: (batch_size, in_channels - 1, sequence_length)
+
+        # Apply Time2Vec to the time indices
+        t2v_output = self.time2vec(time_steps)  # Shape: (batch_size, sequence_length, time2vec_output_size)
+        t2v_output = t2v_output.permute(0, 2, 1)  # Shape: (batch_size, time2vec_output_size, sequence_length)
+        # Concatenate the input features with Time2Vec output
+        x = torch.cat([X, t2v_output], dim=1)  # Shape: (batch_size, total_in_channels, sequence_length)
+
+        x = self.input(x)
         for i, layer in enumerate(self.layers):
             x = layer(x, edge_index)
             if i == 0:
@@ -224,6 +246,7 @@ class DSTGCN(torch.nn.Module):
             return x, skip
         else:
             return x
+
 
 ################################# ST-GATCONV ###################################
     
@@ -312,26 +335,41 @@ class STGAT(torch.nn.Module):
                  binary, return_hidden=False):
         super(STGAT, self).__init__()
 
-        num_of_layers = len(hidden_channels) - 1
         self.return_hidden = return_hidden
+        self.device = device
 
-        self.layers = []
-        self.skip_layers = []
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
+        # Parameters for Time2Vec
+        self.time2vec_kernel_size = 1  # Adjust as needed
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Update input channels
+        total_in_channels = in_channels + self.time2vec_output_size
+
+        self.input = torch.nn.Conv1d(in_channels=total_in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
 
         self.n_sequences = n_sequences
+        self.layers = []
+        self.skip_layers = []
+
+        num_of_layers = len(hidden_channels) - 1
 
         for i in range(num_of_layers):
             concat = True if i < num_of_layers -1 else False
             self.layers.append(SandiwchLayer(n_sequences=n_sequences,
-                                            in_channels=hidden_channels[i],
-                                            out_channels=hidden_channels[i+1], 
-                                            heads=heads, dropout=dropout,
-                                            concat=concat).to(device))
+                                             in_channels=hidden_channels[i],
+                                             out_channels=hidden_channels[i+1], 
+                                             heads=heads,
+                                             dropout=dropout,
+                                             concat=concat).to(device))
             
         for i in range(num_of_layers):
-            self.skip_layers.append(torch.nn.Conv1d(in_channels=hidden_channels[i+1], out_channels=hidden_channels[-1], padding='same', kernel_size=1, device=device))
-            
+            self.skip_layers.append(torch.nn.Conv1d(in_channels=hidden_channels[i+1],
+                                              out_channels=hidden_channels[-1],
+                                              padding='same',
+                                              kernel_size=1,
+                                              device=device))
+                
         self.layers = torch.nn.ModuleList(self.layers)
         self.output = OutputLayer(in_channels=hidden_channels[-1] * self.n_sequences,
                                   end_channels=end_channels,
@@ -340,7 +378,19 @@ class STGAT(torch.nn.Module):
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        x = self.input(X)
+        # Extract time indices
+        time_steps = X[:, 0, :].unsqueeze(2)  # Shape: (batch_size, sequence_length, 1)
+        # Remove time from features
+        X = X[:, 1:, :]  # Shape: (batch_size, in_channels - 1, sequence_length)
+
+        # Apply Time2Vec
+        time_steps = time_steps.view(time_steps.shape[0], time_steps.shape[1], 1)
+        t2v_output = self.time2vec(time_steps)  # Shape: (batch_size, sequence_length, time2vec_output_size)
+        t2v_output = t2v_output.permute(0, 2, 1)  # Shape: (batch_size, time2vec_output_size, sequence_length)
+        # Concatenate the input features with Time2Vec output
+        
+        x = torch.cat([X, t2v_output], dim=1)  # Shape: (batch_size, total_in_channels, sequence_length)
+        x = self.input(x)
 
         for i, layer in enumerate(self.layers):
             x = layer(x, edge_index)
@@ -407,19 +457,32 @@ class STGCN(torch.nn.Module):
                  binary, return_hidden=False):
         super(STGCN, self).__init__()
         self.return_hidden = return_hidden
+        self.device = device
+
+        # Parameters for Time2Vec
+        self.time2vec_kernel_size = 1
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Update input channels
+        total_in_channels = in_channels + self.time2vec_output_size
+
         num_of_layers = len(hidden_channels) - 1
         self.layers = []
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
+        self.input = torch.nn.Conv1d(in_channels=total_in_channels,
+                               out_channels=hidden_channels[0],
+                               kernel_size=1,
+                               device=device)
 
         self.n_sequences = n_sequences
 
         for i in range(num_of_layers):
             self.layers.append(SandiwchLayerGCN(n_sequences=n_sequences,
-                                            in_channels=hidden_channels[i],
-                                            out_channels=hidden_channels[i + 1],
-                                            dropout=dropout,
-                                            act_func=act_func).to(device))
-            
+                                                in_channels=hidden_channels[i],
+                                                out_channels=hidden_channels[i + 1],
+                                                dropout=dropout,
+                                                act_func=act_func).to(device))
+                
         self.layers = torch.nn.ModuleList(self.layers)
         self.output = OutputLayer(in_channels=hidden_channels[-1] * self.n_sequences,
                                   end_channels=end_channels,
@@ -428,7 +491,17 @@ class STGCN(torch.nn.Module):
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        x = self.input(X)
+        # Extract time indices
+        time_steps = X[:, 0, :].unsqueeze(2)
+        X = X[:, 1:, :]
+
+        # Apply Time2Vec
+        t2v_output = self.time2vec(time_steps)
+        t2v_output = t2v_output.permute(0, 2, 1)
+
+        x = torch.cat([X, t2v_output], dim=1)
+        x = self.input(x)
+
         for i, layer in enumerate(self.layers):
             x = layer(x, edge_index)
             if i == 0:
@@ -442,7 +515,6 @@ class STGCN(torch.nn.Module):
         else:
             return x
 
-    
 ################################## SDSTGCN ###############################
 
 class GCNLAYER(torch.nn.Module):
@@ -481,27 +553,50 @@ class SDSTGCN(torch.nn.Module):
         
         super(SDSTGCN, self).__init__()
 
+        self.return_hidden = return_hidden
+        self.device = device
+
+        # Time2Vec for temporal input
+        self.time2vec_kernel_size = 1
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec_temporal = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Time2Vec for spatial input
+        self.time2vec_spatial = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Adjust input channels
+        total_in_channels_temporal = in_channels + self.time2vec_output_size
+        total_in_channels_spatial = in_channels + self.time2vec_output_size
+
         num_of_temporal_layers = len(hidden_channels_temporal) - 1
         num_of_spatial_layers = len(hidden_channels_spatial) - 1
-        self.return_hidden = return_hidden
 
         self.temporal_layers = []
         self.spatial_layers = []
-        self.input_temporal = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels_temporal[0], kernel_size=1, device=device)
-        self.input_spatial = nn.Linear(in_channels=in_channels, out_channels=hidden_channels_temporal[0], weight_initializer='glorot', bias=True).to(device)
+
+        self.input_temporal = torch.nn.Conv1d(in_channels=total_in_channels_temporal,
+                                        out_channels=hidden_channels_temporal[0],
+                                        kernel_size=1,
+                                        device=device)
+
+        self.input_spatial = torch.nn.Linear(in_features=total_in_channels_spatial,
+                                        out_features=hidden_channels_spatial[0],
+                                        bias=True).to(device)
 
         self.n_sequences = n_sequences
 
         for ti in range(num_of_temporal_layers):
             self.temporal_layers.append(GatedDilatedConvolution(in_channels=hidden_channels_temporal[ti],
-                                                      out_channels=hidden_channels_temporal[ti + 1],
-                                                      dilation=dilations[ti]))
+                                                                out_channels=hidden_channels_temporal[ti + 1],
+                                                                dilation=dilations[ti]))
 
         self.temporal_layers = torch.nn.ModuleList(self.temporal_layers)
 
         for si in range(num_of_spatial_layers):
             self.spatial_layers.append(GCNLAYER(in_dim=hidden_channels_spatial[si],
-                                                end_channels=hidden_channels_spatial[si+1], dropout=dropout, act_func=act_func).to(device))
+                                                end_channels=hidden_channels_spatial[si+1],
+                                                dropout=dropout,
+                                                act_func=act_func).to(device))
 
         self.spatial_layers = torch.nn.ModuleList(self.spatial_layers)
         self.output = OutputLayer(in_channels=(hidden_channels_spatial[-1] + hidden_channels_temporal[-1]) * 4,
@@ -511,11 +606,26 @@ class SDSTGCN(torch.nn.Module):
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        xt = self.input_temporal(X)
+        # Extract time indices
+        time_steps = X[:, 0, :].unsqueeze(2)
+        X_features = X[:, 1:, :]
+
+        # Temporal Time2Vec
+        t2v_output_temporal = self.time2vec_temporal(time_steps)
+        t2v_output_temporal = t2v_output_temporal.permute(0, 2, 1)
+        xt_input = torch.cat([X_features, t2v_output_temporal], dim=1)
+        xt = self.input_temporal(xt_input)
+
+        # Spatial Time2Vec
+        time_steps_spatial = time_steps.squeeze(2)
+        t2v_output_spatial = self.time2vec_spatial(time_steps_spatial.unsqueeze(2))
+        t2v_output_spatial = t2v_output_spatial.squeeze(1)
+        xs_input = torch.cat([X_features[:, :, -1], t2v_output_spatial], dim=1)
+        xs = self.input_spatial(xs_input)
+
         for i, layer in enumerate(self.temporal_layers):
             xt = layer(xt)
         
-        xs = self.input_spatial(X[:, :, -1])
         for i, layer in enumerate(self.spatial_layers):
             xs = layer(xs, edge_index)
 
@@ -525,10 +635,9 @@ class SDSTGCN(torch.nn.Module):
         x = self.output(xt)
 
         if self.return_hidden:
-            return x, xc
+            return x, xt
         else:
             return x
-
     
 ################################## DGATCONV ####################################
 class GATLAYER(torch.nn.Module):
@@ -591,7 +700,8 @@ class TemporalGNN(torch.nn.Module):
 ################################### ST_LSTM ######################################
 class ST_GATLSTM(torch.nn.Module):
     """
-    Spatio-Temporal Graph Attention Network as presented in https://ieeexplore.ieee.org/document/8903252
+    Spatio-Temporal Graph Attention Network with Time2Vec encoding.
+    Based on the architecture presented in https://ieeexplore.ieee.org/document/8903252
     """
     def __init__(self, in_channels, hidden_channels,
                  residual_channels, end_channels, n_sequences, device, act_func,
@@ -599,97 +709,166 @@ class ST_GATLSTM(torch.nn.Module):
                  binary, concat, return_hidden=False):
         super(ST_GATLSTM, self).__init__()
         self.return_hidden = return_hidden
-
+        self.device = device
+        self.hidden_channels = hidden_channels
+        self.num_layers = num_layers
         self.n_sequences = n_sequences
 
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1).to(device)
+        # Parameters for Time2Vec
+        self.time2vec_kernel_size = 1  # Adjust as needed
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Update in_channels to account for Time2Vec output (assuming time is the first feature)
+        total_in_channels = in_channels + self.time2vec_output_size
+
+        # Input convolutional layer with updated input channels
+        self.input = torch.nn.Conv1d(in_channels=total_in_channels, out_channels=residual_channels, kernel_size=1).to(device)
 
         self.bn = torch.nn.BatchNorm1d(residual_channels)
 
-        self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, batch_first=True, dropout=dropout).to(device)
+        # LSTM layer
+        self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers,
+                                  batch_first=True, dropout=dropout).to(device)
 
+        # Graph Attention Network layer
         self.gat = GATConv(in_channels=hidden_channels, out_channels=hidden_channels,
-            heads=heads, dropout=dropout, concat=concat).to(device)
+                           heads=heads, dropout=dropout, concat=concat).to(device)
 
+        # Output layer
         self.output = OutputLayer(in_channels=hidden_channels * heads if concat else hidden_channels,
                                   end_channels=end_channels,
                                   n_steps=n_sequences,
                                   device=device, act_func=act_func,
                                   binary=binary)
-        
-        self.device = device
-        self.hidden_channels = hidden_channels
-        self.num_layers = num_layers
 
     def forward(self, X, edge_index):
         batch_size = X.size(0)
-        
-        x = self.input(X)
-        x = torch.movedim(x, 2, 1)
+        sequence_length = X.size(2)
+
+        # Extract time indices (assuming time is the first channel)
+        time_steps = X[:, 0, :].unsqueeze(2)  # Shape: (batch_size, sequence_length, 1)
+
+        # Remove time from input features
+        X = X[:, 1:, :]  # Shape: (batch_size, in_channels - 1, sequence_length)
+
+        # Apply Time2Vec to the time indices
+        t2v_output = self.time2vec(time_steps)  # Shape: (batch_size, sequence_length, time2vec_output_size)
+        t2v_output = t2v_output.permute(0, 2, 1)  # Shape: (batch_size, time2vec_output_size, sequence_length)
+
+        # Concatenate Time2Vec output with input features
+        x = torch.cat([X, t2v_output], dim=1)  # Shape: (batch_size, total_in_channels, sequence_length)
+
+        # Apply the input convolutional layer
+        x = self.input(x)  # Shape: (batch_size, residual_channels, sequence_length)
+        x = self.bn(x)
+
+        # Rearrange dimensions for LSTM input
+        x = x.permute(0, 2, 1)  # Shape: (batch_size, sequence_length, residual_channels)
+
+        # Initialize hidden states for LSTM
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
+
+        # Pass through LSTM layer
         x, _ = self.lstm(x, (h0, c0))
-        
-        x = torch.squeeze(x[:, -1, :])
+
+        # Extract the last output of LSTM
+        x = x[:, -1, :]  # Shape: (batch_size, hidden_channels)
+
+        # Pass through GAT layer
         xg = self.gat(x, edge_index)
 
-        x = self.output(xg)
+        # Generate the final output
+        output = self.output(xg)
 
         if self.return_hidden:
-            return x, xg
+            return output, xg
         else:
-            return x
-
+            return output
 ############################### LSTM ##################################
 
+# Modified LSTM class with Time2Vec
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, residual_channels, hidden_channels,
                  end_channels, n_sequences, device, act_func, binary, dropout, num_layers, return_hidden=False):
         super(LSTM, self).__init__()
 
         self.return_hidden = return_hidden
-
-        self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=residual_channels, kernel_size=1).to(device)
-
-        self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, dropout=dropout, batch_first=True).to(device)
-        
-        self.output = OutputLayer(in_channels=hidden_channels+residual_channels, end_channels=end_channels,
-                                  n_steps=n_sequences, device=device, act_func=act_func,
-                                  binary=binary)
-        
-        self.batchNorm = nn.BatchNorm(hidden_channels).to(device)
-        self.dropout = torch.nn.Dropout(dropout)
-
-        #self.calibrator_layer = torch.nn.Linear(in_features=residual_channels+(2 if binary else 1),
-        #                                    out_features=2 if binary else 1, bias=True, device=device)
-
-        
         self.device = device
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
 
+        # Parameters for Time2Vec
+        self.time2vec_kernel_size = 1
+        self.time2vec_output_size = self.time2vec_kernel_size + 1
+        self.time2vec = Time2Vec(kernel_size=self.time2vec_kernel_size).to(device)
+
+        # Update the input channels to account for Time2Vec output
+        total_in_channels = in_channels + self.time2vec_output_size
+
+        # First convolutional layer with updated input channels
+        self.input = torch.nn.Conv1d(in_channels=total_in_channels, out_channels=residual_channels, kernel_size=1).to(device)
+
+        # LSTM layer
+        self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers,
+                                  dropout=dropout, batch_first=True).to(device)
+
+        # Output layer
+        self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels,
+                                  n_steps=n_sequences, device=device, act_func=act_func,
+                                  binary=binary)
+
+        self.batchNorm = torch.nn.BatchNorm1d(hidden_channels).to(device)
+        self.dropout = torch.nn.Dropout(dropout)
+
     def forward(self, X, edge_index=None):
-        # edge Index is used for api facility but it is ignore
+        # edge_index is ignored here
         batch_size = X.size(0)
+
+        # Initialize hidden states for LSTM
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
-        x = self.input(X)
+
+        # Get time indices
+        time_steps = X[:, 0, :]
+        time_steps = time_steps.view(time_steps.shape[0], time_steps.shape[1], 1)
+
+        # Remove time from features
+        X = X[:, 1:, :]
+
+        # Apply Time2Vec to the time indices
+        t2v_output = self.time2vec(time_steps)  # Shape: (batch_size, sequence_length, time2vec_output_size)
+        t2v_output = t2v_output.permute(0, 2, 1)  # Shape: (batch_size, time2vec_output_size, sequence_length)
+
+        # Concatenate the input features with Time2Vec output
+        x = torch.cat([X, t2v_output], dim=1)  # Shape: (batch_size, total_in_channels, sequence_length)
+
+        # Apply the first convolutional layer
+        x = self.input(x)  # Shape: (batch_size, residual_channels, sequence_length)
         original_input = x[:, :, -1]
-        x = torch.movedim(x, 2, 1)
+
+        # Rearrange dimensions for LSTM input
+        x = x.permute(0, 2, 1)  # Shape: (batch_size, sequence_length, residual_channels)
+
+        # Pass through LSTM layer
         x, _ = self.lstm(x, (h0, c0))
-        x = torch.squeeze(x[:, -1, :])
+
+        # Extract the last output of LSTM
+        x = x[:, -1, :]  # Shape: (batch_size, hidden_channels)
+
+        # Apply Batch Normalization and Dropout
         x = self.batchNorm(x)
         x = self.dropout(x)
-        x = torch.concat((original_input, x), dim=1)
+
+        # Generate the final output
         output = self.output(x)
-        #x = torch.concat((original_input, x), dim=1)
-        #output = self.calibrator_layer(x)
-        #output = torch.clamp(output, min=0)
-   
+
         if self.return_hidden:
             return output, x
         else:
             return output
+
 
 ############################### GraphSAGE ##################################
     

@@ -142,14 +142,14 @@ def exponential_loss(y_true, y_pred, sample_weight=None):
 ##########################################################################################
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
-    def __init__(self, model, loss='log_loss', name='Model'):
+    def __init__(self, model, loss='logloss', name='Model'):
         """
         Initialize the CustomModel class.
 
         Parameters:
         - model: The base model to use (must follow the sklearn API).
         - name: The name of the model.
-        - loss: Loss function to use ('log_loss', 'hinge_loss', etc.).
+        - loss: Loss function to use ('logloss', 'hinge_loss', etc.).
         """
         self.best_estimator_ = model
         self.name = self.best_estimator_.__class__.__name__ if name == 'Model' else name
@@ -426,7 +426,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - The model's score on the provided data.
         """
         y_pred = self.predict(X)
-        if self.loss == 'log_loss':
+        if self.loss == 'logloss':
             proba = self.predict_proba(X)
             return -log_loss(y, proba)
         elif self.loss == 'hinge_loss':
@@ -453,7 +453,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             raise ValueError(f"Unknown loss function: {self.loss}")
         
     def score_with_prediction(self, y_pred, y, sample_weight=None):
-        if self.loss == 'log_loss':
+        if self.loss == 'logloss':
             return -log_loss(y, y_pred)
         elif self.loss == 'hinge_loss':
             return -hinge_loss(y, y_pred, sample_weight=sample_weight)
@@ -521,8 +521,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         Return the scoring function as a string based on the chosen loss function.
         """
-        if self.loss == 'log_loss':
-            return 'neg_log_loss'
+        if self.loss == 'logloss':
+            return 'neg_logloss'
         elif self.loss == 'hinge_loss':
             return 'hinge'
         elif self.loss == 'accuracy':
@@ -694,14 +694,14 @@ class MeanFeaturesModel(Model):
 ##########################################################################################
 
 class ModelTree(Model):
-    def __init__(self, model, loss='log_loss', name='ModelTree'):
+    def __init__(self, model, loss='logloss', name='ModelTree'):
         """
         Initialize the ModelTree class.
 
         Parameters:
         - model: The base model to use (must follow the sklearn API and support tree plotting).
         - name: The name of the model.
-        - loss: Loss function to use ('log_loss', 'hinge_loss', etc.).
+        - loss: Loss function to use ('logloss', 'hinge_loss', etc.).
         """
         super().__init__(model, loss, name)
 
@@ -770,7 +770,7 @@ class ModelTree(Model):
 ##########################################################################################
 
 class ModelFusion(Model):
-    def __init__(self, model_list, model, loss='log_loss', name='ModelFusion'):
+    def __init__(self, model_list, model, loss='logloss', name='ModelFusion'):
         """
         Initialize the ModelFusion class.
 
@@ -780,8 +780,8 @@ class ModelFusion(Model):
             A list of models to use as base learners.
         - model : object
             The model to use for the fusion.
-        - loss : str, optional (default='log_loss')
-            Loss function to use ('log_loss', 'hinge_loss', etc.).
+        - loss : str, optional (default='logloss')
+            Loss function to use ('logloss', 'hinge_loss', etc.).
         - name : str, optional (default='ModelFusion')
             The name of the model.
         """
@@ -1024,7 +1024,7 @@ class ModelVoting(Model):
         Parameters:
         - models: A list of base models to use (must follow the sklearn API).
         - name: The name of the model.
-        - loss: Loss function to use ('log_loss', 'hinge_loss', 'mse', 'rmse', etc.).
+        - loss: Loss function to use ('logloss', 'hinge_loss', 'mse', 'rmse', etc.).
         """
         super().__init__(model=None, loss=loss, name=name)
         self.best_estimator_ = models  # Now a list of models
@@ -1160,7 +1160,7 @@ class ModelVoting(Model):
         - Aggregated predictions.
         """
         # Determine if it's a classification or regression task
-        if self.loss in ['log_loss', 'hinge_loss', 'accuracy']:
+        if self.loss in ['logloss', 'hinge_loss', 'accuracy']:
             # Classification: Use majority vote
             predictions_array = np.array(predictions_list)
             aggregated_pred = stats.mode(predictions_array, axis=0)[0].flatten()
@@ -1168,7 +1168,8 @@ class ModelVoting(Model):
             # Regression: Average the predictions
             predictions_array = np.array(predictions_list)
             print(predictions_array.shape)
-            aggregated_pred = np.mean(predictions_array, axis=0)
+            #aggregated_pred = np.mean(predictions_array, axis=0)
+            aggregated_pred = np.max(predictions_array, axis=0)
             print(aggregated_pred.shape)
         return aggregated_pred
 
@@ -1286,17 +1287,17 @@ class ModelStacking(Model):
         Initialize the ModelStacking class.
 
         Parameters:
-        - models: A list of base models to use (must follow the sklearn API).
+        - models: A list of base models to use (must follow the sklearn API).œ
         - final_estimator: The final estimator to use in stacking.
         - name: The name of the model.
-        - loss: Loss function to use ('log_loss', 'hinge_loss', 'mse', 'rmse', etc.).
+        - loss: Loss function to use ('logloss', 'hinge_loss', 'mse', 'rmse', etc.).
         """
         super().__init__(model=None, loss=loss, name=name)
         self.base_estimators = models
         self.final_estimator = final_estimator
         self.name = name
         self.loss = loss
-        self.is_classifier = self.loss in ['log_loss', 'hinge_loss', 'accuracy']
+        self.is_classifier = self.loss in ['logloss', 'hinge_loss', 'accuracy']
         self.best_estimator_ = None  # Replaced self.stack_model with self.best_estimator_
         self.X_train = None
         self.y_train = None
@@ -1479,7 +1480,7 @@ class ModelStacking(Model):
             self.final_estimator = params.pop('final_estimator')
         if 'loss' in params:
             self.loss = params.pop('loss')
-            self.is_classifier = self.loss in ['log_loss', 'hinge_loss', 'accuracy']
+            self.is_classifier = self.loss in ['logloss', 'hinge_loss', 'accuracy']
         if 'name' in params:
             self.name = params.pop('name')
 
