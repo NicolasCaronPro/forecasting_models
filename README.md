@@ -10,6 +10,8 @@ This directory contains the Model wrapper class and its subclasses, which follow
 
 ## Src
 
-## Test
+## Tests
 
-Feel free to implement new models, new strategies or to use the models !
+This directory contains some test for each type of dataset we use.
+
+Feel free to implement new models, new strategies !
