@@ -35,9 +35,8 @@ ars_features_class = [ft.AirQualityFeatures(config=config, drop_const_cols=True)
                       ft.SportsCompetitionFeatures, ft.TrafficFeatures]
 # target_colomns = ['nb_vers_hospit']
 target_colomns = ['Total_CHU Dijon']
-arsTabularDataset = BaseTabularDataset(target_colomns=target_colomns,
-                                       config=config, features_class=ars_features_class)
-arsTabularDataset.fetch_data(save=False) # Fetch data from the features, do this only once, if you need smaller datasets, use the get_dataset method
+arsTabularDataset = BaseTabularDataset(features_class=ars_features_class, logger=logger, data_dir=os.path.join(root_dir,'data'))
+arsTabularDataset.fetch_datataset(save=True) # Fetch data from the features, do this only once, if you need smaller datasets, use the get_dataset method
 
 model_params = {
     'early_stopping_rounds': 10,
@@ -111,7 +110,7 @@ split_config = {'test_size': 0.2, 'val_size': 0.2, 'shuffle': False}
 
 model_config={"optimization": "grid", "grid_params": grid_params, "fit_params": fit_params}
 encoding_pipeline = create_encoding_pipeline(encoders_dict=encoders_dict)
-dataset_config={'from_date': '15-01-2019', 'to_date': '30-12-2023', 'shift':[1, 2, 3, 4, 5, 6, 7], 'rolling_window':[7, 14], 'freq':'1D', 'split_config': split_config, 'encoding_pipeline': encoding_pipeline}
+dataset_config={'from_date': '15-01-2019', 'to_date': '31-12-2023', 'shift':[1, 2, 3, 4, 5, 6, 7], 'rolling_window':[7, 14], 'freq':'1D', 'split_config': split_config, 'encoding_pipeline': encoding_pipeline}
 
 ars_experiment.run(dataset_config=dataset_config, model_config=model_config, find_best_features=True)
 

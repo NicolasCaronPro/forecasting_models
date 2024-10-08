@@ -16,9 +16,9 @@ config = Config({'max_nan': 0, "departement": "21", "root_dir": root_dir, "start
                  "stop": dt.datetime.strptime('30-12-2023', '%d-%m-%Y'), "logger": logger, "step_unit": 'days', "step_value": 1,
                  "shift": 0, "rolling_window": 0, "etablissement": "CHU Dijon"})
 
-hopitalFeatures = HopitalFeatures(config=config, include_emmergency_arrivals=True, include_nb_hospit=True)
+hopitalFeatures = HopitalFeatures(logger=logger)
 
-hopitalFeatures.fetch_data()
+hopitalFeatures.fetch_data(start_date=config["start"], stop_date=config["stop"])
 # print(hopitalFeatures.data)
 # data = hopitalFeatures.get_data(from_date=dt.datetime.strptime('01-01-2016', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), shift=7, rolling_window=[7, 14], freq='1D')
 # print(data)

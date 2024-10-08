@@ -66,20 +66,18 @@ class BaseExperiment:
 
             # Get a dataset object corresponding to the dataset_config
             dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
-            # print(dataset.targets)
+
+            # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
+            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]})
+
+            # print(dataset.data[['target_Total_CHU Dijon%%mean_7J', 'Total_CHU Dijon%%mean_7J']])
 
             if find_best_features:
                 selected_features = self.get_important_features(dataset=dataset, model=self.model, model_config=model_config)
-                # dataset.enc_X_train = dataset.enc_X_train[selected_features]
-                # dataset.enc_X_val = dataset.enc_X_val[selected_features]
-                # dataset.enc_X_test = dataset.enc_X_test[selected_features]
-                
+                # selected_features = dataset.enc_X_train.columns.to_list()
                 dataset: BaseTabularDataset = dataset.get_dataset(features_names=selected_features)
+                model_config['fit_params']['eval_set'] = [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]
 
-            # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
-            # print(dataset.targets)
-            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]})
-            # print(model_config['fit_params'])
 
             mlflow.log_table(data=dataset.train_set, artifact_file='datasets/train_set.json')
             mlflow.log_table(data=dataset.val_set, artifact_file='datasets/val_set.json')
@@ -94,9 +92,6 @@ class BaseExperiment:
             mlflow.log_input(dataset=test_dataset, context='testing')
             
             mlflow.log_params(dataset_config)
-
-
-
 
             mlflow.log_params({f'grid_{key}': value for key, value in model_config['grid_params'].items()})
             # mlflow.log_params(model_config['params'])
@@ -183,7 +178,7 @@ class BaseExperiment:
 
         dataset.y_test.plot(ax=ax, label='True', use_index=True)
         y_pred.plot(ax=ax, label='Predicted', use_index=True)
-        if 'nb_vers_hospit' in self.dataset.targets and dataset.y_test.index[0].year == 2022:
+        if 'target_nb_vers_hospit' in self.dataset.targets and dataset.y_test.index[0].year == 2022:
             bjml = self.get_bjml()
             bjml.plot(ax=ax, label='BJML', use_index=True)
 
@@ -252,7 +247,7 @@ class BaseExperiment:
         DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
         """
         df = cd.DataFrame(dataset.enc_X_train)
-        predictions = pd.DataFrame()
+        predictions = pd.DataFrame(index=dataset.y_test.index)
         
         # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles
         rolling_window_cols = [col for col in df.columns if re.search(r'%%(mean|std)_(\d+)J', col)]
@@ -271,6 +266,7 @@ class BaseExperiment:
                     # Pour les jours suivants, remplacer les colonnes target%%J-1, target%%J-2 par les prédictions
                     for k in range(1, j+1):
                         for target in dataset.targets:
+                            target = target.replace('target_', '')
                             colonne_a_remplacer = f'{target}%%J-{k}'
                             # Simuler l'existence des colonnes target%%J-k en utilisant les features (ajuster selon ton dataset réel)
                             if colonne_a_remplacer in groupe.columns:
@@ -278,7 +274,6 @@ class BaseExperiment:
                                 groupe[colonne_a_remplacer].iloc[j] = groupe[f'y_pred_{target}'].iloc[j-k]
                             
                     # TODO: aussi recalculer les colonnes features%%mean_nJ, features%%std_nJ, etc. si elles existent
-
 
                     # Recalculer dynamiquement les colonnes basées sur des rolling windows (moyenne, écart-type, etc.)
                     for feature in dataset.features:

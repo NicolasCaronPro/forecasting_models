@@ -7,7 +7,8 @@ import time
 from typing import Optional, Dict
 import pandas as pd
 from src.features.base_features import BaseFeature, Config
-
+from pathlib import Path
+import os
 
 class AirQualityFeatures(BaseFeature):
     """
@@ -18,17 +19,11 @@ class AirQualityFeatures(BaseFeature):
         archived_data_dir (Path): The path to the archived data directory.
     """
 
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None, drop_const_cols=True) -> None:
-        super().__init__(config, parent)
-        self.archived_data_dir = self.data_dir / 'archived'
-        self.archived_data_dir.mkdir(exist_ok=True, parents=True)
-        self.drop_const_cols = drop_const_cols
+    def __init__(self, name:str = None, logger=None,) -> None:
+        super().__init__(name, logger)
 
-        assert 'departement' in self.config, "departement must be provided in config"
-        self.departement = self.config.get('departement')
-        assert type(self.departement) == str, "departement must be a string"
 
-    def __include_air_quality(self):
+    def __include_air_quality(self, departement, feature_dir):
         # Récupérer les archives sur :
         # https://www.geodair.fr/donnees/export-advanced
 
@@ -36,17 +31,19 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info("On regarde la qualité de l'air")
 
         # On récupère les codes des stations de mesure de la qualité de l'air pour le département
-        df = pd.read_csv(self.data_dir / 'stations_geodair.csv',
+        df = pd.read_csv(feature_dir / 'stations_geodair.csv',
                          sep=';', dtype={'departement': str})
         CODES = list(df.loc[df['departement'] ==
-                     self.departement].station.values)
+                     departement].station.values)
         self.logger.info(f"On s'intéresse aux codes : {', '.join(CODES)}")
 
-        if not (self.archived_data_dir / 'pollution_historique.feather').is_file():
+        archived_data_dir = feature_dir / 'archived'
+        archived_data_dir.mkdir(exist_ok=True, parents=True)
+        if not (archived_data_dir / 'pollution_historique.feather').is_file():
             self.logger.info("On calcule le dataframe d'archive de l'air")
 
             dico: Dict[str, pd.DataFrame] = {}
-            for fic in self.archived_data_dir.iterdir():
+            for fic in archived_data_dir.iterdir():
                 if fic.suffix == '.csv':
                     df = pd.read_csv(fic, sep=";")
 
@@ -63,11 +60,11 @@ class AirQualityFeatures(BaseFeature):
 
             for polluant in dico:
                 dico[polluant].to_feather(
-                    self.archived_data_dir / f"{polluant}.feather")
+                    archived_data_dir / f"{polluant}.feather")
 
             del dico
             dg = None
-            for fic in self.archived_data_dir.iterdir():
+            for fic in archived_data_dir.iterdir():
                 if fic.suffix == '.feather' and fic.stem != 'pollution_historique':
                     df = pd.read_feather(fic)
                     polluant = fic.stem
@@ -90,32 +87,42 @@ class AirQualityFeatures(BaseFeature):
 
             dg.index = pd.to_datetime(dg.index)
 
-            self.data = self.data.join(dg)
+            data = dg.copy(deep=True)
 
             del df
             del dg
             del dh
 
-            self.data.interpolate(method='linear', inplace=True)
-            self.data.ffill(inplace=True)
-            self.data.bfill(inplace=True)
+            data.interpolate(method='linear', inplace=True)
+            data.ffill(inplace=True)
+            data.bfill(inplace=True)
 
-            for k in sorted(self.data.columns):
-                if self.data[k].isna().sum() > self.max_nan:
-                    self.logger.error(
-                        f"{k} possède trop de NaN ({self.data[k].isna().sum()})")
+            # for k in sorted(data.columns):
+            #     if data[k].isna().sum() > self.max_nan:
+            #         self.logger.error(
+            #             f"{k} possède trop de NaN ({data[k].isna().sum()})")
 
-                # self.data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
+                # data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
 
-            self.data.to_feather(self.archived_data_dir /
+            data.to_feather(archived_data_dir /
                                  'pollution_historique.feather')
         else:
             self.logger.info("On relit le dataframe d'archive de l'air")
-            self.data = pd.read_feather(
-                self.archived_data_dir / 'pollution_historique.feather')
+            data = pd.read_feather(
+                archived_data_dir / 'pollution_historique.feather')
 
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")
+        return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:
-        self.__include_air_quality()
+        assert 'departement' in kwargs, "departement must be provided in config"
+        departement = kwargs.get('departement')
+        assert type(departement) == str, "departement must be a string"
+
+        feature_dir = kwargs.get("feature_dir", f'./data/features/{self.name}')
+        if isinstance(feature_dir, str):
+            feature_dir = Path(feature_dir)
+        if not feature_dir.exists():
+            os.makedirs(str(feature_dir))
+        return self.__include_air_quality(departement, feature_dir)

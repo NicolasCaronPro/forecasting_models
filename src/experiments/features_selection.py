@@ -275,7 +275,9 @@ def explore_features(model: Model, model_config:dict, features: List[str], df_tr
 
         # Si le score ne s'améliore pas, on retire la variable de la liste
         if single_feature_score <= base_score:
-            logger.info(f'With {fet} number {i}: {base_score} -> {single_feature_score}')
+            multiple_features_score = model.score(df_test[selected_features_], df_test[target], single_score=False)
+            logger.info(f'{model.loss} With {fet} number {i}: {base_score} -> {single_feature_score}\n' +
+                        "\t".join(f"{metric, value}" for metric, value in multiple_features_score.items()))
             base_score = single_feature_score
             c = 0
         else:

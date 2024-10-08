@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 from typing import Optional, Union, List
 from sklearn.pipeline import Pipeline
 import src.features as ft
@@ -9,20 +10,65 @@ from copy import deepcopy
 import datetime as dt
 import numpy as np
 import logging
+import sys
+import pathlib
 
+def extract_column_base(col_name: str, separator='##') -> str:
+    # Extraction du radical avant toute transformation (par ex: encodage, shift, aggregation)
+    if separator in col_name:
+        return col_name.split(separator)[0]
+    return col_name
 
-class BaseTabularDataset(ft.BaseFeature):
-    def __init__(self, target_colomns: Union[List[str], str], features_class: List[Union[ft.BaseFeature, str]], config: Optional['ft.Config'] = None, parent: Optional['ft.BaseFeature'] = None) -> None:
+def find_matching_columns(df: pd.DataFrame, base_columns: List[str], to_print=False) -> List[str]:
+    """ Trouve les colonnes dans un DataFrame qui correspondent aux bases des noms de colonnes spécifiées. """
+    matching_columns = []
+    # if to_print:
+    # print(base_columns)
+    for col in df.columns:
+        # On extrait la base du nom de la colonne actuelle
+        col_base = extract_column_base(col)
+        # if to_print:
+        # print(col, col_base)
+        if col_base in base_columns:
+            matching_columns.append(col)
+            #
+    return matching_columns
+
+class BaseTabularDataset():
+    def __init__(self, features_class: List[Union[ft.BaseFeature, str]], name:str = None, logger=None, fetch_config: dict = None, getter_config:dict = None) -> None:
+
+        # On initialise name
+        if name is None:
+            self.name = self.__class__.__name__
+        else:
+            self.name = name
+        assert isinstance(self.name, str), "name should be of type str"
+
+        # # On initialise feature_dir
+        # if data_dir:
+        #     if isinstance(data_dir, str):
+        #         data_dir = Path(data_dir)
+        # else:
+        #     data_dir = Path(os.getcwd())
+
+        # assert isinstance(data_dir, Path), "data_dir should be of type Path"
+        # self.data_dir = data_dir / self.name
+        # if not os.path.isdir(self.data_dir):
+        #     os.makedirs(self.data_dir, exist_ok=True)
+
+        # On initialise logger
+        if logger is None:
+            logger = logging.getLogger(self.name)
+        self.logger: logging.Logger = logger
+        assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
+        ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
+
+        self.logger.info("Initialisation de la classe %s",self.name)
         # Initialize each features object and fetch their data and then get them for the specified range
-
-        # Get target
-        self.targets = target_colomns if isinstance(
-            target_colomns, list) else [target_colomns]
-        # self.chained_targets = chained_targets
         self.features: List[Union[ft.BaseFeature, str]] = []
+        self.targets_names = []
 
-        # Initialize each feature
-
+        self.data: pd.DataFrame = None
         self.enc_X_train: pd.DataFrame = pd.DataFrame()
         self.enc_X_val: pd.DataFrame = pd.DataFrame()
         self.enc_X_test: pd.DataFrame = pd.DataFrame()
@@ -41,12 +87,12 @@ class BaseTabularDataset(ft.BaseFeature):
         self.train_set: pd.DataFrame = pd.DataFrame()
         self.val_set: pd.DataFrame = pd.DataFrame()
         self.test_set: pd.DataFrame = pd.DataFrame()
-        self.name = self.__class__.__name__
-        self.name += f"_{'_'.join(self.targets)}"
-        super().__init__(config=config, parent=parent, name=self.name)
 
+        # super().__init__(config=config, parent=parent)
 
         self.initialize_features(features_class)
+        self.fetch_dataset(**fetch_config)
+        self.get_dataset(**getter_config, inplace=True)
 
     def initialize_features(self, features_class) -> None:
         """
@@ -65,32 +111,35 @@ class BaseTabularDataset(ft.BaseFeature):
             # If the feature is a class, instantiate it, otherwise if it's an instance, use it
             if isinstance(feature_class, ft.BaseFeature):
                 feature = feature_class
-                feature.config = self.config
-                feature.parent = self
+
             else:
-                feature = feature_class(config=self.config, parent=self)
+                feature = feature_class(logger=self.logger)
 
             self.features.append(feature)
 
-    def fetch_data_function(self, args, **kwargs) -> None:
+    def fetch_dataset(self, data_start, data_stop, data_dir, etablissement, departement, region) -> None:
         """
         Fetch les données.
 
         Parameters:
         - None
         """
+        if data_dir is not None:
+            if isinstance(data_dir, str):
+                data_dir = Path(data_dir)
+        else:
+            data_dir = Path(os.getcwd()) / 'data'
 
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            
         # Get data from each feature
         for feature in self.features:
-            if not feature.is_fetched:
-                self.logger.info(f"Fetching data for {feature.name}")
-                self.logger.setLevel(logging.WARNING)
-                feature.fetch_data(save=True)
-                self.logger.setLevel(logging.INFO)
-            self.data = self.data.join(feature.data)
-
-        self.data = self.data.dropna(subset=self.targets)
-
+            self.logger.info(f"Fetching data for {feature.name}")
+            self.logger.setLevel(logging.WARNING)
+            feature.fetch_data(data_start, data_stop, etablissement=etablissement, departement=departement, region=region, features_dir=data_dir / 'features')
+            self.logger.setLevel(logging.INFO)
+        # self.data = self.data.join(feature.data)
 
     def encode(self, pipeline: Pipeline = None) -> None:
         """
@@ -104,8 +153,6 @@ class BaseTabularDataset(ft.BaseFeature):
             raise ValueError("Pipeline is required")
 
         encoded_data = []
-
-        
 
         if not self.X_train.empty:
             # Do not encode data that are the same unit as the target
@@ -150,24 +197,25 @@ class BaseTabularDataset(ft.BaseFeature):
         """
 
         if not self.train_set.empty:
-            self.X_train = self.train_set.drop(columns=self.targets)
-            self.y_train = self.train_set[self.targets]
+            # print(self.train_set.columns.to_list())
+            self.X_train = self.train_set.drop(columns=self.targets_names)
+            self.y_train = self.train_set[self.targets_names]
         else:
-            self.X_train = self.data.drop(columns=self.targets)
-            self.y_train = self.data[self.targets]
+            self.X_train = self.data.drop(columns=self.targets_names)
+            self.y_train = self.data[self.targets_names]
 
         if val:
             if not self.val_set.empty:
-                self.X_val = self.val_set.drop(columns=self.targets)
-                self.y_val = self.val_set[self.targets]
+                self.X_val = self.val_set.drop(columns=self.targets_names)
+                self.y_val = self.val_set[self.targets_names]
             else:
                 raise ValueError(
                     "Validation set is not available, you need to split the data first")
 
         if test:
             if not self.test_set.empty:
-                self.X_test = self.test_set.drop(columns=self.targets)
-                self.y_test = self.test_set[self.targets]
+                self.X_test = self.test_set.drop(columns=self.targets_names)
+                self.y_test = self.test_set[self.targets_names]
             else:
                 raise ValueError(
                     "Test set is not available, you need to split the data first")
@@ -178,7 +226,7 @@ class BaseTabularDataset(ft.BaseFeature):
               random_state: Optional[int] = None,
               shuffle: bool = True,
               stratify: Optional[Union[pd.Series, np.ndarray]] = None) -> tuple:
-        """Split arrays or matrices into random train and test subsets.
+        """Split arrays or matrices into random train, test and val subsets.
 
         Quick utility that wraps input validation,
         ``next(ShuffleSplit().split(X, y))``, and application to input data
@@ -279,220 +327,193 @@ class BaseTabularDataset(ft.BaseFeature):
 
         return self.train_set, self.val_set, self.test_set
 
-    # def get_dataset(self, from_date: Optional[Union[str, dt.datetime]] = None,
-    #                 to_date: Optional[Union[str, dt.datetime]] = None,
-    #                 features_names: Optional[List[str]] = None,
-    #                 freq: Optional[str] = '1D',
-    #                 shift: Optional[int] = 0,
-    #                 rolling_window: Optional[Union[int, List[int]]] = 0,
-    #                 split_config: Optional[dict] = {},
-    #                 create_X_y: bool = True,
-    #                 encoding_pipeline: Pipeline = None) -> 'BaseTabularDataset':
-    #     """
-    #     Get the data.
-
-    #     Parameters:
-    #     - None
-    #     """
-    #     # print(self.enc_X_train.columns.value_counts().loc[lambda x: x > 1])
-
-    #     self.logger.info("Getting the dataset...")
-    #     # TODO: Gérer le cas ou self est un dataset déjà splité/encodé, et que l'on appel cette méthode avec des paramètres différents (notamment les dates et les fréquences)
-    #     # if features_names is not None:
-    #     #     features_names = list({ft.split('##')[0] if '##' in ft else ft for ft in features_names})
-
-    #         # # si les targets ne sont pas dans les features, on les ajoute
-    #         # if not any([target in features_names for target in self.targets]):
-    #         #     features_names.extend(self.targets)
-
-    #     filtered_data = self.get_data(from_date=from_date, to_date=to_date,
-    #                                   features_names=features_names, freq=freq, shift=shift, rolling_window=rolling_window)
-
-    #     print(filtered_data.columns.to_list())
-
-    #     new_dataset: BaseTabularDataset = deepcopy(self)
-
-    #     # Add index to the filtered data
-    #     kwargs = {str(filtered_data.index.name): filtered_data.index}
-    #     new_dataset.data = filtered_data.assign(**kwargs)
-    #     new_dataset.start = from_date
-    #     new_dataset.stop = to_date
-
-    #     # Update the target columns in the new dataset
-    #     new_dataset.targets = []
-    #     # print(self.targets)
-    #     # print(new_dataset.data.columns)
-    #     for col in new_dataset.data.columns:
-    #         if '~~' in col:
-    #             # print(col.split('~~')[0])
-    #             if any(col.split('~~')[0] in self.targets) or col in self.targets:
-    #                 new_dataset.targets.append(col)
-    #                 # new_dataset.data.pop(col)
-    #         else:
-    #             # print(col)
-    #             if col in self.targets:
-    #                 new_dataset.targets.append(col)
-    #                 # new_dataset.data.pop(col)
-    #     # print(new_dataset.targets)
-    #     # self.chained_targets = True
-
-    #     # if not features_names:
-    #     #     features_names = new_dataset.get_features_names()
-    #     #     # features_names = [col for col in features_names if col not in new_dataset.targets]
-    #     #     # print(features_names)
-
-    #     # We should also update other attributes like enc_X_train, enc_X_val, enc_X_test, X_train, y_train, X_val, y_val, X_test, y_test, train_set, val_set, test_set if they are not None and if the features_names parameter is the only parameter passed
-    #     # On copie ou on calcule les attributs de la nouvelle instance
-    #     # if not self.train_set.empty:
-    #     #     self.logger.info('Re-using the train, val and test sets...')
-    #     #     new_dataset.train_set = self.train_set[features_names+self.targets]
-    #     #     if not self.val_set.empty:
-    #     #         new_dataset.val_set = self.val_set[features_names+self.targets]
-    #     #     if not self.test_set.empty:
-    #     #         new_dataset.test_set = self.test_set[features_names+self.targets]
-    #     # else:
-    #     if split_config:
-    #         new_dataset.split(**split_config)
-
-    #     # if not self.X_train.empty:
-    #     #     self.logger.info('Re-using the X_y splits...')
-    #     #     print(features_names)
-    #     #     new_dataset.X_train = self.X_train[features_names]
-
-    #     #     if not self.X_val.empty:
-    #     #         new_dataset.X_val = self.X_val[features_names]
-    #     #     if not self.X_test.empty:
-    #     #         new_dataset.X_test = self.X_test[features_names]
-    #     # else:
-    #     if create_X_y:
-    #         new_dataset.create_X_y()
-
-    #     # if not self.enc_X_train.empty:
-    #     #     self.logger.info('Re-using the encodings...')
-    #     #     features_names = [col for col in self.enc_X_train.columns if col.split('##')[0] in features_names or col in features_names]
-    #     #     new_dataset.enc_X_train = self.enc_X_train[features_names]
-    #     #     if not self.enc_X_val.empty:
-    #     #         new_dataset.enc_X_val = self.enc_X_val[features_names]
-    #     #     if not self.enc_X_test.empty:
-    #     #         new_dataset.enc_X_test = self.enc_X_test[features_names]
-    #     #     self.enc_data = self.enc_data[features_names]
-    #     # else:
-    #     if encoding_pipeline:
-    #         if isinstance(encoding_pipeline, dict):
-    #             encoding_pipeline = create_encoding_pipeline(encoding_pipeline)
-    #         new_dataset.encode(pipeline=encoding_pipeline)
-
-    #         #         afficher le nombre de colonnes portant le même nom si il est supérieur à 1
-    #         # print(new_dataset.enc_data.columns.value_counts().loc[lambda x: x > 1])
-
-    #     return new_dataset
-
-    def get_features_names(self) -> List[str]:
-        columns = super().get_features_names()
-
-        # Retirer les targets
-        columns = [col for col in columns if col not in self.targets]
-
-        return columns
-
     def get_targets_names(self) -> List[str]:
-        return self.targets
+        return self.targets_names
     
-    def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: Optional[str] = None, shift: Optional[int] = None, rolling_window: Optional[Union[int, List[int]]] = None) -> pd.DataFrame:
+    def create_target(self, targets, targets_shift: Optional[int] = None, targets_rolling_window: Optional[int] = None) -> str:
+        # Shift the target columns by one from the data
+        # targets = self.targets_names.copy()
+
+        for target in targets:
+            target_name = f"target_{target}"
+            
+            if targets_shift is not None or targets_rolling_window is not None:
+                # if targets_shift is None:
+                #     targets_shift = 1
+                if targets_shift is not None:
+                    self.logger.info("Shifting the target columns...")
+                    target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
+                    self.data[target_name] = self.data[target].shift(targets_shift)
+                    self.targets_names.append(target_name)
+                    # if target_name in self.data.columns:
+                    #     self.data.drop(columns=target_name, inplace=True)
+                if targets_rolling_window is not None:
+                    self.logger.info("Aggregating the target columns...")
+                    # TODO: if target not shifted, add a shift of -1
+                    # if targets_shift is None:
+
+
+                    target_name = f"{target_name}%%mean_{str(targets_rolling_window)}J"
+                    self.data[target_name] = self.data[target].rolling(targets_rolling_window).mean()
+                    self.targets_names.append(target_name)
+                    # if target_name in self.data.columns:
+                    #     self.data.drop(columns=target_name, inplace=True)
+            else:
+                self.logger.info("Not changing the target columns...")
+                self.data.rename(columns={target: target_name}, inplace=True)
+                self.targets_names.append(target_name)
+                # self.data.drop(columns=target_name, inplace=True)
+            # print(f"Target: {target} -> {target_name}")
+            # self.targets_names.remove(target)
+        # Drop rows with missing values in the target columns
+        # print(self.data)
+        self.data = self.data.dropna(subset=self.targets_names)
+    
+    def get_data(self,
+        from_date: Optional[Union[str, dt.datetime]] = None,
+        to_date: Optional[Union[str, dt.datetime]] = None,
+        features_names: Optional[List[str]] = None,
+        freq: Optional[str] = None,
+        shift: Optional[int] = None,
+        rolling_window: Optional[Union[int, List[int]]] = None,
+        drop_constant_thr = 1.0,
+        path: Optional[Union[str, pathlib.Path]] = None,
+        filename: Optional[str] = None) -> pd.DataFrame:
+        # if from_date is None:
+        #     from_date = self.start
+        # assert isinstance(from_date, dt.datetime) or isinstance(
+        #     from_date, str), f"from_date must be of type datetime.datetime or a string, not {type(from_date)}"
+        # if isinstance(from_date, str):
+        #     try:
+        #         from_date = dt.datetime.strptime(from_date, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"from_date must be of format %d-%m-%Y, not {from_date}")
+
+        # if to_date is None:
+        #     to_date = self.stop
+        # assert isinstance(to_date, dt.datetime) or isinstance(
+        #     to_date, str), f"to_date must be of type datetime.datetime or a string, not {type(to_date)}"
+        # if isinstance(to_date, str):
+        #     try:
+        #         to_date = dt.datetime.strptime(to_date, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"to_date must be of format %d-%m-%Y, not {to_date}")
+
+        # if freq is None:
+        #     freq = self.freq
+
+        # print(from_date, to_date, freq)
         date = pd.date_range(start=from_date, end=to_date, freq=freq)
         data = pd.DataFrame(index=date)
         data.index.name = 'date'
         # print(data)
+
+        features_data = []
         for feature in self.features:
-            feature_data = feature.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window)
+            feature_data = feature.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window, drop_constant_thr=drop_constant_thr, path=path, filename=filename)
             # print(feature_data)
-            data = data.join(feature_data, on='date', how='left')
+            # data = data.join(feature_data, on='date', how='left')
+            features_data.append(feature_data)
+
+        data = pd.concat(features_data, axis='columns')
+
+        data = data.dropna()
 
         # extraire l'index de la nouvelle data si il n'est pas déjà présent
         if data.index.name not in data.columns:
-            kwargs = {str(data.index.name): data.index}
-            data = data.assign(**kwargs)
+            new_column = {str(data.index.name): data.index}
+            data = data.assign(**new_column)
         # print(data)
-        
-        return data
 
+        if features_names is None:
+            features_names = data.columns.to_list()
+        
+        return data[features_names]
+
+    # TODO : renommer shift en lags et rolling window en trend_windows
     def get_dataset(self, from_date: Optional[Union[str, dt.datetime]] = None,
                     to_date: Optional[Union[str, dt.datetime]] = None,
                     features_names: Optional[List[str]] = None,
                     freq: Optional[str] = None,
                     shift: Optional[int] = None,
                     rolling_window: Optional[Union[int, List[int]]] = None,
+                    drop_constant_thr = 1.0,
+                    path: Optional[Union[str, pathlib.Path]] = None,
+                    filename: Optional[str] = None,
                     split_config: Optional[dict] = {},
                     create_X_y: bool = True,
-                    encoding_pipeline: Pipeline = None) -> 'BaseTabularDataset':
+                    encoding_pipeline: Pipeline = None,
+                    targets_names: Optional[List[str]] = None,
+                    targets_shift: Optional[int] = None,
+                    targets_rolling_window: Optional[Union[int, List[int]]] = None,
+                    inplace: bool = False) -> 'BaseTabularDataset':
         """
-        Get the data.
+        Get the dataset
+        
+        Parameters
+        
+        - from_date (Optional[Union[str, dt.datetime]]): Start date of the dataset
+        - to_date (Optional[Union[str, dt.datetime]]): End date of the dataset
+        - features_names (Optional[List[str]]): List of features names to keep in the dataset
+        - freq (Optional[str]): Frequency of the dataset
+        - shift (Optional[int]): Add lagged features to each features
+        - rolling_window (Optional[Union[int, List[int]]]): Add mean and std of each features in a rolling window
+        - split_config (Optional[dict]): Configuration of the splitting process
+        - create_X_y (bool): Create X and y
+        - encoding_pipeline (Optional[Pipeline]): Pipeline to encode categorical features
+        - targets_shift (Optional[int]): Shift targets by this number of periods
+        - targets_rolling_window (Optional[Union[int, List[int]]]): Replace targets by a rolling window
+        - inplace (bool): Modify the dataset in place
+
         """
         self.logger.info(f"Getting the dataset from {from_date} to {to_date}...")
 
-        if from_date is None:
-            from_date = self.start
-        assert isinstance(from_date, dt.datetime) or isinstance(
-            from_date, str), f"from_date must be of type datetime.datetime or a string, not {type(from_date)}"
-        if isinstance(from_date, str):
-            try:
-                from_date = dt.datetime.strptime(from_date, '%d-%m-%Y')
-            except ValueError:
-                raise ValueError(
-                    f"from_date must be of format %d-%m-%Y, not {from_date}")
+        # TODO: set default dates and freq in function of the features availaibility
 
-        if to_date is None:
-            to_date = self.stop
-        assert isinstance(to_date, dt.datetime) or isinstance(
-            to_date, str), f"to_date must be of type datetime.datetime or a string, not {type(to_date)}"
-        if isinstance(to_date, str):
-            try:
-                to_date = dt.datetime.strptime(to_date, '%d-%m-%Y')
-            except ValueError:
-                raise ValueError(
-                    f"to_date must be of format %d-%m-%Y, not {to_date}")
+        # if from_date is None:
+        #     from_date = self.start
+        # assert isinstance(from_date, dt.datetime) or isinstance(
+        #     from_date, str), f"from_date must be of type datetime.datetime or a string, not {type(from_date)}"
+        # if isinstance(from_date, str):
+        #     try:
+        #         from_date = dt.datetime.strptime(from_date, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"from_date must be of format %d-%m-%Y, not {from_date}")
 
-        if freq is None:
-            freq = self.freq
+        # if to_date is None:
+        #     to_date = self.stop
+        # assert isinstance(to_date, dt.datetime) or isinstance(
+        #     to_date, str), f"to_date must be of type datetime.datetime or a string, not {type(to_date)}"
+        # if isinstance(to_date, str):
+        #     try:
+        #         to_date = dt.datetime.strptime(to_date, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"to_date must be of format %d-%m-%Y, not {to_date}")
 
-        if shift is None:
-            shift = self.shift
+        # if freq is None:
+        #     freq = self.freq
 
-        if rolling_window is None:
-            rolling_window = self.rolling_window
+        # if shift is None:
+        #     shift = self.shift
 
-        def extract_column_base(col_name: str, separator='##') -> str:
-            # Extraction du radical avant toute transformation (par ex: encodage, shift, aggregation)
-            if separator in col_name:
-                return col_name.split(separator)[0]
-            return col_name
+        # if rolling_window is None:
+        #     rolling_window = self.rolling_window
 
-        def find_matching_columns(df: pd.DataFrame, base_columns: List[str], to_print=False) -> List[str]:
-            """ Trouve les colonnes dans un DataFrame qui correspondent aux bases des noms de colonnes spécifiées. """
-            matching_columns = []
-            # if to_print:
-            # print(base_columns)
-            for col in df.columns:
-                # On extrait la base du nom de la colonne actuelle
-                col_base = extract_column_base(col)
-                # if to_print:
-                # print(col, col_base)
-                if col_base in base_columns:
-                    matching_columns.append(col)
-                    #
-            return matching_columns
+        # Make sure that targets_names is a list of strings
+        targets_names = targets_names if isinstance(
+            targets_names, list) else [targets_names]
 
-        # print(self.data.columns.to_list())
-        # Si features_names est fourni, on retire les transformations des colonnes
+        # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
-            features_names_base = [
-                extract_column_base(ft) for ft in features_names]
-            # print(features_names_base)
+            features_names_base = [extract_column_base(ft) for ft in features_names]
             # features_names_base = find_matching_columns(self.data, features_names_base, to_print=True)
-            # print(features_names_base)
 
             # Si les targets ne sont pas dans les features, on les ajoute
-            for target in self.targets:
+            for target in targets_names:
                 if target not in features_names_base:
                     features_names_base.append(target)
         else:
@@ -500,133 +521,149 @@ class BaseTabularDataset(ft.BaseFeature):
 
         # Filtrage des données en fonction des dates et des colonnes demandées
         new_data = self.get_data(from_date=from_date, to_date=to_date,
-                                 features_names=features_names_base, freq=freq, shift=shift, rolling_window=rolling_window)
+                                 features_names=features_names_base, freq=freq, shift=shift, rolling_window=rolling_window, drop_constant_thr=drop_constant_thr, path=path, filename=filename)
         
-        # print(new_data)
-        
-        if features_names_base is None:
-            features_names_base = new_data.columns.to_list()
+        # if features_names_base is None:
+        #     features_names_base = new_data.columns.to_list()
 
-        # print(features_names_base)
-        # print([col for col in self.data.columns.to_list()])
-        new_dataset: BaseTabularDataset = deepcopy(self)
+        
+        if not inplace:
+            new_dataset: BaseTabularDataset = deepcopy(self)
+        else:
+            new_dataset = self
 
         # Assignation des données filtrées
         new_dataset.data = new_data
-        new_dataset.start = from_date
-        new_dataset.stop = to_date
-        new_dataset.freq = freq
-        new_dataset.shift = shift
-        new_dataset.rolling_window = rolling_window
+        # new_dataset.start = from_date
+        # new_dataset.stop = to_date
+        # new_dataset.freq = freq
+        # new_dataset.shift = shift
+        # new_dataset.rolling_window = rolling_window
+        # Renommer les targets
+        # print(new_dataset.targets_names)
+        new_dataset.create_target(targets=targets_names, targets_shift=targets_shift, targets_rolling_window=targets_rolling_window)
+        # new_dataset.targets_names = targets_names
 
-        # Initialisation des targets
-        new_dataset.targets = []
-        for col in new_dataset.data.columns:
-            if col in self.targets or any(col.split('~~')[0] == target for target in self.targets):
-                new_dataset.targets.append(col)
+        # # Update des noms des targets si il y a eu aggregation
+        # new_dataset.targets_names = []
+        # print(self.targets_names)
+        # print(new_dataset.data.columns.to_list())
+        # for col in new_dataset.data.columns:
+        #     if col in self.targets_names or any(col.split('~~')[0] == target for target in self.targets_names):
+        #         new_dataset.targets_names.append(col)
+        #         print(new_dataset.targets_names)
 
+        # def needs_recalculation(self, new_features, new_dates, new_freq, shift, rolling_window, targets_names):
+        #     # Vérification des colonnes en utilisant les noms transformés
+        #     current_features = [extract_column_base(
+        #         col) for col in self.data.columns]
+        #     new_features_base = [extract_column_base(f) for f in new_features]
 
-        def needs_recalculation(self, new_features, new_dates, new_freq, shift, rolling_window):
-            # Vérification des colonnes en utilisant les noms transformés
-            current_features = [extract_column_base(
-                col) for col in self.data.columns]
-            new_features_base = [extract_column_base(f) for f in new_features]
+        #     # Si les features demandées ne sont pas présentes dans les colonnes existantes ou si les paramètres changent
+        #     if set(new_features_base) - set(current_features):
+        #         # print(set(new_features_base) - set(current_features))
+        #         return True
 
-            # Si les features demandées ne sont pas présentes dans les colonnes existantes ou si les paramètres changent
-            if set(new_features_base) - set(current_features):
-                # print(set(new_features_base) - set(current_features))
-                return True
+        #     # Si les dates ou la fréquence changent, il faut recalculer
+        #     if new_dates != (self.start, self.stop) or new_freq != self.freq:
+        #         print(new_dates, (self.start, self.stop), new_freq, self.freq)
+        #         return True
 
-            # Si les dates ou la fréquence changent, il faut recalculer
-            if new_dates != (self.start, self.stop) or new_freq != self.freq:
-                print(new_dates, (self.start, self.stop), new_freq, self.freq)
-                return True
+        #     # Vérification du shift et du rolling_window
+        #     if shift != self.shift or rolling_window != self.rolling_window:
+        #         print(shift, self.shift, rolling_window, self.rolling_window)
+        #         return True
+            
+        #     # Si les targets ont changés, il faut recalculer
+        #     if set(targets_names) != set(self.targets_names):
+        #         return True
 
-            # Vérification du shift et du rolling_window
-            if shift != self.shift or rolling_window != self.rolling_window:
-                print(shift, self.shift, rolling_window, self.rolling_window)
-                return True
+        #     return False
 
-            return False
+        # # TODO: Attention, il faut recalculer si les targets ont changé, la pipeline d'encodage, les dates, la fréquence, le shift, le rolling_window, les features, les splits, les encodings, etc.
+        # # Vérifier si un recalcul est nécessaire
+        # if needs_recalculation(self, features_names_base, (from_date, to_date), freq, shift, rolling_window):
+        self.logger.info(
+            "Re-calculating train/val/test sets and encodings...")
+        
 
-        # Vérifier si un recalcul est nécessaire
-        if needs_recalculation(self, features_names_base, (from_date, to_date), freq, shift, rolling_window):
-            self.logger.info(
-                "Re-calculating train/val/test sets and encodings...")
+        self.name += f"_{'_'.join(self.targets_names)}"
 
-            # Splitting the dataset
-            if split_config:
-                new_dataset.split(**split_config)
+        # Splitting the dataset
+        if split_config:
+            new_dataset.split(**split_config)
 
-            # Création des X et y
-            if create_X_y:
-                new_dataset.create_X_y()
+        # Création des X et y
+        if create_X_y:
+            new_dataset.create_X_y()
 
-            # print(new_dataset.X_train['date'])
+        # print(new_dataset.X_train['date'])
 
-            # Encodage si nécessaire
-            if encoding_pipeline:
-                if isinstance(encoding_pipeline, dict):
-                    encoding_pipeline = create_encoding_pipeline(
-                        encoding_pipeline)
+        # Encodage si nécessaire
+        if encoding_pipeline:
+            if isinstance(encoding_pipeline, dict):
+                encoding_pipeline = create_encoding_pipeline(
+                    encoding_pipeline)
 
-                # print(encoding_pipeline)
-                new_dataset.encode(pipeline=encoding_pipeline)
-        else:
-            # Réutilisation des attributs existants si aucune modification majeure n'est nécessaire
-            self.logger.info("Re-using existing splits and encodings...")
+            # print(encoding_pipeline)
+            new_dataset.encode(pipeline=encoding_pipeline)
+        # else:
+        #     # Réutilisation des attributs existants si aucune modification majeure n'est nécessaire
+        #     self.logger.info("Re-using existing splits and encodings...")
+        #     # Re-utiliser les splits en vérifiant les colonnes correspondantes
+        #     if not self.X_train.empty:
+        #         matching_columns_train = find_matching_columns(
+        #             self.X_train, features_names_base, to_print=False)
+        #         new_dataset.X_train = self.X_train[matching_columns_train]
+        #         new_dataset.y_train = self.y_train
 
-            # Re-utiliser les splits en vérifiant les colonnes correspondantes
-            if not self.X_train.empty:
-                matching_columns_train = find_matching_columns(
-                    self.X_train, features_names_base, to_print=False)
-                new_dataset.X_train = self.X_train[matching_columns_train]
-                new_dataset.y_train = self.y_train
+        #         if not self.X_val.empty:
+        #             matching_columns_val = find_matching_columns(
+        #                 self.X_val, features_names_base, to_print=False)
+        #             new_dataset.X_val = self.X_val[matching_columns_val]
+        #             new_dataset.y_val = self.y_val
 
-                if not self.X_val.empty:
-                    matching_columns_val = find_matching_columns(
-                        self.X_val, features_names_base, to_print=False)
-                    new_dataset.X_val = self.X_val[matching_columns_val]
+        #         if not self.X_test.empty:
+        #             matching_columns_test = find_matching_columns(
+        #                 self.X_test, features_names_base, to_print=False)
+        #             new_dataset.X_test = self.X_test[matching_columns_test]
+        #             new_dataset.y_test = self.y_test
 
-                if not self.X_test.empty:
-                    matching_columns_test = find_matching_columns(
-                        self.X_test, features_names_base, to_print=False)
-                    new_dataset.X_test = self.X_test[matching_columns_test]
+        #     # Re-utiliser les sets en vérifiant les colonnes correspondantes
+        #     if not self.train_set.empty:
+        #         matching_columns_train_set = find_matching_columns(
+        #             self.train_set, features_names_base, to_print=False)
+        #         new_dataset.train_set = self.train_set[matching_columns_train_set]
 
-            # Re-utiliser les sets en vérifiant les colonnes correspondantes
-            if not self.train_set.empty:
-                matching_columns_train_set = find_matching_columns(
-                    self.train_set, features_names_base, to_print=False)
-                new_dataset.train_set = self.train_set[matching_columns_train_set]
+        #         if not self.val_set.empty:
+        #             matching_columns_val_set = find_matching_columns(
+        #                 self.val_set, features_names_base, to_print=False)
+        #             new_dataset.val_set = self.val_set[matching_columns_val_set]
 
-                if not self.val_set.empty:
-                    matching_columns_val_set = find_matching_columns(
-                        self.val_set, features_names_base, to_print=False)
-                    new_dataset.val_set = self.val_set[matching_columns_val_set]
+        #         if not self.test_set.empty:
+        #             matching_columns_test_set = find_matching_columns(
+        #                 self.test_set, features_names_base, to_print=False)
+        #             new_dataset.test_set = self.test_set[matching_columns_test_set]
 
-                if not self.test_set.empty:
-                    matching_columns_test_set = find_matching_columns(
-                        self.test_set, features_names_base, to_print=False)
-                    new_dataset.test_set = self.test_set[matching_columns_test_set]
+        #     # Re-utiliser les encodings en vérifiant les colonnes correspondantes
+        #     if not self.enc_X_train.empty:
+        #         matching_columns_enc_train = find_matching_columns(
+        #             self.enc_X_train, features_names_base, to_print=False)
+        #         new_dataset.enc_X_train = self.enc_X_train[matching_columns_enc_train]
+        #         new_dataset.enc_data = self.enc_data[matching_columns_enc_train]
 
-            # Re-utiliser les encodings en vérifiant les colonnes correspondantes
-            if not self.enc_X_train.empty:
-                matching_columns_enc_train = find_matching_columns(
-                    self.enc_X_train, features_names_base, to_print=False)
-                new_dataset.enc_X_train = self.enc_X_train[matching_columns_enc_train]
-                new_dataset.enc_data = self.enc_data[matching_columns_enc_train]
+        #         if not self.enc_X_val.empty:
+        #             matching_columns_enc_val = find_matching_columns(
+        #                 self.enc_X_val, features_names_base, to_print=False)
+        #             new_dataset.enc_X_val = self.enc_X_val[matching_columns_enc_val]
 
-                if not self.enc_X_val.empty:
-                    matching_columns_enc_val = find_matching_columns(
-                        self.enc_X_val, features_names_base, to_print=False)
-                    new_dataset.enc_X_val = self.enc_X_val[matching_columns_enc_val]
+        #         if not self.enc_X_test.empty:
+        #             matching_columns_enc_test = find_matching_columns(
+        #                 self.enc_X_test, features_names_base, to_print=False)
+        #             new_dataset.enc_X_test = self.enc_X_test[matching_columns_enc_test]
 
-                if not self.enc_X_test.empty:
-                    matching_columns_enc_test = find_matching_columns(
-                        self.enc_X_test, features_names_base, to_print=False)
-                    new_dataset.enc_X_test = self.enc_X_test[matching_columns_enc_test]
-
-        return new_dataset
+        if not inplace:
+            return new_dataset
 
     def save_dataset(self, dataset_dir: str = None) -> None:
         """
@@ -646,7 +683,7 @@ class BaseTabularDataset(ft.BaseFeature):
             dataset_dir.mkdir(parents=True)
 
         self.logger.info("Saving the raw dataset...")
-        self.save_dataframe()
+        # self.save_dataframe(path=dataset_dir, data=self.data, filename="data.feather")
 
         if not self.train_set.empty:
             self.logger.info("Saving splits...")
