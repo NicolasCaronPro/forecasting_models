@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from src.datasets.base_tabular_dataset import BaseTabularDataset
 from src.encoding.tools import create_encoding_pipeline
-from src.experiments.features_selection import get_features, explore_features
+from src.experiments.features_selection import get_features, explore_features, select_features
 from src.models.sklearn_models import Model, ModelTree
 import src.features as ft
 import mlflow.sklearn
@@ -24,7 +24,7 @@ import mlflow.data.pandas_dataset
 from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
-import cudf as cd
+#import cudf as cd
 import numpy as np
 import re
 
@@ -70,6 +70,7 @@ class BaseExperiment:
 
             if find_best_features:
                 selected_features = self.get_important_features(dataset=dataset, model=self.model, model_config=model_config)
+                #selected_features = self.select_features(dataset=dataset, num_feats=100)
                 # dataset.enc_X_train = dataset.enc_X_train[selected_features]
                 # dataset.enc_X_val = dataset.enc_X_val[selected_features]
                 # dataset.enc_X_test = dataset.enc_X_test[selected_features]
@@ -103,7 +104,7 @@ class BaseExperiment:
             mlflow.log_params(model_config['fit_params'])
             mlflow.log_param('optimization', model_config['optimization'])
 
-            self.model.fit(cd.DataFrame(dataset.enc_X_train), dataset.y_train, **model_config)
+            self.model.fit(pd.DataFrame(dataset.enc_X_train), dataset.y_train, **model_config)
             self.logger.info("Model fitted.")
 
             # self.model.plot_tree(dir_output=run_dir)
@@ -173,7 +174,7 @@ class BaseExperiment:
         """
         self.logger.info("Plotting the results...")
 
-        fig, ax = plt.subplots(figsize=(20, 10))
+        fig, ax = plt.subplots(figsize=(15, 5))
         ax.set_title('True vs Predicted')
         ax.set_xlabel('Date')
         ax.set_ylabel('Value')
@@ -188,6 +189,9 @@ class BaseExperiment:
             bjml.plot(ax=ax, label='BJML', use_index=True)
 
         return fig
+    
+    
+
     
     def get_important_features(self, dataset: BaseTabularDataset = None, model:Model = None, preselection: List[str] = [], model_config:dict=None) -> List[str]:
         selected_features = []
@@ -211,10 +215,13 @@ class BaseExperiment:
         # TODO: ne marchera pas pour du multi-target car le modèle passé à explore_features attendra plusieurs targets
         for target in targets:
             # print(data, variables, target)
-            important_features = get_features(data, variables, target, logger=self.logger, num_feats=200)
-
+            #important_features = get_features(data, variables, target, logger=self.logger, num_feats=200)
+            important_features = select_features(data, target, num_feats=200)
+            #print(f"important_features: ", important_features)
             # On transforme le dictionaire de tupples en dictionaire de listes de features importantes
-            features_to_test = [f[0] for f in important_features]
+            #features_to_test = [f[0] for f in important_features]
+            features_to_test = important_features
+            #print(f"features_to_test: %", features_to_test)
             # print(features_to_test)
 
             selected_features.extend([item for item in explore_features(model=model, model_config=model_config, features=features_to_test,
@@ -234,7 +241,7 @@ class BaseExperiment:
         """
         self.logger.info("Testing the model...")
 
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
+        y_pred = pd.DataFrame(self.model.predict(pd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
         
         return y_pred
     
@@ -251,7 +258,7 @@ class BaseExperiment:
         Returns:
         DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
         """
-        df = cd.DataFrame(dataset.enc_X_train)
+        df = pd.DataFrame(dataset.enc_X_train)
         predictions = pd.DataFrame()
         
         # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles

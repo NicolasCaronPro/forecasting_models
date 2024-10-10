@@ -92,7 +92,7 @@ class HopitalFeatures(BaseFeature):
     def include_nb_hospitalized(self, initial_shift: int = 0):
         hospitalized = pd.read_excel(
             self.data_dir / "nb_hospit/RPU_vers_hospit.xlsx")
-        hospitalized['date_entree'] = pd.to_datetime(hospitalized['date_entree'], unit='D', origin='1899-12-30')
+        hospitalized['date_entree'] = pd.to_datetime(hospitalized['date_entree'], format='%d-%m-%Y')
 
         hospitalized.rename(columns={"date_entree": "date"}, inplace=True)
         hospitalized.set_index("date", inplace=True)

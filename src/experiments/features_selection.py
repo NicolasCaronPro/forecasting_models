@@ -30,6 +30,93 @@ import math
 from src.models.sklearn_models import Model
 
 
+def select_features(dataset: pd.DataFrame, target="target", num_feats=100):
+    df = dataset.copy(deep=True)
+    nan_columns = [(k, df[k].isna().sum()) for k in df if df[k].isna().sum()>0]
+    if len(nan_columns) > 0:
+        print(f'Il y a des colonnes avec des nan : {nan_columns}')
+        print(f"Taille de df avant suppression des colonnes de NaN: {df.shape}")
+        df = df.dropna(axis=1)
+        print(f"Taille de df après suppression des colonnes de NaN: {df.shape}")
+    # On enlève les colonnes de target
+    if df.shape[1]-1 < num_feats:
+        print(f"Pas assez de features ({df.shape[1]} pour {num_feats} à sélectionner)")
+        num_feats = df.shape[1]-1
+    print("=> Recherche des features pertinentes")
+    
+    print("   - Coefficient de corrélation de Pearson")
+    correlations = sorted([(k, abs(df[k].corr(df[target]))) for k in df.columns if k not in [target]], key=lambda x:x[1], reverse=True)
+    #correlations = sorted([(k, abs(np.corrcoef(df[k], df[target])[0,1])) for k in df.columns if k not in [target]], key=lambda x:x[1], reverse=True)
+    Liste_Pearson = [u[0] for u in correlations if u[1] >= 0.4]
+    print("   - Coefficient de corrélation de Kendall")
+    method = 'kendall'
+    correlations = sorted([(k, abs(df[[k, target]].corr(method=method).values[0,1])) for k in df.columns 
+                                if k not in [target, 'date']], key=lambda x:x[1], reverse=True)
+    Liste_Kendall = [u[0] for u in correlations if u[1] >= 0.4]
+    print("   - Coefficient de corrélation de Spearman")
+    method = 'spearman'
+    correlations = sorted([(k, abs(df[[k, target]].corr(method=method).values[0,1])) for k in df.columns 
+                                if k not in [target, 'date']], key=lambda x:x[1], reverse=True)
+    Liste_Spearman = [u[0] for u in correlations if u[1] >= 0.4]
+    X = df.drop(target, axis=1)
+    y = df[target]
+    print("   - Random forests")
+    dico = dict(n_estimators=100, max_depth=7)
+    dico.update(n_jobs=-1)
+    embeded_rf_selector = SelectFromModel(
+                    RandomForestRegressor(**dico),
+                    max_features=num_feats)
+    embeded_rf_selector.fit(X, y)
+    embeded_rf_support = embeded_rf_selector.get_support()
+    embeded_rf_feature = X.loc[:, embeded_rf_support].columns.tolist()
+    print("   - Régression linéaire")    
+    embeded_lr_selector = SelectFromModel(LinearRegression(),max_features=num_feats)
+    embeded_lr_selector.fit(X, y)
+    embeded_lr_support = embeded_lr_selector.get_support()
+    true_indices = embeded_lr_support.nonzero()[0].tolist()
+    embeded_lr_feature = [X.columns[i] for i in true_indices]
+
+    print("   - Extra trees")
+    model = ExtraTreesRegressor(n_jobs=-1, max_depth=7)
+    model.fit(X,y)
+    feat_importances = pd.Series(model.feature_importances_, index=X.columns)
+    xt_features = list(feat_importances.nlargest(num_feats).index)
+    print("   - XGBoost")
+    train_set, val_set = train_test_split(df, test_size=0.2)
+    X_train = train_set.drop(target, axis=1)
+    X_val = val_set.drop(target, axis=1)
+    y_train = train_set[target]
+    y_val = val_set[target]
+    dico_xgb = {'max_depth': 7, 'early_stopping_rounds':6, 'n_estimators': 100000}
+    reg = XGBRegressor(**dico_xgb)
+    reg.fit(X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False)
+    a, b = X_train.columns, reg.feature_importances_
+    res_xgb = sorted([(a[k], b[k]) for k in range(len(X.columns))], key=lambda x:x[1], reverse=True)
+    features_xgb = [k[0] for k in res_xgb[:num_feats]]
+    print("   - Lasso")
+    rfe_selector = RFE(estimator=Lasso(alpha=0.1),
+                    n_features_to_select=num_feats,
+                    step=100, verbose=5)
+    rfe_selector.fit(X, y)
+    rfe_support = rfe_selector.get_support()
+    rfe_feature = X.loc[:,rfe_support].columns.tolist()
+    #total = Liste_Pearson+Liste_Kendall+Liste_Spearman+embeded_lr_feature+embeded_rf_feature+chi_feature+xt_features+features_xgb+rfe_feature
+    total = Liste_Pearson+Liste_Kendall+Liste_Spearman+embeded_lr_feature+embeded_rf_feature+xt_features+features_xgb+rfe_feature
+    total = sorted(set([(k, total.count(k)) for k in total if total.count(k)>1]), key=lambda x:x[1], reverse=True)[:num_feats]
+    print(f"Classement final: {total}")
+    
+    autoregressif = [k for k in total if 'interventions' in k[0] or 'en_cours' in k[0]]
+    tendances = [k for k in total if 'moving_average' in k[0]]
+    hexogenes = [k for k in total if k not in autoregressif and k not in tendances]
+    final = []
+    
+    for col in total:
+        final.append(col[0])
+    return final
+
+
 def get_features(df: pd.DataFrame, variables: List[str], target:str='appels', num_feats:int=100, learn_mode = 'slow', logger=None):
     """
     Selects relevant features from a DataFrame for a given target variable using various statistical and machine learning methods.
@@ -214,6 +301,7 @@ def get_features(df: pd.DataFrame, variables: List[str], target:str='appels', nu
         and 'appels-' not in k[0] and k[0] not in [u[0] for u in final]])
     final.extend([k for k in total if k[0] not in [u[0] for u in final]])
     return final
+
 
 
 def explore_features(model: Model, model_config:dict, features: List[str], df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.DataFrame, target: str, weight_col: str = None, logger:logging.Logger = None, preselection: List[str] = []) -> List[str]:
