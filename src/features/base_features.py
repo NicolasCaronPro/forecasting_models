@@ -1,16 +1,13 @@
 import math
 import pathlib
 import pandas as pd
-import more_itertools
 import datetime as dt
 import os
 import sys
-from src.configs.config import Config
 from typing import List, Optional, Union
 from copy import deepcopy
 import matplotlib.pyplot as plt
 import abc
-from sklearn.compose import make_column_transformer, make_column_selector
 import numpy as np
 import logging
 from warnings import simplefilter
@@ -50,8 +47,8 @@ class BaseFeature(object):
         if logger is None:
             logger = logging.getLogger(self.name)
         self.logger: logging.Logger = logger
-        assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
-        ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
+        # assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
+        # ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
 
         self.logger.info("Initialisation de la classe %s",self.name)
 
@@ -213,9 +210,10 @@ class BaseFeature(object):
             
             filename = kwargs.pop('filename', 'data.feather')
 
-            feature_dir = kwargs.pop('feature_dir', f'{os.getcwd()}/data/features/{self.name}')
-            if isinstance(feature_dir, str):
-                feature_dir = pathlib.Path(feature_dir)
+            features_dir = kwargs.pop('features_dir', f'{os.getcwd()}/data/features')
+            if isinstance(features_dir, str):
+                features_dir = pathlib.Path(features_dir)
+            feature_dir = features_dir / f"{self.name}"
             kwargs['feature_dir'] = feature_dir
 
             if not os.path.isdir(feature_dir):
@@ -276,7 +274,6 @@ class BaseFeature(object):
         path: Optional[Union[str, pathlib.Path]] = None,
         filename: Optional[str] = None) -> pd.DataFrame:
 
-        self.logger.info(f"Getting data for {self.name}...")
         date_min, date_max, initial_freq = self.get_availability()
         if date_min is None or date_max is None or initial_freq is None:
             self.logger.error('It looks like you didn\'t call self.fetch_data() before, you need to call self.fetch_data() even if the data has been fetched during a previous session.')
@@ -310,6 +307,7 @@ class BaseFeature(object):
         if freq is None:
             freq = initial_freq
 
+        self.logger.info(f"Getting data for {self.name} from {from_date} to {to_date}, at a {freq} frequency")
         if path is None:
             path = './data/features/' + self.name
 
@@ -329,6 +327,8 @@ class BaseFeature(object):
         if date_min > from_date or date_max < to_date:
             raise ValueError(
                 f"{self.name} data only available between {date_min} and {date_max} while you requested from {from_date} to {to_date}")
+
+        data = self.drop_constant_columns(data=data, threshold=drop_constant_thr, exclude_categories=True)
 
         if shift or rolling_window:
             if date_min > from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0))):
@@ -354,19 +354,18 @@ class BaseFeature(object):
         
         # data = data.iloc[max(0, *rolling_window, *shift):]
 
-        # nan_rows = data[data.isna().any(axis=1)].index
-        # print("Plage des indices des lignes contenant des NaN:", nan_rows.min(), nan_rows.max())
-        # print("Colonnes contenant des NaN pour ces indices:", data.columns[data.isna().any()].tolist())
         # # Supprimer les lignes contenant des NaN
         # data = data.dropna()
         # print(from_date, data.index.min())
         # print(to_date, data.index.max())
         # print(data)
         data = data.loc[from_date:to_date]
-        # print(data)
         data = data[features_names]
         # print(data)
-        data = self.drop_constant_columns(data=data, threshold=drop_constant_thr, exclude_categories=True)
+        nan_rows = data[data.isna().any(axis=1)].index
+        if len(nan_rows):
+            self.logger.warning("Plage des indices des lignes contenant des NaN: {}".format(nan_rows))
+            self.logger.warning("Colonnes contenant des NaN pour ces indices: {}".format(data.columns[data.isna().any()].tolist()))
 
         return data
 

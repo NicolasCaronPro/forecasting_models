@@ -22,7 +22,7 @@ from typing import Optional
 import datetime as dt
 import numpy as np
 import pandas as pd
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 
 
 class HopitalFeatures(BaseFeature):
@@ -33,13 +33,10 @@ class HopitalFeatures(BaseFeature):
         etablissement (str): The name of the hospital.
     """
 
-    def __init__(self, name:str = None, logger=None, include_emmergency_arrivals=True, include_nb_hospit=True, include_hnfc_moving=True) -> None:
+    def __init__(self, name:str = None, logger=None) -> None:
         super().__init__(name, logger)
-        # self.include_emmergency_arrivals = include_emmergency_arrivals
-        # self.include_nb_hospit = include_nb_hospit
-        # self.include_hnfc_moving = include_hnfc_moving
 
-    def include_nb_emmergencies(self, from_date, to_date, etablissement, feature_dir, initial_shift: int = 0) -> None:
+    def include_nb_emmergencies(self, from_date, to_date, etablissement, feature_dir) -> None:
         """
         Adds the target to the features.
         """
@@ -91,7 +88,7 @@ class HopitalFeatures(BaseFeature):
         # print(df)
         return df
 
-    def include_nb_hospitalized(self, from_date, to_date, feature_dir, initial_shift: int = 0):
+    def include_nb_hospitalized(self, from_date, to_date, feature_dir):
         hospitalized = pd.read_excel(
             feature_dir / "nb_hospit/RPU_vers_hospit.xlsx")
         hospitalized['date_entree'] = pd.to_datetime(hospitalized['date_entree'], unit='D', origin='1899-12-30')
@@ -132,9 +129,9 @@ class HopitalFeatures(BaseFeature):
         # data.set_index("date", inplace=True)
 
         # if self.include_emmergency_arrivals:
-        data = data.join(self.include_nb_emmergencies(start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir, initial_shift=-1))
+        data = data.join(self.include_nb_emmergencies(start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
         # if self.include_hnfc_moving:
         data = data.join(self.include_HNFC_moving(date_range))
-        # if self.include_nb_hospit:
-        data = data.join(self.include_nb_hospitalized(start_date, stop_date, feature_dir, initial_shift=-1))
+        # # if self.include_nb_hospit:
+        data = data.join(self.include_nb_hospitalized(start_date, stop_date, feature_dir))
         return data

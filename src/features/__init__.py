@@ -1,5 +1,5 @@
 from .air_quality_features import AirQualityFeatures
-from .base_features import BaseFeature, Config
+from .base_features import BaseFeature
 from .epidemiological_features import EpidemiologicalFeatures
 from .firefigters_features import FireFightersFeatures
 from .google_trend_features import GoogleTrendFeatures

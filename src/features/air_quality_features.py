@@ -6,7 +6,7 @@ The AirQualityFeatures class inherits from the BaseFeature class and provides me
 import time
 from typing import Optional, Dict
 import pandas as pd
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 from pathlib import Path
 import os
 
@@ -19,7 +19,7 @@ class AirQualityFeatures(BaseFeature):
         archived_data_dir (Path): The path to the archived data directory.
     """
 
-    def __init__(self, name:str = None, logger=None,) -> None:
+    def __init__(self, name:str = None, logger=None) -> None:
         super().__init__(name, logger)
 
 
@@ -120,9 +120,6 @@ class AirQualityFeatures(BaseFeature):
         departement = kwargs.get('departement')
         assert type(departement) == str, "departement must be a string"
 
-        feature_dir = kwargs.get("feature_dir", f'./data/features/{self.name}')
-        if isinstance(feature_dir, str):
-            feature_dir = Path(feature_dir)
-        if not feature_dir.exists():
-            os.makedirs(str(feature_dir))
+        feature_dir = kwargs.get("feature_dir")
+
         return self.__include_air_quality(departement, feature_dir)

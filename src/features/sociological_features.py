@@ -1,14 +1,15 @@
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 import jours_feries_france
 import vacances_scolaires_france
 import convertdate
 from typing import Optional, Dict
 import datetime as dt
+import pandas as pd
 
 
 class SociologicalFeatures(BaseFeature):
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
-        super().__init__(config, parent)
+    def __init__(self, name:str = None, logger=None) -> None:
+        super().__init__(name, logger)
         self.academies = {
             'Aix-Marseille': ['04', '05', '13', '84'],
             'Amiens': ['02', '60', '80'],
@@ -38,20 +39,21 @@ class SociologicalFeatures(BaseFeature):
             'Versailles': ['78', '91', '92', '95']
         }
 
-    def include_holidays(self):
+    def include_holidays(self, date_range:pd.DatetimeIndex, departement):
         self.logger.info("On s'occupe des variables de vacances")
         self.logger.info("On récupère la liste des jours fériés")
+        data = pd.DataFrame(index=date_range)
         jours_feries = sum([list(jours_feries_france.JoursFeries.for_year(k).values(
-        )) for k in range(self.data.index.min().year, self.data.index.max().year+1)], [])
+        )) for k in range(date_range.min().year, date_range.max().year+1)], [])
         self.logger.info("On l'intègre au dataframe")
         # print(type(jours_feries[0]))
         # print(self.data['date'].dtype)
-        self.data['bankHolidays'] = self.data.index.map(
+        data['bankHolidays'] = date_range.map(
             lambda x: 1 if x.date() in jours_feries else 0).astype('category')
         # print(self.data.loc[self.data['bankHolidays'] == 1])
         veille_jours_feries = sum([[l-dt.timedelta(days=1) for l in jours_feries_france.JoursFeries.for_year(
-            k).values()] for k in range(self.data.index.min().year, self.data.index.max().year+1)], [])
-        self.data['eveBankHolidays'] = self.data.index.map(
+            k).values()] for k in range(date_range.min().year, date_range.max().year+1)], [])
+        data['eveBankHolidays'] = date_range.map(
             lambda x: 1 if x.date() in veille_jours_feries else 0).astype('category')
 
         self.logger.info("On s'occupe des vacances en tant que tel")
@@ -88,21 +90,21 @@ class SociologicalFeatures(BaseFeature):
                 return dict_zones[name][0]
             return dict_zones[name][1]
         d = vacances_scolaires_france.SchoolHolidayDates()
-        academie = [k for k in self.academies if self.config.get(
-            'departement') in self.academies[k]][0]
+        academie = [k for k in self.academies if departement in self.academies[k]][0]
         # print(academie)
         # print(academie[int(self.config.get('departement'))])
-        self.data['holidays'] = self.data.index.map(lambda x: 1 if d.is_holiday_for_zone(
+        data['holidays'] = date_range.map(lambda x: 1 if d.is_holiday_for_zone(
             x.date(), get_academic_zone(academie, x)) else 0).astype('category')
-        self.data['holidays-1'] = self.data['holidays'].shift(-1)
-        self.data['borderHolidays'] = self.data.apply(lambda x: int(
+        data['holidays-1'] = data['holidays'].shift(-1)
+        data['borderHolidays'] = data.apply(lambda x: int(
             x['holidays'] != x['holidays-1']), axis=1).astype('category')
-        self.data.drop('holidays-1', axis=1, inplace=True)
+        data.drop('holidays-1', axis=1, inplace=True)
         self.logger.info("Variables de vacances intégrées")
+        return data
 
-    def include_lockdown(self):
+    def include_lockdown(self, date_range:pd.DatetimeIndex):
         self.logger.info("On s'occupe des variables de confinement")
-
+        data = pd.DataFrame(index=date_range)
         def pendant_couvrefeux(date):
             # Fonction testant is une date tombe dans une période de confinement
             if ((dt.datetime(2020, 12, 15) <= date <= dt.datetime(2021, 1, 2))
@@ -121,18 +123,21 @@ class SociologicalFeatures(BaseFeature):
                   and (date.hour >= 23 or date.hour <= 6)):
                 return 1
             return 0
-        self.data['confinement1'] = self.data.index.map(lambda x: 1 if dt.datetime(
+        data['confinement1'] = date_range.map(lambda x: 1 if dt.datetime(
             2020, 3, 17, 12) <= x <= dt.datetime(2020, 5, 11) else 0).astype('category')
-        self.data['confinement2'] = self.data.index.map(lambda x: 1 if dt.datetime(
+        data['confinement2'] = date_range.map(lambda x: 1 if dt.datetime(
             2020, 10, 30) <= x <= dt.datetime(2020, 12, 15) else 0).astype('category')
-        self.data['couvrefeux'] = self.data.index.map(
+        data['couvrefeux'] = date_range.map(
             pendant_couvrefeux).astype('category')
         self.logger.info("Variables de confinement intégrées")
+        return data
 
-    def include_ramadan(self):
+    def include_ramadan(self, date_range:pd.DatetimeIndex):
         self.logger.info("On s'occupe des variables de Ramadan")
-        self.data['ramadan'] = self.data.index.map(lambda x: 1 if convertdate.islamic.from_gregorian(
+        data = pd.DataFrame(index=date_range)
+        data['ramadan'] = date_range.map(lambda x: 1 if convertdate.islamic.from_gregorian(
             x.year, x.month, x.day)[1] == 9 else 0).astype('category')
+        return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:
         """
@@ -141,6 +146,18 @@ class SociologicalFeatures(BaseFeature):
         Parameters:
         - None
         """
-        self.include_holidays()
-        self.include_lockdown()
-        self.include_ramadan()
+
+        assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'departement' in kwargs, "departement must be provided in config"
+        departement = kwargs.get('departement')
+        start_date = kwargs.get("start_date")
+        stop_date = kwargs.get("stop_date")
+        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
+        data = pd.DataFrame(index=date_range)
+        
+        data = data.join(self.include_holidays(date_range, departement))
+        data = data.join(self.include_lockdown(date_range))
+        data = data.join(self.include_ramadan(date_range))
+
+        return data

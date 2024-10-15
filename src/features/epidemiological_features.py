@@ -5,19 +5,19 @@ import datetime as dt
 
 import pandas as pd
 import requests
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 from statsmodels.tsa.statespace.sarimax import SARIMAXResults
 from typing import List, Optional, Dict
 
 
 class EpidemiologicalFeatures(BaseFeature):
 
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
-        super().__init__(config, parent)
+    def __init__(self, name:str = None, logger=None) -> None:
+        super().__init__(name, logger)
         # self.predictors_dir = pathlib.Path(self.config.get("predictors_dir"))
-        self.region = self.config.get("region")
 
-    def include_sentinelles(self):
+
+    def include_sentinelles(self, region, feature_dir, date_range):
         self.logger.info(
             "On s'occupe de l'incidence des maladies d'après Sentinelles")
         # Régions pour Sentinelles
@@ -25,20 +25,22 @@ class EpidemiologicalFeatures(BaseFeature):
 
         models = {}
 
+        data = pd.DataFrame(index=date_range)
+
         for nom, url in [('grippe', 3), ('diarrhee', 6), ('varicelle', 7), ('ira', 25)]:
             self.logger.info(
-                f"  - on regarde l'incidence de {nom} pour la région {self.region}")
+                f"  - on regarde l'incidence de {nom} pour la région {region}")
             # On récupère les données de Sentinelles si le fichier n'existe pas
-            if not os.path.isfile(self.data_dir / f"{nom}_incidence_{self.region}.pkl"):
+            if not os.path.isfile(feature_dir / f"{nom}_incidence_{region}.pkl"):
                 r = requests.get(
                     url=f"https://www.sentiweb.fr/datasets/all/inc-{url}-REG.csv")
                 dico = {k.split(',')[0]: int(k.split(',')[2].replace(
-                    '-', '0')) for k in r.text.split('\n')[2:-1] if self.region in k}
+                    '-', '0')) for k in r.text.split('\n')[2:-1] if region in k}
                 # Save dico
-                with open(self.data_dir / f"{nom}_incidence_{self.region}.pkl", 'wb') as f:
+                with open(feature_dir / f"{nom}_incidence_{region}.pkl", 'wb') as f:
                     pickle.dump(dico, f)
             else:
-                with open(self.data_dir / f"{nom}_incidence_{self.region}.pkl", 'rb') as f:
+                with open(feature_dir / f"{nom}_incidence_{region}.pkl", 'rb') as f:
                     dico = pickle.load(f)
 
             # Ajouter des semaines supplémentaires au DataFrame features pour prendre en compte le décalage
@@ -53,7 +55,7 @@ class EpidemiologicalFeatures(BaseFeature):
             ##################### TODO: Faire une méthode dans BaseFeature pour ralonger les données, ou faire un Imputer #####################
             self.logger.info(f"Chargement du modèle de prédiction pour {nom}")
             models[nom] = SARIMAXResults.load(
-                self.data_dir / f"predictors/model_{nom}.pkl")
+                feature_dir / f"predictors/model_{nom}.pkl")
             self.logger.info(f"Modèle {nom} chargé")
 
             # On prolonge la dernière incidence connue jusqu'à maintenant
@@ -62,7 +64,7 @@ class EpidemiologicalFeatures(BaseFeature):
                 [(k, dt.datetime.strptime(k+'1', "%G%V%u")) for k in dico], key=lambda x: x[1])
             self.logger.info(
                 f"    Pour la dernière date connue ({last_date:'%d/%m/%Y'}, semaine {last_week}), l'incidence était de {dico[last_week]}")
-            while last_date < self.data.index.max():
+            while last_date < data.index.max():
                 last_date += dt.timedelta(days=7)
                 year, week, _ = last_date.isocalendar()
                 sunday = dt.datetime.strptime(f'{year}{week:02d}7', '%G%V%u')
@@ -76,10 +78,10 @@ class EpidemiologicalFeatures(BaseFeature):
                 [(k, dt.datetime.strptime(k+'1', "%Y%W%w")) for k in dico], key=lambda x: x[1])
             self.logger.info(
                 f"    La première date connue était {first_date:'%d/%m/%Y'}, semaine {first_week}")
-            if first_date > self.data.index.min():
+            if first_date > data.index.min():
                 self.logger.info(
-                    f"    Cette première date étant postérieure, à notre historique (commençant le {self.data.index.min():'%d/%m/%Y'}), on complète les incidences par des 0")
-                while first_date > self.data.index.min():
+                    f"    Cette première date étant postérieure, à notre historique (commençant le {data.index.min():'%d/%m/%Y'}), on complète les incidences par des 0")
+                while first_date > data.index.min():
                     first_date -= dt.timedelta(days=7)
                     year, week, _ = first_date.isocalendar()
                     sunday = dt.datetime.strptime(
@@ -93,18 +95,22 @@ class EpidemiologicalFeatures(BaseFeature):
                     dico[f"{year}{week:02d}"] = int(pred)
             ###################################################################################################################################
 
-            self.data[f"inc_{nom}"] = self.data.index.map(
+            data[f"inc_{nom}"] = data.index.map(
                 lambda x: dico[f"{x.isocalendar().year}{x.isocalendar().week:02d}"])
-            self.data[f'inc_{nom}'].to_csv(self.data_dir / f"{nom}_incidence_{self.region}.csv")
+            data[f'inc_{nom}'].to_csv(feature_dir / f"{nom}_incidence_{region}.csv")
 
         self.logger.info("Données sentinelles intégralement récupérées")
+        return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:
-        self.include_sentinelles()
-
-    # def get_data(self, from_date: str | dt.datetime | None = None, to_date: str | dt.datetime | None = None, features_names: List[str] | None = None, region: str | None = None) -> pd.DataFrame:
-    #     data = super().get_data(from_date, to_date, features_names)
-    #     # if region is None:
-    #     #     region = self.region
-    #     # data = data.loc[data['region'] == region]
-    #     return data
+        assert 'region' in kwargs, f"Le paramètre'region' est obligatoire pour fetch la feature {self.name}"
+        assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
+        assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
+        
+        region = kwargs.get('region')
+        feature_dir = kwargs.get("feature_dir")
+        start_date = kwargs.get("start_date")
+        stop_date = kwargs.get("stop_date")
+        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
+        return self.include_sentinelles(region, feature_dir, date_range)

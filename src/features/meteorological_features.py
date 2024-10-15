@@ -1,19 +1,22 @@
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 from typing import Optional, Dict
 import pandas as pd
 import datetime as dt
 import meteostat
 from shapely import wkt
 import pathlib
+import os
 
 
 class MeteorologicalFeatures(BaseFeature):
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
-        super().__init__(config, parent)
+    def __init__(self, name:str = None, logger=None) -> None:
+        super().__init__(name, logger)
+
+    def include_weather(self, etablissement, date_range:pd.DatetimeIndex, feature_dir):
+        self.logger.info("On récupère les archives Meteostat")
 
         # TODO: à changer !!
-        FILE_LIST = ['Export complet CHU Dijon.xlsx']
-        ETAB_LIST = [etab[len("Export complet "):-5] for etab in FILE_LIST]
+
         GEO_ETAB_DICT = {'CH Chaumont': 'CH CHAUMONT',
                          'CH privé Dijon': 'CH privé DIJON',
                          'CHU Besançon': 'CHU BESANCON',
@@ -23,13 +26,10 @@ class MeteorologicalFeatures(BaseFeature):
                          'CH Beaune': 'CH BEAUNE',
                          'HNFC': 'HNFC',
                          'CH Langres': 'CH LANGRES'}
-        self.GEO_ETAB_LIST = list(GEO_ETAB_DICT[etab] for etab in ETAB_LIST)
-
-    def include_weather(self):
-        self.logger.info("On récupère les archives Meteostat")
-
-        dir_geo = pathlib.Path(self.config.get(
-            'root_dir')) / "src/geolocalisation"
+        self.GEO_ETAB_LIST = list(GEO_ETAB_DICT[etab] for etab in [etablissement])
+        
+        print(os.getcwd())
+        dir_geo = pathlib.Path(".") / "src/geolocalisation"
 
         # On charge les données de géolocalisation des établissements
         etablissement_df = pd.read_csv(
@@ -49,6 +49,7 @@ class MeteorologicalFeatures(BaseFeature):
         etablissement_df["selected_centroid"] = etablissement_df["selected_centroid"].apply(
             lambda x: [x[0]])
 
+        data_df = pd.DataFrame(index=date_range)
         # colors = ['green', 'purple', 'blue', 'orange', 'yellow', 'pink', 'brown', 'grey']
         for i, etab in enumerate(etablissement_df.index):
             data, data24h, liste = {}, {}, []
@@ -88,7 +89,7 @@ class MeteorologicalFeatures(BaseFeature):
                 # try:
                 # print(START - dt.timedelta(days=DECALAGE_METEO))
                 data[point] = meteostat.Daily(
-                    location, self.start - dt.timedelta(**self.step), self.stop + dt.timedelta(**self.step))
+                    location, date_range.min(), date_range.max())
                 # on comble les heures manquantes (index) dans les données collectées
                 data[point] = data[point].normalize()
                 # On complète les Nan, quand il n'y en a pas plus de 3 consécutifs
@@ -100,19 +101,18 @@ class MeteorologicalFeatures(BaseFeature):
                                  axis=1, inplace=True, errors='ignore')
                 data[point].ffill(inplace=True)
                 data[point].bfill(inplace=True)
-                for k in sorted(data[point].columns):
-                    if data[point][k].isna().sum() > self.max_nan:
-                        self.logger.error(
-                            f"{k} du point {point} possède trop de NaN ({data[point][k].isna().sum()}")
-                        assert False
+                # for k in sorted(data[point].columns):
+                #     if data[point][k].isna().sum() > self.max_nan:
+                #         self.logger.error(
+                #             f"{k} du point {point} possède trop de NaN ({data[point][k].isna().sum()}")
+                #         assert False
                 data[point].fillna(0, inplace=True)
                 data[point].reset_index(inplace=True)
                 data[point].rename({'time': 'date'},
                                    axis=1, inplace=True)
                 data[point].set_index('date', inplace=True)
-                self.data = pd.merge(
-                    self.data, data[point], left_index=True, how='left', right_index=True)
-                self.data.rename({u: "meteo_" + str(etab) + "_" + str(index) + "_" +
+                data_df = pd.merge(data_df, data[point], left_index=True, how='left', right_index=True)
+                data_df.rename({u: "meteo_" + str(etab) + "_" + str(index) + "_" +
                                   u for u in data[point]}, axis=1, inplace=True)
                 # Ajout des features décalés pour les 3 jours précédents et les 3 jours suiva + "_" + str(index)nts
                 # for col in data[point]:
@@ -136,7 +136,21 @@ class MeteorologicalFeatures(BaseFeature):
                 #     else:
                 #         self.logger.info(f"Pas de données pour {point}, on prend ceux des voisins")
                 #         data[point] = copy.deepcopy(last_point)
-        return self.data
+        return data_df
 
     def fetch_data_function(self, *args, **kwargs) -> None:
-        self.include_weather()
+        assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
+        assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'etablissement' in kwargs, f"Le paramètre'etablissement' est obligatoire pour fetch la feature {self.name}"
+        
+        feature_dir = kwargs.get("feature_dir")
+        start_date = kwargs.get("start_date")
+        stop_date = kwargs.get("stop_date")
+        etablissement = kwargs.get("etablissement")
+        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
+        data = pd.DataFrame(index=date_range)
+
+        data = data.join(self.include_weather(etablissement=etablissement, date_range=date_range, feature_dir=feature_dir))
+
+        return data

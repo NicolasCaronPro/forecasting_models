@@ -53,7 +53,7 @@ def get_features(df: pd.DataFrame, variables: List[str], target:str='appels', nu
         A list of tuples containing the selected features and their counts, sorted by relevance.
     """
 
-    logger.info("=> Recherche des features pertinentes")
+    logger.info(f"=> Recherche des {num_feats} features les + pertinentes")
     logger.info("   - Grande variance")
     variances = df.var()
     #high_variance = list(variances[variances > 0.5].index)

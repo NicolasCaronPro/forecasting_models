@@ -30,11 +30,11 @@ import re
 
 
 class BaseExperiment:
-    def __init__(self, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[ModelTree, List[ModelTree]]] = None, config: Optional[ft.Config] = None) -> None:
-        self.experiment_name = 'exp_' + dataset.__class__.__name__ + '_' + '_'.join(dataset.targets) + '_' + model.name if name is None else name
+    def __init__(self, logger, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[ModelTree, List[ModelTree]]] = None) -> None:
+        self.experiment_name = 'exp_' + dataset.__class__.__name__ + '_' + '_'.join(dataset.targets_names) + '_' + model.name if name is None else name
         self.dataset = dataset
         self.model = model
-        self.logger: logging.Logger = config.get('logger')
+        self.logger: logging.Logger = logger
         mlflow.set_tracking_uri('http://127.0.0.1:8080')
         # experiments = mlflow.search_experiments()
         # print(experiments)
@@ -48,7 +48,7 @@ class BaseExperiment:
         self.run_nb = len(runs)
 
 
-    def run(self, dataset_config: dict, model_config: dict, encoding_pipeline: Union[Pipeline, dict, None] = None, find_best_features: bool = False) -> None:
+    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False) -> None:
         """
         Run the experiment.
 
@@ -65,18 +65,22 @@ class BaseExperiment:
             self.logger.info("Running the experiment...")
 
             # Get a dataset object corresponding to the dataset_config
-            dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
+            # dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
+            dataset = self.dataset
 
             # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
-            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]})
+            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets_names]})
 
             # print(dataset.data[['target_Total_CHU Dijon%%mean_7J', 'Total_CHU Dijon%%mean_7J']])
 
             if find_best_features:
                 selected_features = self.get_important_features(dataset=dataset, model=self.model, model_config=model_config)
                 # selected_features = dataset.enc_X_train.columns.to_list()
-                dataset: BaseTabularDataset = dataset.get_dataset(features_names=selected_features)
-                model_config['fit_params']['eval_set'] = [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets]
+                dataset_config['features_names'] = selected_features
+                self.logger.info('Features selected: {}'.format(selected_features))
+                # print(dataset.y_train)
+                dataset.get_dataset(**dataset_config)
+                model_config['fit_params']['eval_set'] = [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets_names]
 
 
             mlflow.log_table(data=dataset.train_set, artifact_file='datasets/train_set.json')
@@ -178,7 +182,12 @@ class BaseExperiment:
 
         dataset.y_test.plot(ax=ax, label='True', use_index=True)
         y_pred.plot(ax=ax, label='Predicted', use_index=True)
-        if 'target_nb_vers_hospit' in self.dataset.targets and dataset.y_test.index[0].year == 2022:
+        
+        errors = dataset.y_test - y_pred
+        errors.name = 'Error'
+        errors.plot(ax=ax, label='Error', use_index=True)
+        
+        if 'target_nb_vers_hospit' in self.dataset.targets_names and dataset.y_test.index[0].year == 2022:
             bjml = self.get_bjml()
             bjml.plot(ax=ax, label='BJML', use_index=True)
 
@@ -194,7 +203,7 @@ class BaseExperiment:
             model = self.model
 
         variables = dataset.enc_data.columns.to_list()
-        targets = dataset.targets
+        targets = dataset.targets_names
 
         encoded_data = dataset.enc_data
 
@@ -206,7 +215,7 @@ class BaseExperiment:
         # TODO: ne marchera pas pour du multi-target car le modèle passé à explore_features attendra plusieurs targets
         for target in targets:
             # print(data, variables, target)
-            important_features = get_features(data, variables, target, logger=self.logger, num_feats=200)
+            important_features = get_features(data, variables, target, logger=self.logger, num_feats=int(10 + 0.1*len(variables)))
 
             # On transforme le dictionaire de tupples en dictionaire de listes de features importantes
             features_to_test = [f[0] for f in important_features]
@@ -229,7 +238,7 @@ class BaseExperiment:
         """
         self.logger.info("Testing the model...")
 
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets])
+        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[f'y_pred_{target}' for target in dataset.targets_names])
         
         return y_pred
     
