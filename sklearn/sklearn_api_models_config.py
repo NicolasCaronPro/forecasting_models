@@ -1,4 +1,4 @@
-if __name__ == '__main__':
+"""if __name__ == '__main__':
     import sys
     import os
     from sklearn.datasets import make_regression
@@ -15,9 +15,9 @@ if __name__ == '__main__':
     logger.addHandler(streamHandler)
     script_path = f'{os.path.dirname(os.path.abspath(__file__))}/../'
     logger.info(f'Ajouter le script pour retrouver les modules : {script_path}')
-    sys.path.insert(0, script_path)
+    sys.path.insert(0, script_path)"""
 
-from forecasting_models.sklearn_api_model import *
+from forecasting_models.sklearn.sklearn_api_model import *
 
 def get_model(model_type, name, device, task_type, loss='log_loss', params=None) -> Union[Model, ModelTree]:
     """

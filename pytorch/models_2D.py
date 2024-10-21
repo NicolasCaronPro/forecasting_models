@@ -1,8 +1,16 @@
 import sys
+import os
 
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/models')
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
-from forecasting_models.utils import *
+# Get the parent directory of the current directory
+parent_dir = os.path.dirname(current_dir)
+
+# Insert the parent directory into sys.path
+sys.path.insert(0, parent_dir)
+
+from forecasting_models.pytorch.utils import *
 from conv_lstm import ConvLSTM
 
 class Zhang(torch.nn.Module):
@@ -238,7 +246,8 @@ class UNet(torch.nn.Module):
         self.up4 = (Up(128, 64, bilinear))
         self.outc = (OutConv(64, n_classes))
 
-    def forward(self, x):
+    def forward(self, x, edges_index):
+        x = x[:, :, :, :, -1]
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -278,7 +287,7 @@ class ConvGraphNet(torch.nn.Module):
     
     def forward(self, gnn_X, cnn_X, edge_index):
 
-        cnn_x = self.cnn_layer(cnn_X)
+        cnn_x = self.cnn_layer(cnn_X, edge_index)
         gnn_x = self.gnn_layer(gnn_X, edge_index)
         
         x = torch.concat(cnn_x, gnn_x)
@@ -302,9 +311,10 @@ class HybridConvGraphNet(torch.nn.Module):
     
     def forward(self, gnn_X, cnn_X, edge_index):
 
-        cnn_x = self.cnn_layer(cnn_X)
-        gnn_x = self.gnn_layer(cnn_x, edge_index)
-        
+        output_cnn, cnn_x = self.cnn_layer(cnn_X, edge_index)
+
+        output_gnn, gnn_x = self.gnn_layer(cnn_x, edge_index)
+
         output = self.output(gnn_x)
 
         return output

@@ -1,7 +1,16 @@
 import sys
-#sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-sys.path.insert(0, '/Home/Users/ncaron/WORK/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-from forecasting_models.utils import *
+import os
+
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Get the parent directory of the current directory
+parent_dir = os.path.dirname(current_dir)
+
+# Insert the parent directory into sys.path
+sys.path.insert(0, parent_dir)
+
+from forecasting_models.pytorch.utils import *
 
 ################################ GAT ###########################################
 class GAT(torch.nn.Module):
@@ -54,6 +63,59 @@ class GAT(torch.nn.Module):
             return output, x
         else:
             return output
+        
+################################ GCN ################################################
+
+class GCN(torch.nn.Module):
+    def __init__(self, n_sequences, in_dim,
+                 dropout, 
+                 bias,
+                 device,
+                 act_func,
+                 binary, return_hidden=False):
+        super(GCN, self).__init__()
+
+        num_of_layers = len(in_dim) - 1
+        gcn_layers = []
+        self.return_hidden = return_hidden
+
+        self.dropout_layer = torch.nn.Dropout(dropout) if dropout > 0.0 else torch.nn.Identity()
+
+        for i in range(num_of_layers):
+            layer = GCNConv(
+                in_channels=in_dim[i],
+                out_channels=in_dim[i+1],
+                bias=bias,
+            ).to(device)
+            gcn_layers.append((layer, "x, edge_index -> x"))
+            if i < num_of_layers - 1:
+                if act_func == 'relu':
+                    gcn_layers.append((ReLU(), "x -> x"))
+                elif act_func == 'gelu':
+                    gcn_layers.append((GELU(), "x -> x"))
+                if dropout > 0.0:
+                    gcn_layers.append((self.dropout_layer, "x -> x"))
+
+        self.net = Sequential("x, edge_index", gcn_layers)
+
+        self.output = OutputLayer(
+            in_channels=in_dim[-1],
+            end_channels=in_dim[-1],
+            n_steps=n_sequences,
+            device=device,
+            act_func=act_func,
+            binary=binary
+        )
+
+    def forward(self, X, edge_index):
+        edge_index = edge_index[:2]
+        x = self.net(X, edge_index)
+        output = self.output(x)
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
+
 
 ################################### ST_GATCN ######################################
     
@@ -326,6 +388,8 @@ class SandiwchLayerGCN(torch.nn.Module):
             self.activation = torch.nn.GELU()
         elif act_func == 'relu':
             self.activation = torch.nn.ReLU()
+        elif self.activation == 'silu':
+            self.activation = torch.nn.SiLU()
             
     def forward(self, X, edge_index):
         residual = self.residual_proj(X)
@@ -449,25 +513,25 @@ class SDSTGCN(torch.nn.Module):
                                                 end_channels=hidden_channels_spatial[si+1], dropout=dropout, act_func=act_func).to(device))
 
         self.spatial_layers = torch.nn.ModuleList(self.spatial_layers)
-        self.output = OutputLayer(in_channels=hidden_channels_spatial[-1] + hidden_channels_temporal[-1],
+        self.output = OutputLayer(in_channels=(hidden_channels_spatial[-1] + hidden_channels_temporal[-1]) * 4,
                                   end_channels=end_channels,
                                   n_steps=1,
                                   device=device, act_func=act_func,
                                   binary=binary)
 
     def forward(self, X, edge_index):
-        
         xt = self.input_temporal(X)
         for i, layer in enumerate(self.temporal_layers):
             xt = layer(xt)
         
-        xs = self.input_spatial(X)
+        xs = self.input_spatial(X[:, :, -1])
         for i, layer in enumerate(self.spatial_layers):
             xs = layer(xs, edge_index)
 
-        xc = torch.cat((xs, xt))
+        for band in range(xt.shape[-1]):
+            xt[:, :, band] += xs
 
-        x = self.output(xc)
+        x = self.output(xt)
 
         if self.return_hidden:
             return x, xc
@@ -598,9 +662,17 @@ class LSTM(torch.nn.Module):
 
         self.lstm = torch.nn.LSTM(input_size=residual_channels, hidden_size=hidden_channels, num_layers=num_layers, dropout=dropout, batch_first=True).to(device)
         
-        self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels,
+        self.output = OutputLayer(in_channels=hidden_channels+residual_channels, end_channels=end_channels,
                                   n_steps=n_sequences, device=device, act_func=act_func,
                                   binary=binary)
+        
+        self.batchNorm = nn.BatchNorm(hidden_channels).to(device)
+        self.dropout = torch.nn.Dropout(dropout)
+
+        #self.calibrator_layer = torch.nn.Linear(in_features=residual_channels+(2 if binary else 1),
+        #                                    out_features=2 if binary else 1, bias=True, device=device)
+
+        
         self.device = device
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
@@ -611,11 +683,18 @@ class LSTM(torch.nn.Module):
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_channels).to(self.device)
         x = self.input(X)
+        original_input = x[:, :, -1]
         x = torch.movedim(x, 2, 1)
         x, _ = self.lstm(x, (h0, c0))
         x = torch.squeeze(x[:, -1, :])
+        x = self.batchNorm(x)
+        x = self.dropout(x)
+        x = torch.concat((original_input, x), dim=1)
         output = self.output(x)
-
+        #x = torch.concat((original_input, x), dim=1)
+        #output = self.calibrator_layer(x)
+        #output = torch.clamp(output, min=0)
+   
         if self.return_hidden:
             return output, x
         else:
