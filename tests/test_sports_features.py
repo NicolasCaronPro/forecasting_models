@@ -16,8 +16,10 @@ config = Config({'max_nan': 0, "departement": "21", "root_dir": root_dir, "start
                  "stop": dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), "logger": logger, "step_unit": 'days', "step_value": 1,
                  "shift": 0, "rolling_window": 0})
 
-sportsCompetitionFeatures = SportsCompetitionFeatures(config=config)
+sportsCompetitionFeatures = SportsCompetitionFeatures(logger)
 
-sportsCompetitionFeatures.fetch_data()
+sportsCompetitionFeatures.fetch_data(start_date=dt.datetime.strptime('01-01-2018', '%d-%m-%Y'), stop_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'))
 
-sportsCompetitionFeatures.plot(freq='1ME')
+df = sportsCompetitionFeatures.get_data()
+
+df

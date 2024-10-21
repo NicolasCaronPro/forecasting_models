@@ -12,7 +12,7 @@ class MeteorologicalFeatures(BaseFeature):
     def __init__(self, name:str = None, logger=None) -> None:
         super().__init__(name, logger)
 
-    def include_weather(self, etablissement, date_range:pd.DatetimeIndex, feature_dir):
+    def include_weather(self, etablissement, date_range:pd.DatetimeIndex, feature_dir:pathlib.Path):
         self.logger.info("On récupère les archives Meteostat")
 
         # TODO: à changer !!
@@ -29,7 +29,9 @@ class MeteorologicalFeatures(BaseFeature):
         self.GEO_ETAB_LIST = list(GEO_ETAB_DICT[etab] for etab in [etablissement])
         
         print(os.getcwd())
-        dir_geo = pathlib.Path(".") / "src/geolocalisation"
+        dir_geo = feature_dir.parent.parent.parent / 'src/geolocalisation'
+
+        print(dir_geo)
 
         # On charge les données de géolocalisation des établissements
         etablissement_df = pd.read_csv(

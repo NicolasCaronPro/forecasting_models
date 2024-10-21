@@ -94,7 +94,7 @@ split_config = {'test_size': 0.2, 'val_size': 0.2, 'shuffle': False}
 dataset_config = {
     'from_date': '15-01-2019',
     'to_date': '31-12-2023',
-    'shift': range(1, 32, 1),
+    'shift': range(1, 14, 1),
     'rolling_window': [7, 14],
     'freq': '1D',
     'split_config': split_config,
@@ -103,8 +103,8 @@ dataset_config = {
     'targets_names': target_colomns,
     'targets_shift': -7,
     'targets_rolling_window': 7,
-    'targets_history_shifts': range(1, 32, 1),
-    'targets_history_rolling_windows': [7, 14, 31],
+    'targets_history_shifts': range(1, 14, 1),
+    'targets_history_rolling_windows': [7, 14],
     'drop_constant_thr':1.0,
     'data_dir': root_dir / 'data'
     }

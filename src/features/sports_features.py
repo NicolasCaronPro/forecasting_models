@@ -21,6 +21,9 @@ class SportsCompetitionFeatures(BaseFeature):
             # print(self.data)
             data = pd.merge(data, df, how='left', on='date')
 
+        # Sum all the columns in to one columns
+        data = pd.DataFrame(data.sum(axis=1), columns=['foot'], index=date_range)
+
         self.logger.info("Données de football intégrées")
         return data
 

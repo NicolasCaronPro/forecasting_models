@@ -4,6 +4,7 @@ import pandas as pd
 import datetime as dt
 import os
 import sys
+from src.tools.utils import clean_dataframe
 from typing import List, Optional, Union
 from copy import deepcopy
 import matplotlib.pyplot as plt
@@ -328,7 +329,7 @@ class BaseFeature(object):
             raise ValueError(
                 f"{self.name} data only available between {date_min} and {date_max} while you requested from {from_date} to {to_date}")
 
-        data = self.drop_constant_columns(data=data, threshold=drop_constant_thr, exclude_categories=True)
+        data = clean_dataframe(data=data, drop_constant_thr=drop_constant_thr, exclude_categories=True, exclude_booleans=True)
 
         if shift or rolling_window:
             if date_min > from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0))):
@@ -567,37 +568,7 @@ class BaseFeature(object):
             plt.tight_layout()
             plt.show()
 
-    def drop_constant_columns(self, data:pd.DataFrame, threshold: float = 1.0, exclude_categories: bool = True) -> pd.DataFrame:
-
-        if exclude_categories:
-            # Sélectionner les colonnes qui ne sont pas du type 'category'
-            selected_columns = data.select_dtypes(exclude=['category']).columns
-
-        else:
-            selected_columns = data.columns
-
-        # Liste pour stocker les colonnes à supprimer
-        cols_to_drop = []
-
-        for col in selected_columns:
-            # Calculer la proportion de la valeur la plus fréquente dans la colonne
-            value_frequencies = data[col].value_counts(normalize=True)
-
-            most_frequent_value = value_frequencies.idxmax()
-            most_frequent_value_ratio = value_frequencies.max()
-
-            # Vérifier si cette proportion dépasse le seuil (threshold)
-            if most_frequent_value_ratio >= threshold:
-                cols_to_drop.append(col)
-                self.logger.info(
-                    f"Column '{col}' is constant at {most_frequent_value} for {most_frequent_value_ratio:.2%} of the rows.")
-
-        # Supprimer les colonnes constantes
-        df_cleaned = data.drop(columns=cols_to_drop)
-
-        # print(df_cleaned.columns)
-
-        return df_cleaned
+    
 
     def load(self, path: Optional[Union[str, pathlib.Path]], filename: Optional[str]) -> pd.DataFrame:
 
