@@ -4,6 +4,7 @@ from typing import Optional, Union, List
 from sklearn.pipeline import Pipeline
 import src.features as ft
 from src.encoding.tools import create_encoding_pipeline
+from src.tools.utils import list_constant_columns
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from copy import deepcopy
@@ -224,6 +225,36 @@ class BaseTabularDataset():
             else:
                 raise ValueError(
                     "Test set is not available, you need to split the data first")
+    def remove_constant_columns_from_splits(self):
+        """
+        Remove columns that are constant in either the train or test set.
+        Ensures that the same columns are dropped from both sets.
+        """
+        # Identify constant columns in the train set
+        train_constant_cols = list_constant_columns(self.train_set, threshold=1.0, exclude_booleans=True, exclude_categories=True)
+        # test_constant_cols = []
+        # val_constant_cols = []
+
+        # if not self.test_set.empty:
+        #     # Identify constant columns in the test set
+        #     test_constant_cols = [col for col in self.test_set.columns if self.test_set[col].dtype != 'category' and self.test_set[col].std() == 0]
+
+        # if not self.val_set.empty:
+        #     # Identify constant columns in the val set
+        #     val_constant_cols = [col for col in self.val_set.columns if self.val_set[col].dtype != 'category' and self.val_set[col].std() == 0]
+        
+        # Combine constant columns from both sets
+        # constant_columns = set(train_constant_cols).union(set(test_constant_cols)).union(set(val_constant_cols))
+        constant_columns = train_constant_cols
+        # Drop constant columns from both sets
+        self.train_set.drop(columns=constant_columns, inplace=True)
+        if not self.test_set.empty:
+            self.test_set.drop(columns=constant_columns, inplace=True)
+
+        if not self.val_set.empty:
+            self.val_set.drop(columns=constant_columns, inplace=True)
+
+        print(f"Dropped constant columns from both sets: {constant_columns}")
 
     def split(self, train_size: Optional[Union[float, int]] = None,
               test_size: Optional[Union[float, int]] = None,
@@ -318,17 +349,20 @@ class BaseTabularDataset():
         dataset = self.data
         self.val_set = pd.DataFrame()
 
+        # On ne shuffle pas pour que test soit toujours situé à la fin de notre dataset
         train_val_set, test_set = train_test_split(
-            dataset, test_size=test_size, train_size=train_size, random_state=random_state, shuffle=shuffle, stratify=stratify)
+            dataset, test_size=test_size, train_size=train_size, random_state=random_state, shuffle=False, stratify=stratify)
         self.train_set = train_val_set
         self.test_set = test_set
 
         if val_size:
+            # ici on peut shuffle
             train_set, val_set = train_test_split(
                 train_val_set, test_size=val_size, train_size=train_size, random_state=random_state, shuffle=shuffle, stratify=stratify)
             self.train_set = train_set
             self.val_set = val_set
 
+        self.remove_constant_columns_from_splits()
 
         return self.train_set, self.val_set, self.test_set
 
@@ -339,25 +373,30 @@ class BaseTabularDataset():
                       targets,
                       targets_shift: Optional[int] = None,
                       targets_rolling_window: Optional[int] = None,
-                      targets_history_shifts: Optional[int] = None,
-                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = None) -> str:
+                      targets_history_shifts: Optional[int] = [],
+                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = []) -> str:
         # Shift the target columns by one from the data
         self.targets_names = []
         for target in targets:
             target_name = f"target_{target}"
+                
 
             if (targets_shift is None or targets_shift >= 0):
-                self.logger.warning("Not shifting the target is not allowed as some features might not be available,\nWill use a default shift of -1, matching the value for the next sample")
-                targets_shift = -1
+                if "%%" in target_name:
+                    targets_shift = 0
+                else:
+                    self.logger.warning("Not shifting the target is not allowed as some features might not be available,\nWill use a default shift of -1, matching the value for the next sample")
+                    targets_shift = -1
             
             # df = pd.DataFrame()
             # df['brut'] = self.data[target]
             if targets_rolling_window is None or targets_rolling_window == 0:
-                self.logger.info(f"Creating the target columns as {target} shifted by {targets_shift}")
-                target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
-                self.data[target_name] = self.data[target].shift(targets_shift)
-                self.targets_names.append(target_name)
-                # df['shift_final'] = self.data[target_name]
+                if targets_shift != 0:
+                    self.logger.info(f"Creating the target columns as {target} shifted by {targets_shift}")
+                    target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
+                    self.data[target_name] = self.data[target].shift(targets_shift)
+                    self.targets_names.append(target_name)
+                    # df['shift_final'] = self.data[target_name]
 
             else:
                 self.logger.info(f"Creating the target columns as a rolling mean of {target} on {targets_rolling_window} rows shifted by {targets_shift}")
@@ -365,8 +404,12 @@ class BaseTabularDataset():
                 # Using a rolling mean of the target without shifting (or using a positive shift) will compute means on the past
                 # and might produce a target leak if history of the variable is used,
                 # Will use a initial shift of the size of the rolling window
-                target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}%%mean_{str(targets_rolling_window)}J"
-                self.data[target_name] = self.data[target].shift(targets_shift-targets_rolling_window)
+                target_name = f"{target_name}{'%%J+' if targets_shift < 0 else '%%J-' if targets_shift > 0 else ''}{str(abs(targets_shift))}%%mean_{str(targets_rolling_window)}J"
+
+                if targets_shift != 0:
+                    self.data[target_name] = self.data[target].shift(targets_shift-targets_rolling_window)
+                else:
+                    self.data[target_name] = self.data[target]
                 # df['shift'] = self.data[target_name]
                 # self.logger.info("Aggregating the target columns...")
                 self.data[target_name] = self.data[target_name].rolling(targets_rolling_window).mean()
@@ -461,8 +504,8 @@ class BaseTabularDataset():
                     targets_names: Optional[List[str]] = None,
                     targets_shift: Optional[int] = None,
                     targets_rolling_window: Optional[Union[int, List[int]]] = None,
-                    targets_history_shifts: Optional[int] = None,
-                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = None,
+                    targets_history_shifts: Optional[int] = [],
+                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
                     inplace: bool = False) -> None:
         """
         Get the dataset
@@ -558,13 +601,14 @@ class BaseTabularDataset():
         # # Vérifier si un recalcul est nécessaire
         # if needs_recalculation(self, features_names_base, (from_date, to_date), freq, shift, rolling_window):
         self.logger.info(
-            "Re-calculating train/val/test sets and encodings...")
+            "Calculating train/val/test sets and encodings...")
 
         self.name += f"_{'_'.join(self.targets_names)}"
 
         # Splitting the dataset
         if split_config:
             self.split(**split_config)
+
 
         # Création des X et y
         if create_X_y:

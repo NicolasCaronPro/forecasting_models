@@ -23,7 +23,7 @@ from src.models.sklearn_models import *
 from src.models.loss import *
 
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', with_metric=None, params: dict = None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric=None, params: dict = None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -32,13 +32,19 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', with
     :param device: Device to use ('cpu' or 'cuda')
     :param task_type: Task type ('regression' or 'classification')
     :param params: Dictionary of model parameters
-    :param loss: Specified loss Default is log_loss
+    :param test_metrics: Metrics to use for testing the model (default: 'log_loss')
+    :param eval_metric: Evaluation metric for the model. Default is the first element in test_metrics list
     :return: Configured model and hyperparameter search grid
     """
     model = None
 
-    if with_metric is not None:
-        eval_metric = metrics[with_metric]
+    if isinstance(test_metrics, str):
+        test_metrics = [test_metrics]
+
+    if eval_metric is not None:
+        eval_metric = metrics[eval_metric]
+    else:
+        eval_metric = metrics[test_metrics[0]]
 
     if model_type == 'xgboost':
         params.update({'eval_metric': eval_metric})
@@ -53,6 +59,8 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', with
         model = config_random_forest(device, task_type, params)
     elif model_type == 'dt':
         model = config_decision_tree(device, task_type, params)
+    elif model_type == 'prophet':
+        model = config_prophet(device, task_type, params)
     else:
         raise ValueError(f"Unrecognized model: {model_type}")
 
@@ -66,9 +74,28 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', with
     if isinstance(model, tree_based_models):
         return ModelTree(model, loss=test_metrics, name=name)
     else:
-        return Model(model, test_metric=test_metrics, name=name)
+        return Model(model, loss=test_metrics, name=name)
 
 
+def config_prophet(device, task_type, params=None) -> Prophet:
+    """Configures a Prophet model.
+    Args:
+        device (str): The device to use for training the model.
+        task_type (str): The type of task to perform. Can be either 'regression' or 'classification'.
+        params (dict, optional): A dictionary containing hyperparameters for the Prophet model. Defaults to None.
+    Returns:
+        Union[ProphetRegressor, ProphetClassifier]: An instance of a Prophet regressor or classifier depending on the task type.
+    """
+    if params is None:
+        params = {}
+    
+    if task_type == 'regression':
+        return Prophet(**params)
+    elif task_type == 'classification':
+        raise ValueError("Prophet does not support classification.")
+    else:
+        raise ValueError(f"Unrecognized task type: {task_type}")
+    
 def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBClassifier]:
     """
     Returns a xgboost model define by params

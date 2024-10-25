@@ -5,6 +5,7 @@ import convertdate
 from typing import Optional, Dict
 import datetime as dt
 import pandas as pd
+import numpy as np
 
 
 class SociologicalFeatures(BaseFeature):
@@ -49,12 +50,12 @@ class SociologicalFeatures(BaseFeature):
         # print(type(jours_feries[0]))
         # print(self.data['date'].dtype)
         data['bankHolidays'] = date_range.map(
-            lambda x: 1 if x.date() in jours_feries else 0).astype('category')
+            lambda x: 1 if x.date() in jours_feries else 0).astype('boolean')
         # print(self.data.loc[self.data['bankHolidays'] == 1])
         veille_jours_feries = sum([[l-dt.timedelta(days=1) for l in jours_feries_france.JoursFeries.for_year(
             k).values()] for k in range(date_range.min().year, date_range.max().year+1)], [])
         data['eveBankHolidays'] = date_range.map(
-            lambda x: 1 if x.date() in veille_jours_feries else 0).astype('category')
+            lambda x: 1 if x.date() in veille_jours_feries else 0).astype('boolean')
 
         self.logger.info("On s'occupe des vacances en tant que tel")
 
@@ -94,10 +95,9 @@ class SociologicalFeatures(BaseFeature):
         # print(academie)
         # print(academie[int(self.config.get('departement'))])
         data['holidays'] = date_range.map(lambda x: 1 if d.is_holiday_for_zone(
-            x.date(), get_academic_zone(academie, x)) else 0).astype('category')
+            x.date(), get_academic_zone(academie, x)) else 0).astype('boolean')
         data['holidays-1'] = data['holidays'].shift(-1)
-        data['borderHolidays'] = data.apply(lambda x: int(
-            x['holidays'] != x['holidays-1']), axis=1).astype('category')
+        data['borderHolidays'] = data.apply(lambda x: x['holidays'] != x['holidays-1'], axis=1).astype('boolean')
         data.drop('holidays-1', axis=1, inplace=True)
         self.logger.info("Variables de vacances intégrées")
         return data
@@ -124,11 +124,11 @@ class SociologicalFeatures(BaseFeature):
                 return 1
             return 0
         data['confinement1'] = date_range.map(lambda x: 1 if dt.datetime(
-            2020, 3, 17, 12) <= x <= dt.datetime(2020, 5, 11) else 0).astype('category')
+            2020, 3, 17, 12) <= x <= dt.datetime(2020, 5, 11) else 0).astype('boolean')
         data['confinement2'] = date_range.map(lambda x: 1 if dt.datetime(
             2020, 10, 30) <= x <= dt.datetime(2020, 12, 15) else 0).astype('category')
         data['couvrefeux'] = date_range.map(
-            pendant_couvrefeux).astype('category')
+            pendant_couvrefeux).astype('boolean')
         self.logger.info("Variables de confinement intégrées")
         return data
 
@@ -136,8 +136,43 @@ class SociologicalFeatures(BaseFeature):
         self.logger.info("On s'occupe des variables de Ramadan")
         data = pd.DataFrame(index=date_range)
         data['ramadan'] = date_range.map(lambda x: 1 if convertdate.islamic.from_gregorian(
-            x.year, x.month, x.day)[1] == 9 else 0).astype('category')
+            x.year, x.month, x.day)[1] == 9 else 0).astype('boolean')
         return data
+    
+    def include_HNFC_moving(self, date_range:pd.DatetimeIndex):
+        self.logger.info("Intégration du déménagement de l'HNFC")
+        start = dt.datetime(2017, 2, 28)
+        end = dt.datetime(2018, 1, 1)
+
+        df = pd.DataFrame(index=date_range)
+        # df.set_index('date', inplace=True)
+
+        df["before_HNFC_moving"] = np.where(df.index < start, 1, 0)
+        df['during_HNFC_moving'] = np.where((df.index >= start) & (df.index < end), 1, 0)
+        df['after_HNFC_moving'] = np.where(df.index >= end, 1, 0)
+        df["before_HNFC_moving"] = df["before_HNFC_moving"].astype("boolean")
+        df['during_HNFC_moving'] = df["during_HNFC_moving"].astype("boolean")
+        df['after_HNFC_moving'] = df['after_HNFC_moving'].astype("boolean")
+        # print(df)
+        return df
+    
+    def include_COVID(self, date_range:pd.DatetimeIndex):
+        self.logger.info("Intégration du COVID")
+        start = dt.datetime(2017, 2, 28)
+        end = dt.datetime(2018, 1, 1)
+
+        df = pd.DataFrame(index=date_range)
+        # df.set_index('date', inplace=True)
+
+        df["before_COVID"] = np.where(df.index < start, 1, 0)
+        df['during_COVID'] = np.where((df.index >= start) & (df.index < end), 1, 0)
+        df['after_COVID'] = np.where(df.index >= end, 1, 0)
+        df["before_COVID"] = df["before_COVID"].astype("boolean")
+        df['during_COVID'] = df["during_COVID"].astype("boolean")
+        df['after_COVID'] = df['after_COVID'].astype("boolean")
+        # print(df)
+        return df
+
 
     def fetch_data_function(self, *args, **kwargs) -> None:
         """
@@ -160,5 +195,6 @@ class SociologicalFeatures(BaseFeature):
         data = data.join(self.include_holidays(date_range, departement))
         data = data.join(self.include_lockdown(date_range))
         data = data.join(self.include_ramadan(date_range))
+        data = data.join(self.include_HNFC_moving(date_range))
 
         return data
