@@ -254,7 +254,9 @@ class BaseTabularDataset():
         if not self.val_set.empty:
             self.val_set.drop(columns=constant_columns, inplace=True)
 
-        print(f"Dropped constant columns from both sets: {constant_columns}")
+        self.data.drop(columns=constant_columns, inplace=True)
+
+        print(f"Dropped {len(constant_columns)} constant columns from both sets: {constant_columns}")
 
     def split(self, train_size: Optional[Union[float, int]] = None,
               test_size: Optional[Union[float, int]] = None,
@@ -418,11 +420,11 @@ class BaseTabularDataset():
 
             self.logger.info("Creating target history columns...")
             for shift in targets_history_shifts:
-                if shift < 0:
-                    self.logger.warning(f"The target history shift {shift} is negative, will be ignored as it refered to future values")
+                if shift < abs(targets_shift) + targets_rolling_window:
+                    self.logger.warning(f"The target history shift {shift} is not high enough considering that the target is shifted and/or is a rolling mean, will be ignored as it refered to future values")
                     continue
-                shift = shift -1
-                self.data[f"{target_name}%%J-{abs(targets_shift) + targets_rolling_window + shift}"] = self.data[target_name].shift((abs(targets_shift) + targets_rolling_window + shift))
+                # shift = shift -1
+                self.data[f"{target_name}%%J-{shift}"] = self.data[target_name].shift(shift)
 
             for rw in targets_history_rolling_windows:
                 self.data[f'{target_name}%%mean_{rw}J%%J-{abs(targets_shift) + targets_rolling_window}'] = self.data[target_name].shift((abs(targets_shift) + targets_rolling_window)).rolling(rw).mean()

@@ -16,7 +16,7 @@ from sklearn.compose import ColumnTransformer
 from src.datasets.base_tabular_dataset import BaseTabularDataset
 from src.encoding.tools import create_encoding_pipeline
 from src.experiments.features_selection import get_features, explore_features
-from src.models.sklearn_models import Model, ModelTree
+from src.models.sklearn_api_model import Model, ModelTree
 import src.features as ft
 import mlflow.sklearn
 import mlflow
@@ -172,7 +172,7 @@ class BaseExperiment:
         """
         self.logger.info("Plotting the results...")
 
-        fig, ax = plt.subplots(figsize=(20, 10))
+        fig, ax = plt.subplots(figsize=(10, 6))
         ax.set_title('True vs Predicted')
         ax.set_xlabel('Date')
         ax.set_ylabel('Value')
@@ -184,7 +184,6 @@ class BaseExperiment:
         y_pred.plot(ax=ax, label='Predicted', use_index=True)
         
         errors = pd.DataFrame(dataset.y_test.iloc[:, 0] - y_pred.iloc[:, 0], columns=['Error'])
-        print(errors)
         errors.plot(ax=ax, label='Error (target - y_pred)', use_index=True)
         
         if 'target_nb_vers_hospit' in self.dataset.targets_names and dataset.y_test.index[0].year == 2022:

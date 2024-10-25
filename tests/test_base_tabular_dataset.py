@@ -48,7 +48,7 @@ ars_features_class = [
 
 # Select the target columns to be predicted
 # target_colomns = ['nb_vers_hospit']
-target_colomns = ['Total_CHU Dijon']
+target_colomns = ['nb_emmergencies_CHU Dijon']
 
 # Define an encoding scheme to create the encoding pipeline
 encoders_dict = {

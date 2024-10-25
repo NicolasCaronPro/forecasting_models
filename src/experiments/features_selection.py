@@ -27,7 +27,7 @@ from sklearn.ensemble import ExtraTreesRegressor
 from lightgbm import LGBMRegressor
 import logging
 import math
-from src.models.sklearn_models import Model
+from src.models.sklearn_api_model import Model
 
 
 def get_features(df: pd.DataFrame, variables: List[str], target:str='appels', num_feats:int=100, learn_mode = 'slow', logger=None):
