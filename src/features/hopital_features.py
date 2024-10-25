@@ -23,6 +23,8 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 from src.features.base_features import BaseFeature
+from src.location.location import Location
+from pathlib import Path
 
 
 class HopitalFeatures(BaseFeature):
@@ -33,8 +35,14 @@ class HopitalFeatures(BaseFeature):
         etablissement (str): The name of the hospital.
     """
 
-    def __init__(self, name:str = None, logger=None) -> None:
+    def __init__(self, name:str = None, logger=None,
+                 include_emmergency_arrivals=True,
+                 include_hnfc_moving=True,
+                 include_nb_hospit=True) -> None:
         super().__init__(name, logger)
+        self.include_emmergency_arrivals = include_emmergency_arrivals
+        self.include_hnfc_moving = include_hnfc_moving
+        self.include_nb_hospit = include_nb_hospit
 
     def include_nb_emmergencies(self, from_date, to_date, etablissement, feature_dir) -> None:
         """
@@ -43,6 +51,7 @@ class HopitalFeatures(BaseFeature):
         self.logger.info("Intégration de la target")
 
         file_name = f"Export complet {etablissement}.xlsx"
+        feature_dir = Path(feature_dir)
         target_file_path = feature_dir / \
             f"{etablissement}_volumes.feather"
 
@@ -53,7 +62,7 @@ class HopitalFeatures(BaseFeature):
         else:
             self.logger.info(
                 f"  - Chargement des données de {etablissement} depuis le fichier Excel")
-            data = pd.read_excel(feature_dir / file_name, sheet_name=1)
+            data = pd.read_excel(feature_dir / file_name, sheet_name="Volumes", usecols="A:B")
 
             if "annee" in data:
                 data.drop(axis=1, columns="annee", inplace=True)
@@ -109,29 +118,33 @@ class HopitalFeatures(BaseFeature):
         Fetches the data by adding the target and calling the parent's fetch_data method.
         """
 
-        assert 'etablissement' in kwargs, "etablissement must be provided in config"
-        etablissement = kwargs.get('etablissement')
+        assert 'location' in kwargs, "location must be provided in config"
+        location = kwargs.get('location')
+        etablissement = location.get_name(mode=2)
         assert isinstance(etablissement, str), "etablissement must be a string"
 
         feature_dir = kwargs.get("feature_dir")
 
         # Set starting date, default is 01/01/1970
         start_date = kwargs.get("start_date")
-        start_date = dt.datetime.strptime(start_date, "%d-%M-%Y") if isinstance(start_date, str) else start_date
+        start_date = dt.datetime.strptime(start_date, "%Y-%M-%d") if isinstance(start_date, str) else start_date
 
         # Set ending date, default is today's date
         stop_date = kwargs.get("stop_date")
-        stop_date = dt.datetime.strptime(stop_date, "%d-%M-%Y") if isinstance(stop_date, str) else stop_date
+        stop_date = dt.datetime.strptime(stop_date, "%Y-%M-%d") if isinstance(stop_date, str) else stop_date
         # print(f"Fetching data from {start_date} to {stop_date}")
-        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date")
+        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date", )
 
-        data = pd.DataFrame(index=date_range)
-        # data.set_index("date", inplace=True)
+        #data = pd.DataFrame(index=date_range)
+        #data.set_index("date", inplace=True)
 
-        # if self.include_emmergency_arrivals:
-        data = data.join(self.include_nb_emmergencies(start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
-        # if self.include_hnfc_moving:
-        data = data.join(self.include_HNFC_moving(date_range))
-        # # if self.include_nb_hospit:
-        data = data.join(self.include_nb_hospitalized(start_date, stop_date, feature_dir))
+        data = pd.DataFrame()
+        
+
+        if self.include_emmergency_arrivals:
+            data = data.merge(self.include_nb_emmergencies(start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir), how='outer', left_index=True, right_index=True)
+        if self.include_hnfc_moving:
+            data = data.merge(self.include_HNFC_moving(date_range), how='outer', left_index=True, right_index=True)
+        if self.include_nb_hospit:
+            data = data.merge(self.include_nb_hospitalized(start_date, stop_date, feature_dir), how='outer', left_index=True, right_index=True)
         return data
