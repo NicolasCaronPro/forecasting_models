@@ -3,15 +3,18 @@ from typing import Optional, Dict
 import pandas as pd
 import datetime as dt
 from serpapi import GoogleSearch
-
+from pathlib import Path
+from src.location.location import Location
 
 class GoogleTrendFeatures(BaseFeature):
     def __init__(self, name:str = None, logger=None) -> None:
         super().__init__(name, logger)
 
-    def include_google_trends(self, date_range:pd.DatetimeIndex, feature_dir) -> pd.DataFrame:
+    def include_google_trends(self, location: Location, date_range:pd.DatetimeIndex, feature_dir) -> pd.DataFrame:
         self.logger.info("On récupère les données de Google Trends")
         BATCH_SIZE = 270
+
+        feature_dir = Path(feature_dir)
 
         bow = [
             "diarrhée", "vomissements", "toux", "éruption cutanée", "infection urinaire",
@@ -34,9 +37,9 @@ class GoogleTrendFeatures(BaseFeature):
                 yield current_date
                 current_date += dt.timedelta(days=batch_size)
 
-        def get_all_dates_df(bow, i, start, end, batch_size, api_keys=["cf7a3d5a2dd56565ef56451a80d9ea4a5540690bc11c12fc84417be5b4e17f27", "9d3432113ee747417e68225f4708971e5b4a2d22b5f9c2edd98f41b44ae1851f", "2db567698593dfdbc27232e2244cd1346cac3c105e2b93f11334db10e8536bde", "17c26a6b6e4f020d1c607063cdb3ac30cf329060339e5ff34c71778e98574742"]):
+        def get_all_dates_df(location, bow, i, start, end, batch_size, api_keys=["cf7a3d5a2dd56565ef56451a80d9ea4a5540690bc11c12fc84417be5b4e17f27", "9d3432113ee747417e68225f4708971e5b4a2d22b5f9c2edd98f41b44ae1851f", "2db567698593dfdbc27232e2244cd1346cac3c105e2b93f11334db10e8536bde", "17c26a6b6e4f020d1c607063cdb3ac30cf329060339e5ff34c71778e98574742"]):
             print(api_keys)
-            api_key = api_keys[0]
+            api_key = api_keys[1]
             all_dates_df = pd.DataFrame()
             for date in range_date(start, end, batch_size):
                 end_date = min(date + dt.timedelta(days=batch_size-1), end)
@@ -46,7 +49,7 @@ class GoogleTrendFeatures(BaseFeature):
                 params = {
                     "engine": "google_trends",
                     "q": f"{group}",
-                    "geo": "FR-D",  # FR-D
+                    "geo": location.region_trends,  # FR-D
                     "date": f"{date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}",
                     "tz": "0",
                     "data_type": "TIMESERIES",
@@ -54,9 +57,11 @@ class GoogleTrendFeatures(BaseFeature):
                 }
                 search = GoogleSearch(params)
                 results = search.get_dict()
+                print(results)
                 # try:
                 interest_over_time = results["interest_over_time"]["timeline_data"]
                 df = pd.DataFrame(interest_over_time)
+                #print(df)
                 for query in df.iloc[0]["values"]:
                     query = query["query"]
                     df["trend_" + query] = df["values"].apply(lambda x: next(
@@ -66,8 +71,8 @@ class GoogleTrendFeatures(BaseFeature):
                     df["trend_" + query] = df["trend_" + query].astype(int)
                 df.drop(columns=["values", "timestamp"], inplace=True)
                 df["date"] = pd.to_datetime(df["date"], format="%b %d, %Y")
-                df.drop(columns=["date"], inplace=True)
-                df.set_index("date", inplace=True)
+                #df.drop(columns=["date"], inplace=True)
+                df.set_index("date", inplace=True) #TODO: check if this is necessary
                 all_dates_df = pd.concat([all_dates_df, df], axis=0)
                 # except:
                     # Ce code permet de réessayer avec un batch plus petit mais cela ne résoud pas le problème, on décide donc de remplir de 0 plus tard
@@ -93,15 +98,15 @@ class GoogleTrendFeatures(BaseFeature):
         # additional_df = pd.DataFrame(index=additional_dates)
         # self.data = pd.concat([self.data, additional_df])
         # self.data = pd.concat([pd.DataFrame({'date_entree': additional_dates}), self.data]).reset_index(drop=True)
-
-        if not (feature_dir / 'trends.csv').is_file():
+        file = 'trends_' + location.region_old + '.csv'
+        if not (feature_dir / file).is_file():
             self.logger.info(
                 "On récupère les données de Google Trends depuis l'API")
             # idx = self.data.index
             all_words_df = pd.DataFrame(index=date_range)
             for i in range(0, len(bow), 5):
 
-                all_dates_df = get_all_dates_df(bow, i, date_range.min(), date_range.max(), BATCH_SIZE)  # START - dt.timedelta(days=max(DECALAGE_TREND, FENETRE_GLISSANTE)), STOP_DATA
+                all_dates_df = get_all_dates_df(location, bow, i, date_range.min(), date_range.max(), BATCH_SIZE)  # START - dt.timedelta(days=max(DECALAGE_TREND, FENETRE_GLISSANTE)), STOP_DATA
                 # Fill missing dates
                 # self.logger.info(all_dates_df.index)
                 all_dates_df = all_dates_df.reset_index()
@@ -118,12 +123,12 @@ class GoogleTrendFeatures(BaseFeature):
             #     all_words_df.plot(x="date_entree", y=all_words_df.loc[:, all_words_df.columns != "date_entree"].columns.tolist()[i:i + 5], title="Google Trends in France", ax=ax)
 
             # On sauvegarde le dataframe
-            all_words_df.to_csv(feature_dir / 'trends.csv', index=False)
+            all_words_df.to_csv(feature_dir / file, index=False)
         else:
             self.logger.info(
                 "On charge les données de Google Trends depuis le fichier")
             all_words_df = pd.read_csv(
-                feature_dir / 'trends.csv', parse_dates=['date'])
+                feature_dir / file, parse_dates=['date'])
             # all_words_df.drop(columns=["trend_tabac", "trend_alcool", "trend_drogue", "trend_diabète", "trend_obésité",
             #                            "trend_cancer", "trend_maladie rénale", "trend_maladie cardiaque", "trend_maladie de Crohn",
             #                            "trend_colite ulcéreuse"], inplace=True)
@@ -150,11 +155,13 @@ class GoogleTrendFeatures(BaseFeature):
         assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
         assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
         assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
-        
+        assert 'location' in kwargs, f"Le paramètre'location' est obligatoire pour fetch la feature {self.name}"
+
+        location = kwargs.get("location")
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
         date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
-        data = pd.DataFrame(index=date_range)
-        data.join(self.include_google_trends(date_range, feature_dir))
-        return data
+        #data = pd.DataFrame(index=date_range)
+        #data.join(self.include_google_trends(date_range, feature_dir))
+        return self.include_google_trends(location, date_range, feature_dir)
