@@ -9,6 +9,8 @@ import pandas as pd
 from src.features.base_features import BaseFeature
 from pathlib import Path
 import os
+from src.location.location import Location
+from shapely.geometry import Polygon, Point
 
 class AirQualityFeatures(BaseFeature):
     """
@@ -23,7 +25,7 @@ class AirQualityFeatures(BaseFeature):
         super().__init__(name, logger)
 
 
-    def __include_air_quality(self, departement, feature_dir):
+    def __include_air_quality(self, location: Location, feature_dir: str) -> pd.DataFrame:
         # Récupérer les archives sur :
         # https://www.geodair.fr/donnees/export-advanced
 
@@ -31,15 +33,30 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info("On regarde la qualité de l'air")
 
         # On récupère les codes des stations de mesure de la qualité de l'air pour le département
-        df = pd.read_csv(feature_dir / 'stations_geodair.csv',
+        df = pd.read_csv(feature_dir + '/stations_geodair.csv',
                          sep=';', dtype={'departement': str})
-        CODES = list(df.loc[df['departement'] ==
-                     departement].station.values)
+        
+        
+        CODES = []
+        for i in range(len(df)):
+            if location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or df.iloc[i]['departement'] == location.code_departement:
+                CODES.append(df.iloc[i]['station'])
+        
+        
+
+        #if len(CODES) == 0:
+        # CODES.append(list(df.loc[df['departement'] ==
+        #             location.code_departement].station.values))
+        #print(CODES)
+
+
+
         self.logger.info(f"On s'intéresse aux codes : {', '.join(CODES)}")
 
-        archived_data_dir = feature_dir / 'archived'
+
+        archived_data_dir = Path(feature_dir + 'archived')
         archived_data_dir.mkdir(exist_ok=True, parents=True)
-        if not (archived_data_dir / 'pollution_historique.feather').is_file():
+        if not (archived_data_dir / '/pollution_historique.feather').is_file():
             self.logger.info("On calcule le dataframe d'archive de l'air")
 
             dico: Dict[str, pd.DataFrame] = {}
@@ -109,17 +126,17 @@ class AirQualityFeatures(BaseFeature):
         else:
             self.logger.info("On relit le dataframe d'archive de l'air")
             data = pd.read_feather(
-                archived_data_dir / 'pollution_historique.feather')
+                archived_data_dir + 'pollution_historique.feather')
 
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")
         return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:
-        assert 'departement' in kwargs, "departement must be provided in config"
-        departement = kwargs.get('departement')
-        assert type(departement) == str, "departement must be a string"
+        assert 'location' in kwargs, "location must be provided in config"
+        location = kwargs.get('location')
+        assert type(location) == Location, "location must be a Location object"
 
         feature_dir = kwargs.get("feature_dir")
 
-        return self.__include_air_quality(departement, feature_dir)
+        return self.__include_air_quality(location, feature_dir)

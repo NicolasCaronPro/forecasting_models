@@ -1,7 +1,8 @@
 from src.features.base_features import BaseFeature
 from typing import Optional, Dict
 import pandas as pd
-
+from pathlib import Path
+from src.location.location import Location
 
 class TrafficFeatures(BaseFeature):
     def __init__(self, name:str = None, logger=None) -> None:
@@ -9,6 +10,7 @@ class TrafficFeatures(BaseFeature):
 
     def include_trafic(self, feature_dir, date_range, departement):
         # Historique des accidents de la route
+        feature_dir = Path(feature_dir)
         data = pd.DataFrame(index=date_range)
         self.logger.info("Intégration des données de trafic")
         accidents = pd.read_csv(
@@ -35,7 +37,7 @@ class TrafficFeatures(BaseFeature):
             accidents['nb_accidents'], left_index=True, right_index=True, how='left')
 
         # On remplit les jours sans accidents par 0
-        data['nb_accidents'].fillna(0, inplace=True)
+        data['nb_accidents'] = data['nb_accidents'].fillna(0)
 
         return data
 
@@ -43,8 +45,9 @@ class TrafficFeatures(BaseFeature):
         assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
         assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
         assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
-        assert 'departement' in kwargs, "departement must be provided in config"
-        departement = kwargs.get('departement')
+        assert 'location' in kwargs, "location must be provided in config"
+        location = kwargs.get('location')
+        departement = location.code_departement
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")

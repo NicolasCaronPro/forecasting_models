@@ -184,8 +184,9 @@ class SociologicalFeatures(BaseFeature):
 
         assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
         assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
-        assert 'departement' in kwargs, "departement must be provided in config"
-        departement = kwargs.get('departement')
+        assert 'location' in kwargs, "location must be provided in config"
+        location = kwargs.get('location')
+        departement = location.code_departement
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
         date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq

@@ -1,6 +1,7 @@
 from src.features.base_features import BaseFeature
 from typing import Optional, Dict
 import pandas as pd
+from pathlib import Path
 
 
 class SportsCompetitionFeatures(BaseFeature):
@@ -11,6 +12,7 @@ class SportsCompetitionFeatures(BaseFeature):
         self.logger.info("Intégration des données de football")
         data = pd.DataFrame(index=date_range)
         # On récupère les données de football depuis chaque fichier csv
+        feature_dir = Path(feature_dir)
         file_list = list(feature_dir.glob('*.csv'))
         for file in file_list:
             df = pd.read_csv(file)

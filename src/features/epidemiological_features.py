@@ -1,5 +1,5 @@
 import os
-import pathlib
+from pathlib import Path
 import pickle
 import datetime as dt
 
@@ -8,6 +8,8 @@ import requests
 from src.features.base_features import BaseFeature
 from statsmodels.tsa.statespace.sarimax import SARIMAXResults
 from typing import List, Optional, Dict
+from src.location.location import Location
+
 
 
 class EpidemiologicalFeatures(BaseFeature):
@@ -26,6 +28,8 @@ class EpidemiologicalFeatures(BaseFeature):
         models = {}
 
         data = pd.DataFrame(index=date_range)
+
+        feature_dir = Path(feature_dir)
 
         for nom, url in [('grippe', 3), ('diarrhee', 6), ('varicelle', 7), ('ira', 25)]:
             self.logger.info(
@@ -53,10 +57,10 @@ class EpidemiologicalFeatures(BaseFeature):
 
 
             ##################### TODO: Faire une méthode dans BaseFeature pour ralonger les données, ou faire un Imputer #####################
-            self.logger.info(f"Chargement du modèle de prédiction pour {nom}")
-            models[nom] = SARIMAXResults.load(
-                feature_dir / f"predictors/model_{nom}.pkl")
-            self.logger.info(f"Modèle {nom} chargé")
+            # self.logger.info(f"Chargement du modèle de prédiction pour {nom}")
+            # models[nom] = SARIMAXResults.load(
+            #     feature_dir / f"predictors/model_{nom}.pkl")
+            # self.logger.info(f"Modèle {nom} chargé")
 
             # On prolonge la dernière incidence connue jusqu'à maintenant
             # TODO: Faire une méthode meilleure (XGBoost ?) que Sarimax
@@ -68,8 +72,8 @@ class EpidemiologicalFeatures(BaseFeature):
                 last_date += dt.timedelta(days=7)
                 year, week, _ = last_date.isocalendar()
                 sunday = dt.datetime.strptime(f'{year}{week:02d}7', '%G%V%u')
-                pred = models[nom].predict(sunday)
-                pred = max(0, pred[0])
+                # pred = models[nom].predict(sunday)
+                pred = 0 #max(0, pred[0])
                 dico[f"{year}{week:02d}"] = int(pred)
                 self.logger.info(
                     f"    On complète la semaine {year}{week:02d} ({last_date:'%d/%m/%Y'}) par {str(int(pred))}")
@@ -103,12 +107,13 @@ class EpidemiologicalFeatures(BaseFeature):
         return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:
-        assert 'region' in kwargs, f"Le paramètre'region' est obligatoire pour fetch la feature {self.name}"
+        assert 'location' in kwargs, f"Le paramètre'location' est obligatoire pour fetch la feature {self.name}"
         assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
         assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
         assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
         
-        region = kwargs.get('region')
+        location = kwargs.get('location')
+        region = location.region_old
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
