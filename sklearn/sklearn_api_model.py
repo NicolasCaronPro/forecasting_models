@@ -19,6 +19,8 @@ from ngboost import NGBClassifier, NGBRegressor
 from ngboost.distns import Normal
 from ngboost.scores import LogScore
 
+from pygam import GAM
+
 from scipy import stats
 
 from skopt import BayesSearchCV, Optimizer
@@ -33,7 +35,7 @@ from sklearn.ensemble import (
     StackingRegressor,
 )
 
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression, PoissonRegressor
 
 from sklearn.metrics import (
     accuracy_score,
@@ -62,7 +64,6 @@ from sklearn.utils.validation import check_is_fitted
 
 from xgboost import XGBClassifier, XGBRegressor, plot_tree as xgb_plot_tree
 
-
 #from scripts.probability_distribution import weight
 
 def weighted_mse_loss(y_true, y_pred, sample_weight=None):
@@ -72,7 +73,7 @@ def weighted_mse_loss(y_true, y_pred, sample_weight=None):
     else:
         return np.mean(squared_error)
 
-def poisson_loss(y_true, y_pred, sample_weight=None):
+def poisson(y_true, y_pred, sample_weight=None):
     y_pred = np.clip(y_pred, 1e-8, None)  # Éviter log(0)
     loss = y_pred - y_true * np.log(y_pred)
     if sample_weight is not None:
@@ -409,6 +410,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         if hasattr(self.best_estimator_, "predict_proba"):
             return self.best_estimator_.predict_proba(X)
+        elif self.name.find('gam') != -1:
+            res = np.zeros((X.shape[0], 2))
+            res[:, 1] = self.best_estimator_.predict(X)
+            return res
         else:
             raise AttributeError(
                 "The chosen model does not support predict_proba.")
@@ -439,8 +444,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'rmsle':
             return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'poisson_loss':
-            return -poisson_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'poisson':
+            return -poisson(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'huber_loss':
             return -huber_loss(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'log_cosh_loss':
@@ -465,8 +470,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'rmsle':
             return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'poisson_loss':
-            return -poisson_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'poisson':
+            return -poisson(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'huber_loss':
             return -huber_loss(y, y_pred, sample_weight=sample_weight)
         elif self.loss == 'log_cosh_loss':
@@ -533,7 +538,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             return 'neg_root_mean_squared_error'
         elif self.loss == 'rmsle':
             return 'neg_root_mean_squared_log_error'
-        elif self.loss == 'poisson_loss':
+        elif self.loss == 'poisson':
             return 'neg_mean_poisson_deviance'
         elif self.loss == 'huber_loss':
             return 'neg_mean_squared_error'
@@ -1168,9 +1173,8 @@ class ModelVoting(Model):
             # Regression: Average the predictions
             predictions_array = np.array(predictions_list)
             print(predictions_array.shape)
-            #aggregated_pred = np.mean(predictions_array, axis=0)
-            aggregated_pred = np.max(predictions_array, axis=0)
-            print(aggregated_pred.shape)
+            aggregated_pred = np.mean(predictions_array, axis=0)
+            #aggregated_pred = np.max(predictions_array, axis=0)
         return aggregated_pred
 
     def aggregate_probabilities(self, probas_list):

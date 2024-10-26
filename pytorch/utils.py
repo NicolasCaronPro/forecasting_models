@@ -52,6 +52,7 @@ class OutputLayer(torch.nn.Module):
             self.out_channels = 1
 
         self.fc = nn.Linear(in_channels=in_channels, out_channels=end_channels, weight_initializer='glorot', bias=True).to(device)
+        self.dropout = torch.nn.Dropout(0.3)
         self.fc2 = nn.Linear(in_channels=end_channels, out_channels=self.out_channels, weight_initializer='glorot', bias=True).to(device)
         self.n_steps = n_steps
 
@@ -59,14 +60,87 @@ class OutputLayer(torch.nn.Module):
         x = x.view(x.shape[0], -1)
         x = self.activation(x)
         x = self.fc(x)
+        x = self.dropout(x)
         x = self.activation(x)
         x = self.fc2(x)
-        #x = self.output(x)
         x = x.view(x.shape[0], self.out_channels)
+        x = torch.clamp(x, min=0)
         if self.binary:
             x = self.softmax(x)
         return x
     
+
+####################################### Output GCN #####################################
+
+class OutputLayerGCN(torch.nn.Module):
+    def __init__(self, in_channels, end_channels, n_steps, device, act_func, binary):
+        super(OutputLayerGCN, self).__init__()
+        if act_func == 'relu':
+            self.activation = ReLU()
+        if act_func == 'gelu':
+            self.activation = GELU()
+
+        self.binary = binary
+
+        if binary:
+            self.out_channels = 2
+            self.softmax = Softmax()
+        else:
+            self.out_channels = 1
+
+        self.fc = nn.GCNConv(in_channels=in_channels, out_channels=end_channels, bias=True).to(device)
+        self.dropout = torch.nn.Dropout(0.3)
+        self.fc2 = nn.GCNConv(in_channels=end_channels, out_channels=self.out_channels, bias=True).to(device)
+        self.n_steps = n_steps
+
+    def forward(self, x, edge_index):
+        x = x.view(x.shape[0], -1)
+        x = self.activation(x)
+        x = self.fc(x, edge_index)
+        x = self.dropout(x)
+        x = self.activation(x)
+        x = self.fc2(x, edge_index)
+        x = x.view(x.shape[0], self.out_channels)
+        x = torch.clamp(x, min=0)
+        if self.binary:
+            x = self.softmax(x)
+        return x
+    
+############################### Output GAT ##########################################
+
+class OutputLayerGAT(torch.nn.Module):
+    def __init__(self, in_channels, end_channels, n_steps, device, act_func, binary):
+        super(OutputLayerGAT, self).__init__()
+        if act_func == 'relu':
+            self.activation = ReLU()
+        if act_func == 'gelu':
+            self.activation = GELU()
+
+        self.binary = binary
+
+        if binary:
+            self.out_channels = 2
+            self.softmax = Softmax()
+        else:
+            self.out_channels = 1
+
+        self.fc = nn.GATConv(in_channels=in_channels, out_channels=end_channels, concat=False, heads=6, bias=True).to(device)
+        self.dropout = torch.nn.Dropout(0.3)
+        self.fc2 = nn.GATConv(in_channels=end_channels, out_channels=self.out_channels, concat=False, heads=6, bias=True).to(device)
+        self.n_steps = n_steps
+
+    def forward(self, x, edge_index):
+        x = x.view(x.shape[0], -1)
+        x = self.activation(x)
+        x = self.fc(x, edge_index)
+        x = self.dropout(x)
+        x = self.activation(x)
+        x = self.fc2(x, edge_index)
+        x = x.view(x.shape[0], self.out_channels)
+        x = torch.clamp(x, min=0)
+        if self.binary:
+            x = self.softmax(x)
+        return x
 
 ######################################## TIME2VEC ######################################
 

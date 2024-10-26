@@ -1,4 +1,7 @@
-from tools import *
+import sys
+sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
+
+from forecasting_models.pytorch.tools_2 import *
 from torch.functional import F
 
 class PoissonLoss(torch.nn.Module):

@@ -45,6 +45,10 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None)
         model = config_random_forest(device, task_type, params)
     elif model_type == 'dt':
         model = config_decision_tree(device, task_type, params)
+    elif model_type == 'poisson':
+        model = config_poisson_regressor(device, task_type, params)
+    elif model_type == 'gam':
+        model = config_gam(device, task_type, params)
     else:
         raise ValueError(f"Unrecognized model: {model_type}")
     
@@ -72,7 +76,6 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
         # Random parametring
         params = {
             'verbosity':0,
-            'early_stopping_rounds':15,
             'learning_rate' :0.01,
             'min_child_weight' : 5.0,
             'max_depth' : 6,
@@ -198,6 +201,51 @@ def config_random_forest(device, task_type, params=None) -> Union[RandomForestCl
         return RandomForestRegressor(**params)
     else:
         return RandomForestClassifier(**params)
+    
+def config_poisson_regressor(device: str, task_type: str, params=None) -> Union[PoissonRegressor, None]:
+    """
+    Returns a Poisson regression model defined by params.
+    
+    :param device: 'cpu' or 'cuda' (currently not used, as PoissonRegressor only runs on CPU in sklearn)
+    :param task_type: 'regression' (Poisson regression is typically used for regression tasks)
+    :param params: dictionary of hyperparameters for the PoissonRegressor
+    :return: PoissonRegressor model or None if task_type is not 'regression'
+    """
+    
+    # Default parameters for PoissonRegressor
+    if params is None:
+        params = {
+            'alpha': 1.0,            # Regularization strength (L2 penalty)
+            'max_iter': 100,          # Maximum number of iterations
+            'tol': 1e-4,              # Tolerance for stopping criteria
+            'fit_intercept': True,    # Whether to fit the intercept
+            'verbose': 0,             # Verbosity level
+            'warm_start': False,      # Reuse solution of the previous call to fit
+        }
+
+    # Ensure the task type is 'regression' since Poisson models are for regression tasks
+    if task_type == 'regression':
+        return PoissonRegressor(**params)
+    else:
+        print("PoissonRegressor is only applicable to regression tasks.")
+        return None
+    
+def config_gam(device : str, task_type : str, params = None) -> GAM:
+
+    if task_type == 'regression':
+        if params is None:
+            params = {'distribution' : 'poisson',
+                      'link': 'log',
+                      'max_iter' : 1000,
+                      } 
+        return GAM(**params)
+    else: 
+        if params is None:
+            params = {'distribution' : 'logistic',
+                      'link': 'log',
+                    'max_iter' : 1000,
+                      } 
+        return GAM(**params)
 
 def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeClassifier, DecisionTreeRegressor]:
     """
@@ -209,7 +257,7 @@ def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeCl
     """
     if params is None:
         params = {
-            'criterion': 'mse' if task_type == 'regression' else 'gini',
+            'criterion': 'squared_error' if task_type == 'regression' else 'gini',
             'splitter': 'best',
             'max_depth': None,
             'min_samples_split': 2,
