@@ -3,15 +3,6 @@ import sys
 sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/GNN/models')
 sys.path.insert(0, '/home/caron/Bureau/pytorch_geometric_temporal')
 
-import sys
-
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/GNN/models')
-sys.path.insert(0, '/home/caron/Bureau/pytorch_geometric_temporal')
-import sys
-
-sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/GNN/models')
-sys.path.insert(0, '/home/caron/Bureau/pytorch_geometric_temporal')
-
 import torch
 from torch.nn import ELU, ReLU, Sigmoid, Softmax, Tanh, GELU, SiLU, Conv1d, Conv2d, MaxPool2d, Identity, Dropout
 from torch_geometric.nn.dense.linear import Linear

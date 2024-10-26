@@ -1,6 +1,15 @@
 import sys
-#sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/forecasting_models')
-sys.path.insert(0, '/Home/Users/ncaron/WORK/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
+import os
+
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Get the parent directory of the current directory
+parent_dir = os.path.dirname(current_dir)
+
+# Insert the parent directory into sys.path
+sys.path.insert(0, parent_dir)
+
 from forecasting_models.pytorch.utils import *
 
 ################################ GAT ###########################################
