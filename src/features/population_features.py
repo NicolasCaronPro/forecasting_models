@@ -19,9 +19,17 @@ class PopulationFeatures(BaseFeature):
 
         population = pd.DataFrame()
 
+        from_years = from_date[0:4]
+        to_years = to_date[0:4]
+        years = [str(i) for i in range(int(from_years), int(to_years) + 1)]
+        # today's year
+        current_year = dt.datetime.now().year
+        if to_years != str(current_year):
+            years.append(str(int(to_years) + 1))
+
         # JSON data
         dpt = f'DEP-{location.code_departement}'
-        years = ['2019', '2020', '2021', '2022', '2023', '2024']
+        # years = ['2019', '2020', '2021', '2022', '2023', '2024']
 
         requete_dataset = f"https://api.insee.fr/melodi/data/DS_ESTIMATION_POPULATION?GEO={dpt}"
 
@@ -88,7 +96,6 @@ class PopulationFeatures(BaseFeature):
 
         # Step 4: Fill missing values if necessary (e.g., with forward-fill or NaNs)
         # You can also use 'bfill' or leave as NaN
-        # df_pivot.fillna(method='ffill', inplace=True)
         df_pivot.ffill(inplace=True)
 
         df_pivot = df_pivot.rename_axis(None, axis=1)
