@@ -58,9 +58,9 @@ def create_encoding_pipeline(encoders_dict: Dict[str, Dict[str, Dict[str, List[U
                 print(f"Invalid data type: {data_type}")
                 exit(1)
 
-            transformer = make_column_transformer((pipeline, selector), remainder='drop').set_output(transform='pandas')
-            transformers.append(transformer)
+            # transformer = make_column_transformer((pipeline, selector), remainder='drop').set_output(transform='pandas')
+            transformers.append((pipeline, selector))
 
-    processor = make_union(*transformers, verbose=True).set_output(transform='pandas')
+    processor = make_column_transformer(*transformers, remainder='passthrough', verbose=True).set_output(transform='pandas')
 
     return processor

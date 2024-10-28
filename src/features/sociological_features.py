@@ -126,7 +126,7 @@ class SociologicalFeatures(BaseFeature):
         data['confinement1'] = date_range.map(lambda x: 1 if dt.datetime(
             2020, 3, 17, 12) <= x <= dt.datetime(2020, 5, 11) else 0).astype('boolean')
         data['confinement2'] = date_range.map(lambda x: 1 if dt.datetime(
-            2020, 10, 30) <= x <= dt.datetime(2020, 12, 15) else 0).astype('category')
+            2020, 10, 30) <= x <= dt.datetime(2020, 12, 15) else 0).astype('boolean')
         data['couvrefeux'] = date_range.map(
             pendant_couvrefeux).astype('boolean')
         self.logger.info("Variables de confinement intégrées")
@@ -158,8 +158,8 @@ class SociologicalFeatures(BaseFeature):
     
     def include_COVID(self, date_range:pd.DatetimeIndex):
         self.logger.info("Intégration du COVID")
-        start = dt.datetime(2017, 2, 28)
-        end = dt.datetime(2018, 1, 1)
+        start = dt.datetime(2020, 2, 1)
+        end = dt.datetime(2021, 12, 31)
 
         df = pd.DataFrame(index=date_range)
         # df.set_index('date', inplace=True)
@@ -196,5 +196,6 @@ class SociologicalFeatures(BaseFeature):
         data = data.join(self.include_lockdown(date_range))
         data = data.join(self.include_ramadan(date_range))
         data = data.join(self.include_HNFC_moving(date_range))
+        data = data.join(self.include_COVID(date_range))
 
         return data

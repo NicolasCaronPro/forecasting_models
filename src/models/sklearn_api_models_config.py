@@ -7,20 +7,19 @@ if __name__ == '__main__':
     import argparse
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    logFormatter = logging.Formatter(
-        "%(asctime)s [%(levelname)-5.5s]  %(message)s")
+    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
 
     logger.info('Handler pour afficher les logs dans le terminal')
     streamHandler = logging.StreamHandler(stream=sys.stdout)
     streamHandler.setFormatter(logFormatter)
     logger.addHandler(streamHandler)
     script_path = f'{os.path.dirname(os.path.abspath(__file__))}/../'
-    logger.info(
-        f'Ajouter le script pour retrouver les modules : {script_path}')
+    logger.info(f'Ajouter le script pour retrouver les modules : {script_path}')
     sys.path.insert(0, script_path)
 
-from src.models.sklearn_models import *
+from src.models.sklearn_api_model import *
 from src.models.loss import *
+from src.models.obectives import *
 
 
 def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric=None, params: dict = None) -> Union[Model, ModelTree]:
@@ -63,7 +62,7 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
         model = config_prophet(device, task_type, params)
     else:
         raise ValueError(f"Unrecognized model: {model_type}")
-
+    
     # Check if the model is a tree-based model
     tree_based_models = (DecisionTreeClassifier, DecisionTreeRegressor,
                          RandomForestClassifier, RandomForestRegressor,
@@ -104,15 +103,7 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
     :param task_type : regression or classification
     :params : config parameters
     """
-    loss_metrics = {
-        weighted_rmse: weighted_rmse_obj,
-        percentiles_weighted_rmse: percentiles_weighted_rmse_obj,
-        root_mean_squared_error: 'reg:squarederror',
-        mean_squared_error: 'reg:squarederror',
-        mean_absolute_error: 'reg:absoluteerror',
-        root_mean_squared_log_error: 'reg:squaredlogerror',
-        mean_squared_log_error: 'reg:squaredlogerror'
-    }
+
     if params is None:
         # Random parametring
         params = {
@@ -161,7 +152,6 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
         return XGBClassifier(**params,
                              )
 
-
 def config_lightGBM(device, task_type, params=None) -> Union[LGBMClassifier, LGBMRegressor]:
     """
     Returns a lightGBM model define by params
@@ -193,7 +183,6 @@ def config_lightGBM(device, task_type, params=None) -> Union[LGBMClassifier, LGB
     else:
         return LGBMClassifier(**params)
 
-
 def config_ngboost(device, task_type, params=None) -> Union[NGBClassifier, NGBRegressor]:
     """
     Returns a lightGBM model define by params
@@ -220,7 +209,6 @@ def config_ngboost(device, task_type, params=None) -> Union[NGBClassifier, NGBRe
     else:
         return NGBClassifier(**params)
 
-
 def config_svm(device, task_type, params=None) -> Union[SVC, SVR]:
     """
     Returns a svm model define by params
@@ -241,7 +229,6 @@ def config_svm(device, task_type, params=None) -> Union[SVC, SVR]:
         return SVR(**params)
     else:
         return SVC(**params, probability=True)
-
 
 def config_random_forest(device, task_type, params=None) -> Union[RandomForestClassifier, RandomForestRegressor]:
     """
@@ -267,7 +254,6 @@ def config_random_forest(device, task_type, params=None) -> Union[RandomForestCl
     else:
         return RandomForestClassifier(**params)
 
-
 def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeClassifier, DecisionTreeRegressor]:
     """
     Returns a decision_tree model define by params
@@ -291,8 +277,7 @@ def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeCl
         return DecisionTreeRegressor(**params)
     else:
         return DecisionTreeClassifier(**params)
-
-
+    
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(
@@ -343,7 +328,7 @@ if __name__ == '__main__':
         logger.info(
             f'Configuration du modèle XGBoost pour la {task_type} sur : {device} avec une loss {loss}')
         model = get_model(model_type='xgboost', name=name, device=device,
-                          task_type=task_type, params=params, loss='rmse')
+                          task_type=task_type, params=params, test_metrics='rmse')
 
         logger.info('Fit du modèle avec les données d entraînement')
         model.fit(X_train, y_train, optimization='grid',
@@ -376,10 +361,10 @@ if __name__ == '__main__':
         check_and_create_path(Path('./Test') / name)
         # Usage example:
         logger.info('Initialize base models')
-        xgb_model = Model(XGBRegressor(), test_metric='rmse', name='xgb')
-        lgb_model = Model(LGBMRegressor(), test_metric='rmse', name='lgb')
+        xgb_model = Model(XGBRegressor(), loss='rmse', name='xgb')
+        lgb_model = Model(LGBMRegressor(), loss='rmse', name='lgb')
         ngb_model = Model(NGBRegressor(
-            Dist=Normal, Score=LogScore), test_metric='rmse', name='ngb')
+            Dist=Normal, Score=LogScore), loss='rmse', name='ngb')
 
         logger.info('Initialize fusion model')
         fusion_model = ModelFusion(
@@ -400,7 +385,7 @@ if __name__ == '__main__':
         features_name = [f"feature_{i}" for i in range(X_train.shape[1])]
 
         logger.info('Afficher l importance des caractéristiques')
-        fusion_model.plot_features_importance(X_set=[X_train, X_train, X_train], y_set=y_train, names=features_name,
+        fusion_model.plot_features_importance(X=[X_train, X_train, X_train], y_set=y_train, names=features_name,
                                               outname="train_importance", dir_output=Path("./Test") / name, mode='bar', figsize=(50, 25))
 
         logger.info(

@@ -46,3 +46,22 @@ class MultiTargetEncoder(BaseEstimator, TransformerMixin):
     def set_output(self, transform):
         # This method can be used to handle `set_output` introduced in sklearn 1.2
         return self
+    
+    def get_feature_names_out(self, *args, **params):
+        pass
+    
+
+
+class BooleanEncoder(BaseEstimator, TransformerMixin):
+    """ Convert booleans into 0/1 """
+    def __init__(self):
+        super().__init__()
+
+    def fit(self, X, y=None):
+        return self
+    
+    def transform(self, X):
+        return X.astype('int')
+    
+    def get_feature_names_out(self, *args, **params):
+        pass
