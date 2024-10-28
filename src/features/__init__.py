@@ -8,3 +8,4 @@ from .meteorological_features import MeteorologicalFeatures
 from .sociological_features import SociologicalFeatures
 from .sports_features import SportsCompetitionFeatures
 from .traffic_features import TrafficFeatures
+from .population_features import PopulationFeatures
