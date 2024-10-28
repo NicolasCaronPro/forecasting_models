@@ -1,4 +1,5 @@
 from tools import *
+from prophet import Prophet
 from xgboost import XGBClassifier, XGBRegressor
 from ngboost import NGBClassifier, NGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -34,7 +35,7 @@ import pandas as pd
 from src.models.loss import metrics
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
-    def __init__(self, model, loss: str = 'log_loss', name='Model'):
+    def __init__(self, model, loss: Union[str, List] = 'log_loss', name='Model'):
         """
         Initialize the CustomModel class.
 
@@ -183,14 +184,19 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         y_pred = self.predict(X)
         if single_score:
             # print("Scoring with single score")
+            if isinstance(self.loss, List):
+                loss = self.loss[0]
+            else:
+                loss = self.loss
             for metric_name, func in metrics.items():
-                if self.loss == metric_name:
+                if loss == metric_name:
                     return func(y, y_pred)
-            raise ValueError(f"Unknown loss function: {self.loss}")
+            raise ValueError(f"Unknown loss function: {loss}")
         scores = {}
 
         for metric_name, func in metrics.items():
-            scores[metric_name] = func(y, y_pred)
+            if metric_name in self.loss:
+                scores[metric_name] = func(y, y_pred)
 
         return scores
 
