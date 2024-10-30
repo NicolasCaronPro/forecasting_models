@@ -179,6 +179,7 @@ class Location():
                 self.region_trends = REGION_TRENDS[reg]
         self.__shape = None
         self.__centroid = None
+        self.__list_code = None
         # self.scale = Scale.COORDS
 
     def get_name(self, mode: int = 0) -> str:
@@ -205,13 +206,18 @@ class Location():
 
     def get_shape(self) -> Polygon:
         if self.__shape is None:
-            self.__shape, self.__centroid = self.__influence_shape()
+            self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
         return self.__shape
 
     def get_centroid(self) -> Point:
         if self.__centroid is None:
             self.__shape, self.__centroid = self.__influence_shape()
         return self.__centroid
+
+    def get_list_code(self) -> List[str]:
+        if self.__list_code is None:
+            self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
+        return self.__list_code
 
     def is_in_shape(self, point: Point) -> bool:
         return self.get_shape().contains(point)
@@ -237,6 +243,8 @@ class Location():
         df_tx = df_tx.rename(columns={'codegeo': 'code_geo'})
         df_tx['code_geo'] = df_tx['code_geo'].astype(str)
 
+        list_code = df_tx['code_geo'].tolist()
+
         df_tx = df_tx.merge(df_code, on='code_geo')
         df_tx = gpd.GeoDataFrame(
             pd.merge(df_tx, geom, on='code_geo', how='left'))
@@ -259,7 +267,7 @@ class Location():
 
         final_polygon = Polygon(unioned_polygon.exterior)
 
-        return final_polygon, df_tx['centroid'].values[0]
+        return final_polygon, df_tx['centroid'].values[0], list_code
 
     def filter_points(self, list_points: List[Point], n_points: int = 5, buffer_range: int = 10000, buffer_incr: int = 250, verbose=False) -> gpd.GeoDataFrame:
         points_df = gpd.GeoDataFrame({'points': list_points})
