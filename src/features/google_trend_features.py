@@ -127,8 +127,8 @@ class GoogleTrendFeatures(BaseFeature):
         else:
             self.logger.info(
                 "On charge les données de Google Trends depuis le fichier")
-            all_words_df = pd.read_csv(
-                feature_dir / file, parse_dates=['date'])
+            all_words_df = pd.read_csv(feature_dir / file)
+            all_words_df['date'] = pd.to_datetime(all_words_df['date'])
             # all_words_df.drop(columns=["trend_tabac", "trend_alcool", "trend_drogue", "trend_diabète", "trend_obésité",
             #                            "trend_cancer", "trend_maladie rénale", "trend_maladie cardiaque", "trend_maladie de Crohn",
             #                            "trend_colite ulcéreuse"], inplace=True)

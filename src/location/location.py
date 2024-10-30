@@ -159,11 +159,13 @@ class Location():
         self.name = name
         if coordinates == (None, None):
             self.coordinates = find_coordinates_etab(self.get_name(mode=1))
+
             if self.coordinates != (None, None):
                 self.scale = Scale.ETAB
         else:
             self.coordinates = coordinates
             self.scale = Scale.COORDS
+
         city_info = coord_info(self.coordinates)
         self.city = city_info['city']
         self.departement = city_info['departement']

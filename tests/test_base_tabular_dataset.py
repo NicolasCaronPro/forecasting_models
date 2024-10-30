@@ -1,16 +1,16 @@
+import pathlib
+import logging
+import datetime as dt
+from src.datasets.base_tabular_dataset import BaseTabularDataset
+import src.features as ft
+import pandas as pd
+from src.encoding.tools import create_encoding_pipeline
+from src.encoding.encoders import *
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..')))
-from src.encoding.encoders import *
-from src.encoding.tools import create_encoding_pipeline
-import pandas as pd
-import src.features as ft
-from src.datasets.base_tabular_dataset import BaseTabularDataset
-import datetime as dt
-import logging
-import pathlib
 pd.set_option('display.max_columns', None)
 
 # Define a logger used by all modules
@@ -31,11 +31,11 @@ fetch_config = {
     "etablissement": "CHU Dijon",
     "departement": "21",
     'region': 'BOURGOGNE'
-    }
+}
 
 # Select the features to be used in the dataset
 ars_features_class = [
-    ft.HopitalFeatures,
+    ft.HospitalFeatures,
     ft.AirQualityFeatures,
     ft.EpidemiologicalFeatures,
     # ft.FireFightersFeatures(include_calls=False),
@@ -44,7 +44,7 @@ ars_features_class = [
     ft.SociologicalFeatures,
     ft.SportsCompetitionFeatures,
     ft.TrafficFeatures
-    ]
+]
 
 # Select the target columns to be predicted
 # target_colomns = ['nb_vers_hospit']
@@ -105,11 +105,12 @@ dataset_config = {
     'targets_rolling_window': 7,
     'targets_history_shifts': range(1, 14, 1),
     'targets_history_rolling_windows': [7, 14],
-    'drop_constant_thr':1.0,
+    'drop_constant_thr': 1.0,
     'data_dir': root_dir / 'data'
-    }
+}
 
-baseTabularDataset = BaseTabularDataset(features_class=ars_features_class, logger=logger, fetch_config=fetch_config, getter_config=dataset_config)
+baseTabularDataset = BaseTabularDataset(
+    features_classes=ars_features_class, logger=logger, fetch_config=fetch_config, getter_config=dataset_config)
 # print(baseTabularDataset.data.columns.to_list())
 # liste = ['O3_FR26005%%mean_7J', 'target_Total_CHU Dijon']
 # baseTabularDataset = baseTabularDataset.get_dataset(**dataset_config, features_names=liste)
