@@ -33,7 +33,7 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info("On regarde la qualité de l'air")
 
         # On récupère les codes des stations de mesure de la qualité de l'air pour le département
-        df = pd.read_csv(feature_dir + '/stations_geodair.csv',
+        df = pd.read_csv(feature_dir / 'stations_geodair.csv',
                          sep=';', dtype={'departement': str})
         
         
@@ -54,9 +54,9 @@ class AirQualityFeatures(BaseFeature):
         self.logger.info(f"On s'intéresse aux codes : {', '.join(CODES)}")
 
 
-        archived_data_dir = Path(feature_dir + 'archived')
+        archived_data_dir = Path(feature_dir / 'archived')
         archived_data_dir.mkdir(exist_ok=True, parents=True)
-        if not (archived_data_dir / '/pollution_historique.feather').is_file():
+        if not (archived_data_dir / 'pollution_historique.feather').is_file():
             self.logger.info("On calcule le dataframe d'archive de l'air")
 
             dico: Dict[str, pd.DataFrame] = {}
@@ -126,7 +126,7 @@ class AirQualityFeatures(BaseFeature):
         else:
             self.logger.info("On relit le dataframe d'archive de l'air")
             data = pd.read_feather(
-                archived_data_dir + 'pollution_historique.feather')
+                archived_data_dir / 'pollution_historique.feather')
 
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")

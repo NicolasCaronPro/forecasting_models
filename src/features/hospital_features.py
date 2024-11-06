@@ -26,7 +26,7 @@ from src.location.location import Location
 from pathlib import Path
 
 
-class HopitalFeatures(BaseFeature):
+class HospitalFeatures(BaseFeature):
     """
     Represents features related to a hospital.
 
@@ -60,7 +60,7 @@ class HopitalFeatures(BaseFeature):
             data.drop(axis=1, columns="annee", inplace=True)
 
         data.rename(columns={
-            "Total": f"nb_emmergencies_{etablissement}", "date_entree": "date"}, inplace=True)
+            "Total": f"nb_emmergencies", "date_entree": "date"}, inplace=True)
 
         if data["date"].dtype != "datetime64[ns]":
             data["date"] = pd.to_datetime(data["date"])
@@ -68,7 +68,7 @@ class HopitalFeatures(BaseFeature):
         data.sort_values(by="date", inplace=True)
         data.set_index('date', inplace=True)
 
-        data.dropna(subset=[f"nb_emmergencies_{etablissement}"], inplace=True)
+        data.dropna(subset=[f"nb_emmergencies"], inplace=True)
 
         return data
 
@@ -165,20 +165,21 @@ class HopitalFeatures(BaseFeature):
 
         # Set starting date, default is 01/01/1970
         start_date = kwargs.get("start_date")
-        # start_date = dt.datetime.strptime(
-        #     start_date, "%Y-%M-%d") if isinstance(start_date, str) else start_date
+        start_date = dt.datetime.strptime(
+            start_date, "%Y-%M-%d") if isinstance(start_date, str) else start_date
 
         # Set ending date, default is today's date
         stop_date = kwargs.get("stop_date")
-        # stop_date = dt.datetime.strptime(
-        #     stop_date, "%Y-%M-%d") if isinstance(stop_date, str) else stop_date
+        stop_date = dt.datetime.strptime(
+            stop_date, "%Y-%M-%d") if isinstance(stop_date, str) else stop_date
         # print(f"Fetching data from {start_date} to {stop_date}")
         date_range = pd.date_range(
-            start=start_date, end=stop_date, freq='1D', name="date")
+            start=start_date, end=stop_date, freq='1D', name="date", )
 
         data = pd.DataFrame(index=date_range)
-        data = data.merge(self.include_nb_emmergencies(
-            start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir), how='left', left_index=True, right_index=True)
+
+        data = data.join(self.include_nb_emmergencies(
+            start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
 
         # data = data.join(self.include_nb_hospitalized_np_from_emmergencies_adults(start_date, stop_date, feature_dir))
 

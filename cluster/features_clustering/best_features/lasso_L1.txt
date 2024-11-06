@@ -1,0 +1,29 @@
+['nb_emmergencies%%J-7']
+7.800000000000007
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1']
+7.600000000000007
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2']
+5.200000000000005
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3']
+4.400000000000004
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences']
+3.400000000000003
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative']
+3.0000000000000027
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year']
+2.6000000000000023
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays']
+2.400000000000002
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7']
+2.200000000000002
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1']
+2.0000000000000018
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'inc_diarrhee%%J-21']
+1.6000000000000019
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'inc_diarrhee%%J-21', 'trend_hopital%%J-3', 'inc_diarrhee%%J-9', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7']
+1.400000000000002
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'inc_diarrhee%%J-21', 'trend_hopital%%J-3', 'inc_diarrhee%%J-9', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7', 'trend_crampes abdominales%%J-7', 'trend_médecin']
+1.200000000000002
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'inc_diarrhee%%J-21', 'trend_hopital%%J-3', 'inc_diarrhee%%J-9', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7', 'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J']
+1.000000000000002
+['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'arrivees_urgences', 'NO2_FR26094_derivative', 'year', 'eveBankHolidays', 'meteo_night_CHU DIJON_0_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'inc_diarrhee%%J-21', 'trend_hopital%%J-3', 'inc_diarrhee%%J-9', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7', 'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J', 'trend_paralysie%%J-7', 'NO2_FR26094%%mean_7J', 'trend_accident de voiture%%mean_7J', 'trend_paralysie%%mean_7J', 'meteo_CHU DIJON_0_wdir%%J-7', 'meteo_CHU DIJON_0_tavg%%mean_7J', 'trend_insuffisance cardiaque', 'trend_fièvre%%J-7', 'trend_infection respiratoire_derivative']

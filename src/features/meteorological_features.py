@@ -44,7 +44,7 @@ class MeteorologicalFeatures(BaseFeature):
         #self.data = pd.merge(self.data, data, left_index=True, how='left', right_index=True)
         #self.data.rename({u: "meteo_" +  u for u in data + str(self.location.name)}, axis=1, inplace=True)
 
-        data.columns = ["meteo_" +  col + "_" + str(location.name) for col in data.columns]
+        data.columns = ["meteo_" +  col for col in data.columns]
         return data
 
     def fetch_data_function(self, *args, **kwargs) -> None:

@@ -5,13 +5,14 @@ import datetime as dt
 import os
 import sys
 from src.tools.utils import clean_dataframe
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 from copy import deepcopy
 import matplotlib.pyplot as plt
 import abc
 import numpy as np
 import logging
 from warnings import simplefilter
+from src.location import Location
 simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 
 
@@ -51,7 +52,7 @@ class BaseFeature(object):
         # assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
         # ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
 
-        self.logger.info("Initialisation de la classe %s",self.name)
+        # self.logger.info("Initialisation de la classe %s",self.name)
 
         # assert 'root_dir' in self.config, "root_dir must be provided in config"
         # self.data_dir = self.config.get("root_dir")
@@ -186,6 +187,7 @@ class BaseFeature(object):
             for dec in shift:
                 # self.logger.info(f"  - Ajout de la feature {feature_name}_J-{dec}")
                 data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}"].shift(dec)
+                data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}%%J{-1*dec}"].bfill(limit_area='outside')
 
             # On ajoute la moyenne glissante, standard deviation sur FENETRE_GLISSANTE jours
             for rw in rolling_window:
@@ -193,8 +195,10 @@ class BaseFeature(object):
                 if rw > 0 and feature_name in self.numeric_columns:
                     data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}"].rolling(
                         window=rw, closed="left").mean()
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(limit_area='outside')
                     data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}"].rolling(
                         window=rw, closed="left").std()
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(limit_area='outside')
 
                     # TODO: Ajouter le mode, la valeur majoritaire, la fréquence relatives. pour les données catégorielles
 
@@ -209,7 +213,18 @@ class BaseFeature(object):
                 stop_date = dt.datetime.strptime(stop_date, "%d-%m-%Y")
             assert start_date <= stop_date, "start date must be before stop date"
             
-            filename = kwargs.pop('filename', 'data.feather')
+            location: Location = kwargs.pop('location', None)
+            assert isinstance(location, Location) or isinstance(location, str), f"location must be of type Location, str, not {type(location)}"
+
+            if isinstance(location, str):
+                location = Location(name=location)
+
+            filename: str = kwargs.pop('filename', f'data_{location.name}.feather')
+            if not filename.endswith('.feather'):
+                filename = filename + '.feather'
+
+            if not filename.endswith(f'_{location.name}.feather'):
+                filename = filename[:-len('.feather')] + f'_{location.name}.feather'
 
             features_dir = kwargs.pop('features_dir', f'{os.getcwd()}/data/features')
             if isinstance(features_dir, str):
@@ -219,24 +234,27 @@ class BaseFeature(object):
 
             if not os.path.isdir(feature_dir):
                 os.makedirs(feature_dir, exist_ok=True)
-
             
             if os.path.isfile(feature_dir / filename):
                 self.logger.info(f"Data already fetched for {self.name}")
                 # TODO: check for updates
                 data = pd.read_feather(feature_dir / filename)
+
                 if data is None or len(data)==0:
                     self.logger.warning("No data found")
 
                 # Check if update is needed
                 if data.index.max() < stop_date:
                     self.logger.warning("Updating data")
-                    data = pd.concat(data, func(self, data.index.max(), stop_date, *args, **kwargs))
+                    data = pd.concat(data, func(self, start_date=data.index.max(), stop_date=stop_date, location=location, *args, **kwargs))
+                    self.save_dataframe(data, feature_dir, filename=filename)
+
             else:
                 self.logger.info(f"Fetching data for {self.name}...")
 
                 # Fetch the data
-                data:pd.DataFrame = func(self, start_date=start_date, stop_date=stop_date, *args, **kwargs)
+                data:pd.DataFrame = func(self, start_date=start_date, stop_date=stop_date, location=location, *args, **kwargs)
+                # Check that    
                 self.save_dataframe(data, feature_dir, filename=filename)
 
             # # Identifier les colonnes catégorielles
@@ -267,10 +285,11 @@ class BaseFeature(object):
     def get_data(self,
         from_date: Optional[Union[str, dt.datetime]] = None,
         to_date: Optional[Union[str, dt.datetime]] = None,
+        location: Optional[Location] = None,
         features_names: Optional[List[str]] = None,
         freq: Optional[str] = None,
-        shift: Optional[Union[int, List[int]]] = None,
-        rolling_window: Optional[Union[int, List[int]]] = None,
+        shift: Optional[Union[int, List[int]]] = [],
+        rolling_window: Optional[Union[int, List[int]]] = [],
         drop_constant_thr = 1.0,
         path: Optional[Union[str, pathlib.Path]] = None,
         filename: Optional[str] = None) -> pd.DataFrame:
@@ -315,6 +334,12 @@ class BaseFeature(object):
         if filename is None:
             filename = 'data.feather'
 
+        if not filename.endswith('.feather'):
+            filename = filename + '.feather'
+
+        if not filename.endswith(f'_{location.name}.feather'):
+            filename = filename[:-len('.feather')] + f'_{location.name}.feather'
+
         try:
             data = self.load(path=path, filename=filename)
         except FileNotFoundError:
@@ -332,8 +357,8 @@ class BaseFeature(object):
         data = clean_dataframe(data=data, drop_constant_thr=drop_constant_thr, exclude_categories=True, exclude_booleans=True)
 
         if shift or rolling_window:
-            if date_min > from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0))):
-                raise ValueError(f"{self.name} data only available from {date_min}, while shift and rolling_window require data from {from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0)))}")
+            # if date_min > from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0))):
+            #     raise ValueError(f"{self.name} data only available from {date_min}, while shift and rolling_window require data from {from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0)))}")
             
             # Si %% est présent dans un des noms des colonnes, alors on préviens l'utilisateur que l'augmentation des features a déjà été effectuée sur ces données
             if [col for col in data.columns if '%%' in col] != []:

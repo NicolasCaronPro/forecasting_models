@@ -166,6 +166,7 @@ class Location():
         else:
             self.coordinates = coordinates
             self.scale = Scale.COORDS
+
         city_info = coord_info(self.coordinates)
         self.city = city_info['city']
         self.departement = city_info['departement']
