@@ -14,11 +14,25 @@ import logging
 import sys
 import pathlib
 
+
+def categorize(df, column, bins=[0, 0.1, 0.3, 0.7, 0.9, 0.97, 1.0], labels=None, drop=False):
+    if labels == None and type(bins) == int:
+        labels = [f'{i+1}' for i in range(bins)]
+    elif labels == None and type(bins) == list:
+        labels = [f'{i+1}' for i in range(len(bins) - 1)]
+    df[f'{column}_category'] = pd.qcut(df[column], q=bins, labels=labels)
+    df[f'{column}_category'] = df[f'{column}_category'].astype('category')
+    if drop:
+        df.drop(columns=[column], inplace=True)
+    return df
+
+
 def extract_column_base(col_name: str, separator='##') -> str:
     # Extraction du radical avant toute transformation (par ex: encodage, shift, aggregation)
     if separator in col_name:
         return col_name.split(separator)[0]
     return col_name
+
 
 def find_matching_columns(df: pd.DataFrame, base_columns: List[str], to_print=False) -> List[str]:
     """ Trouve les colonnes dans un DataFrame qui correspondent aux bases des noms de colonnes spécifiées. """
@@ -35,8 +49,9 @@ def find_matching_columns(df: pd.DataFrame, base_columns: List[str], to_print=Fa
             #
     return matching_columns
 
+
 class BaseTabularDataset():
-    def __init__(self, features_class: List[Union[ft.BaseFeature, str]], name:str = None, logger=None, fetch_config: dict = None, getter_config:dict = None) -> None:
+    def __init__(self, features_class: List[Union[ft.BaseFeature, str]], name: str = None, logger=None, fetch_config: dict = None, getter_config: dict = None) -> None:
 
         # On initialise name
         if name is None:
@@ -64,7 +79,7 @@ class BaseTabularDataset():
         assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
         ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
 
-        self.logger.info("Initialisation de la classe %s",self.name)
+        self.logger.info("Initialisation de la classe %s", self.name)
         # Initialize each features object and fetch their data and then get them for the specified range
         self.features: List[Union[ft.BaseFeature, str]] = []
         self.targets_names = []
@@ -95,7 +110,7 @@ class BaseTabularDataset():
 
         if fetch_config is not None:
             self.fetch_dataset(**fetch_config)
-        
+
         if getter_config is not None:
             self.get_dataset(**getter_config, inplace=True)
 
@@ -142,7 +157,8 @@ class BaseTabularDataset():
         for feature in self.features:
             self.logger.info(f"Fetching data for {feature.name}")
             self.logger.setLevel(logging.WARNING)
-            feature.fetch_data(data_start, data_stop, etablissement=etablissement, departement=departement, region=region, features_dir=data_dir / 'features')
+            feature.fetch_data(data_start, data_stop, etablissement=etablissement,
+                               departement=departement, region=region, features_dir=data_dir / 'features')
             self.logger.setLevel(logging.INFO)
         # self.data = self.data.join(feature.data)
 
@@ -161,17 +177,21 @@ class BaseTabularDataset():
 
         if not self.X_train.empty:
             # Do not encode data that are the same unit as the target
-            to_encode = [col for col in self.X_train.columns if not col.startswith('Total_CHU Dijon') and not col.startswith('nb_vers_hospit')]
-            not_to_encode = [col for col in self.X_train.columns if col.startswith('Total_CHU Dijon') or col.startswith('nb_vers_hospit')]
-            print(f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
+            to_encode = [col for col in self.X_train.columns if not col.startswith(
+                'Total_CHU Dijon') and not col.startswith('nb_vers_hospit')]
+            not_to_encode = [col for col in self.X_train.columns if col.startswith(
+                'Total_CHU Dijon') or col.startswith('nb_vers_hospit')]
+            print(
+                f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
 
             self.enc_X_train = pipeline.fit_transform(
                 X=self.X_train[to_encode], y=self.y_train)
             # print(self.enc_X_train.iloc[0])
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
-            
-            self.enc_X_train = pd.concat([self.enc_X_train, self.X_train[not_to_encode]], axis=1)
+
+            self.enc_X_train = pd.concat(
+                [self.enc_X_train, self.X_train[not_to_encode]], axis=1)
             # print(self.enc_X_train.columns.to_list())
 
             # print(self.enc_X_train.columns.value_counts().loc[lambda x: x > 1])
@@ -181,7 +201,8 @@ class BaseTabularDataset():
                 self.enc_X_val = pipeline.transform(self.X_val[to_encode])
                 self.enc_X_val.columns = [
                     col.split('__')[-1] for col in self.enc_X_val.columns]
-                self.enc_X_val = pd.concat([self.enc_X_val, self.X_val[not_to_encode]], axis=1)
+                self.enc_X_val = pd.concat(
+                    [self.enc_X_val, self.X_val[not_to_encode]], axis=1)
 
                 encoded_data.append(self.enc_X_val)
 
@@ -189,7 +210,8 @@ class BaseTabularDataset():
                 self.enc_X_test = pipeline.transform(self.X_test[to_encode])
                 self.enc_X_test.columns = [
                     col.split('__')[-1] for col in self.enc_X_test.columns]
-                self.enc_X_test = pd.concat([self.enc_X_test, self.X_test[not_to_encode]], axis=1)
+                self.enc_X_test = pd.concat(
+                    [self.enc_X_test, self.X_test[not_to_encode]], axis=1)
                 encoded_data.append(self.enc_X_test)
 
         self.enc_data = pd.concat(encoded_data, axis=0)
@@ -225,13 +247,15 @@ class BaseTabularDataset():
             else:
                 raise ValueError(
                     "Test set is not available, you need to split the data first")
+
     def remove_constant_columns_from_splits(self):
         """
         Remove columns that are constant in either the train or test set.
         Ensures that the same columns are dropped from both sets.
         """
         # Identify constant columns in the train set
-        train_constant_cols = list_constant_columns(self.train_set, threshold=1.0, exclude_booleans=True, exclude_categories=True)
+        train_constant_cols = list_constant_columns(
+            self.train_set, threshold=1.0, exclude_booleans=True, exclude_categories=True)
         # test_constant_cols = []
         # val_constant_cols = []
 
@@ -242,7 +266,7 @@ class BaseTabularDataset():
         # if not self.val_set.empty:
         #     # Identify constant columns in the val set
         #     val_constant_cols = [col for col in self.val_set.columns if self.val_set[col].dtype != 'category' and self.val_set[col].std() == 0]
-        
+
         # Combine constant columns from both sets
         # constant_columns = set(train_constant_cols).union(set(test_constant_cols)).union(set(val_constant_cols))
         constant_columns = train_constant_cols
@@ -256,7 +280,8 @@ class BaseTabularDataset():
 
         self.data.drop(columns=constant_columns, inplace=True)
 
-        print(f"Dropped {len(constant_columns)} constant columns from both sets: {constant_columns}")
+        print(
+            f"Dropped {len(constant_columns)} constant columns from both sets: {constant_columns}")
 
     def split(self, train_size: Optional[Union[float, int]] = None,
               test_size: Optional[Union[float, int]] = None,
@@ -370,9 +395,10 @@ class BaseTabularDataset():
 
     def get_targets_names(self) -> List[str]:
         return self.targets_names
-    
+
     def create_target(self,
                       targets,
+                      bins: Optional[int] = None,
                       targets_shift: Optional[int] = None,
                       targets_rolling_window: Optional[int] = None,
                       targets_history_shifts: Optional[int] = [],
@@ -381,27 +407,30 @@ class BaseTabularDataset():
         self.targets_names = []
         for target in targets:
             target_name = f"target_{target}"
-                
 
             if (targets_shift is None or targets_shift >= 0):
                 if "%%" in target_name:
                     targets_shift = 0
                 else:
-                    self.logger.warning("Not shifting the target is not allowed as some features might not be available,\nWill use a default shift of -1, matching the value for the next sample")
+                    self.logger.warning(
+                        "Not shifting the target is not allowed as some features might not be available,\nWill use a default shift of -1, matching the value for the next sample")
                     targets_shift = -1
-            
+
             # df = pd.DataFrame()
             # df['brut'] = self.data[target]
             if targets_rolling_window is None or targets_rolling_window == 0:
                 if targets_shift != 0:
-                    self.logger.info(f"Creating the target columns as {target} shifted by {targets_shift}")
+                    self.logger.info(
+                        f"Creating the target columns as {target} shifted by {targets_shift}")
                     target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
-                    self.data[target_name] = self.data[target].shift(targets_shift)
+                    self.data[target_name] = self.data[target].shift(
+                        targets_shift)
                     self.targets_names.append(target_name)
                     # df['shift_final'] = self.data[target_name]
 
             else:
-                self.logger.info(f"Creating the target columns as a rolling mean of {target} on {targets_rolling_window} rows shifted by {targets_shift}")
+                self.logger.info(
+                    f"Creating the target columns as a rolling mean of {target} on {targets_rolling_window} rows shifted by {targets_shift}")
                 # if targets_shift >= 0 or targets_shift is None or abs(targets_shift) < targets_rolling_window:
                 # Using a rolling mean of the target without shifting (or using a positive shift) will compute means on the past
                 # and might produce a target leak if history of the variable is used,
@@ -409,39 +438,49 @@ class BaseTabularDataset():
                 target_name = f"{target_name}{'%%J+' if targets_shift < 0 else '%%J-' if targets_shift > 0 else ''}{str(abs(targets_shift))}%%mean_{str(targets_rolling_window)}J"
 
                 if targets_shift != 0:
-                    self.data[target_name] = self.data[target].shift(targets_shift-targets_rolling_window)
+                    self.data[target_name] = self.data[target].shift(
+                        targets_shift-targets_rolling_window)
                 else:
                     self.data[target_name] = self.data[target]
                 # df['shift'] = self.data[target_name]
                 # self.logger.info("Aggregating the target columns...")
-                self.data[target_name] = self.data[target_name].rolling(targets_rolling_window).mean()
+                self.data[target_name] = self.data[target_name].rolling(
+                    targets_rolling_window).mean()
                 # df['rolling'] = self.data[target_name]
                 self.targets_names.append(target_name)
 
             self.logger.info("Creating target history columns...")
             for shift in targets_history_shifts:
                 if shift < abs(targets_shift) + targets_rolling_window:
-                    self.logger.warning(f"The target history shift {shift} is not high enough considering that the target is shifted and/or is a rolling mean, will be ignored as it refered to future values")
+                    self.logger.warning(
+                        f"The target history shift {shift} is not high enough considering that the target is shifted and/or is a rolling mean, will be ignored as it refered to future values")
                     continue
                 # shift = shift -1
-                self.data[f"{target_name}%%J-{shift}"] = self.data[target_name].shift(shift)
+                self.data[f"{target_name}%%J-{shift}"] = self.data[target_name].shift(
+                    shift)
 
             for rw in targets_history_rolling_windows:
-                self.data[f'{target_name}%%mean_{rw}J%%J-{abs(targets_shift) + targets_rolling_window}'] = self.data[target_name].shift((abs(targets_shift) + targets_rolling_window)).rolling(rw).mean()
-                self.data[f'{target_name}%%std{rw}J%%J-{abs(targets_shift) + targets_rolling_window}'] = self.data[target_name].shift((abs(targets_shift) + targets_rolling_window)).rolling(rw).std()
+                self.data[f'{target_name}%%mean_{rw}J%%J-{abs(targets_shift) + targets_rolling_window}'] = self.data[target_name].shift(
+                    (abs(targets_shift) + targets_rolling_window)).rolling(rw).mean()
+                self.data[f'{target_name}%%std{rw}J%%J-{abs(targets_shift) + targets_rolling_window}'] = self.data[target_name].shift(
+                    (abs(targets_shift) + targets_rolling_window)).rolling(rw).std()
+
+            if bins:
+                self.data = categorize(
+                    self.data, target_name, bins=bins, drop=True)
 
         # print(df.head(20))
         self.data = self.data.dropna(subset=self.targets_names)
-    
+
     def get_data(self,
-        from_date: Optional[Union[str, dt.datetime]] = None,
-        to_date: Optional[Union[str, dt.datetime]] = None,
-        freq: Optional[str] = None,
-        shift: Optional[int] = None,
-        rolling_window: Optional[Union[int, List[int]]] = None,
-        drop_constant_thr = 1.0,
-        features_dir: Optional[Union[str, pathlib.Path]] = None,
-        filename: Optional[str] = None) -> pd.DataFrame:
+                 from_date: Optional[Union[str, dt.datetime]] = None,
+                 to_date: Optional[Union[str, dt.datetime]] = None,
+                 freq: Optional[str] = None,
+                 shift: Optional[int] = None,
+                 rolling_window: Optional[Union[int, List[int]]] = None,
+                 drop_constant_thr=1.0,
+                 features_dir: Optional[Union[str, pathlib.Path]] = None,
+                 filename: Optional[str] = None) -> pd.DataFrame:
         # if from_date is None:
         #     from_date = self.start
         # assert isinstance(from_date, dt.datetime) or isinstance(
@@ -475,7 +514,8 @@ class BaseTabularDataset():
 
         features_data = []
         for feature in self.features:
-            feature_data = feature.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window, drop_constant_thr=drop_constant_thr, path=features_dir / feature.name, filename=filename)
+            feature_data = feature.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window,
+                                            drop_constant_thr=drop_constant_thr, path=features_dir / feature.name, filename=filename)
             # print(feature_data)
             # data = data.join(feature_data, on='date', how='left')
             features_data.append(feature_data)
@@ -496,8 +536,9 @@ class BaseTabularDataset():
                     features_names: Optional[List[str]] = None,
                     freq: Optional[str] = None,
                     shift: Optional[int] = None,
+                    target_bins: Optional[int] = None,
                     rolling_window: Optional[Union[int, List[int]]] = None,
-                    drop_constant_thr = 1.0,
+                    drop_constant_thr=1.0,
                     data_dir: Optional[Union[str, pathlib.Path]] = None,
                     filename: Optional[str] = None,
                     split_config: Optional[dict] = {},
@@ -505,15 +546,17 @@ class BaseTabularDataset():
                     encoding_pipeline: Pipeline = None,
                     targets_names: Optional[List[str]] = None,
                     targets_shift: Optional[int] = None,
-                    targets_rolling_window: Optional[Union[int, List[int]]] = None,
+                    targets_rolling_window: Optional[Union[int,
+                                                           List[int]]] = None,
                     targets_history_shifts: Optional[int] = [],
-                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
-                    inplace: bool = False) -> None:
+                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = [
+    ],
+            inplace: bool = False) -> None:
         """
         Get the dataset
-        
+
         Parameters
-        
+
         - from_date (Optional[Union[str, dt.datetime]]): Start date of the dataset
         - to_date (Optional[Union[str, dt.datetime]]): End date of the dataset
         - features_names (Optional[List[str]]): List of features names to keep in the dataset
@@ -528,20 +571,22 @@ class BaseTabularDataset():
         - inplace (bool): Modify the dataset in place
 
         """
-        self.logger.info(f"Getting the dataset from {from_date} to {to_date}...")
+        self.logger.info(
+            f"Getting the dataset from {from_date} to {to_date}...")
 
         # TODO: set default dates and freq in function of the features availaibility
-
 
         # Make sure that targets_names is a list of strings
         targets_names = targets_names if isinstance(
             targets_names, list) else [targets_names]
 
         # Filtrage des données en fonction des dates et des colonnes demandées
-        self.data = self.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window, drop_constant_thr=drop_constant_thr, features_dir=data_dir / 'features', filename=filename)
+        self.data = self.get_data(from_date=from_date, to_date=to_date, freq=freq, shift=shift, rolling_window=rolling_window,
+                                  drop_constant_thr=drop_constant_thr, features_dir=data_dir / 'features', filename=filename)
 
         # Créer les targets
-        self.create_target(targets=targets_names, targets_shift=targets_shift, targets_rolling_window=targets_rolling_window, targets_history_shifts=targets_history_shifts, targets_history_rolling_windows = targets_history_rolling_windows)
+        self.create_target(targets=targets_names, targets_shift=targets_shift, targets_rolling_window=targets_rolling_window,
+                           targets_history_shifts=targets_history_shifts, targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins)
 
         # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
@@ -551,12 +596,11 @@ class BaseTabularDataset():
 
             for target in self.targets_names:
                 if target not in features_names:
-                    self.logger.warning("Target %s not in features_names, adding it to continue", target)
+                    self.logger.warning(
+                        "Target %s not in features_names, adding it to continue", target)
                     features_names.append(target)
         else:
             features_names = self.data.columns.to_list()
-
-        
 
         # print(self.data.columns.to_list())
         self.data = self.data[features_names]
@@ -592,7 +636,7 @@ class BaseTabularDataset():
         #     if shift != self.shift or rolling_window != self.rolling_window:
         #         print(shift, self.shift, rolling_window, self.rolling_window)
         #         return True
-            
+
         #     # Si les targets ont changés, il faut recalculer
         #     if set(targets_names) != set(self.targets_names):
         #         return True
@@ -610,7 +654,6 @@ class BaseTabularDataset():
         # Splitting the dataset
         if split_config:
             self.split(**split_config)
-
 
         # Création des X et y
         if create_X_y:
@@ -707,36 +750,49 @@ class BaseTabularDataset():
             self.logger.info("Saving splits...")
             if not dataset_dir.joinpath("train").exists():
                 (dataset_dir / "train").mkdir(parents=True)
-            self.save_dataframe(path=dataset_dir / "train", filename="train_set.feather", data=self.train_set)
+            self.save_dataframe(path=dataset_dir / "train",
+                                filename="train_set.feather", data=self.train_set)
 
             if not self.val_set.empty:
                 if not dataset_dir.joinpath("validation").exists():
                     (dataset_dir / "validation").mkdir(parents=True)
-                self.save_dataframe(path=dataset_dir / "validation", filename="val_set.feather", data=self.val_set)
+                self.save_dataframe(
+                    path=dataset_dir / "validation", filename="val_set.feather", data=self.val_set)
             if not self.test_set.empty:
                 if not dataset_dir.joinpath("test").exists():
                     (dataset_dir / "test").mkdir(parents=True)
-                self.save_dataframe(path=dataset_dir / "test", filename="test_set.feather", data=self.test_set)
-        
+                self.save_dataframe(
+                    path=dataset_dir / "test", filename="test_set.feather", data=self.test_set)
+
         if not self.X_train.empty:
             self.logger.info("Saving X and y...")
-            self.save_dataframe(path=dataset_dir / "train", filename="X_train.feather", data=self.X_train)
-            self.save_dataframe(path=dataset_dir / "train", filename="y_train.feather", data=self.y_train)
+            self.save_dataframe(path=dataset_dir / "train",
+                                filename="X_train.feather", data=self.X_train)
+            self.save_dataframe(path=dataset_dir / "train",
+                                filename="y_train.feather", data=self.y_train)
 
             if not self.X_val.empty:
-                self.save_dataframe(path=dataset_dir / "validation", filename="X_val.feather", data=self.X_val)
-                self.save_dataframe(path=dataset_dir / "validation", filename="y_val.feather", data=self.y_val)
+                self.save_dataframe(
+                    path=dataset_dir / "validation", filename="X_val.feather", data=self.X_val)
+                self.save_dataframe(
+                    path=dataset_dir / "validation", filename="y_val.feather", data=self.y_val)
             if not self.X_test.empty:
-                self.save_dataframe(path=dataset_dir / "test", filename="X_test.feather", data=self.X_test)
-                self.save_dataframe(path=dataset_dir / "test", filename="y_test.feather", data=self.y_test)
+                self.save_dataframe(path=dataset_dir / "test",
+                                    filename="X_test.feather", data=self.X_test)
+                self.save_dataframe(path=dataset_dir / "test",
+                                    filename="y_test.feather", data=self.y_test)
 
         if not self.enc_X_train.empty:
             self.logger.info("Saving encodings...")
-            self.save_dataframe(path=dataset_dir / "train", filename="enc_X_train.feather", data=self.enc_X_train)
+            self.save_dataframe(path=dataset_dir / "train",
+                                filename="enc_X_train.feather", data=self.enc_X_train)
 
             if not self.enc_X_val.empty:
-                self.save_dataframe(path=dataset_dir / "validation", filename="enc_X_val.feather", data=self.enc_X_val)
+                self.save_dataframe(path=dataset_dir / "validation",
+                                    filename="enc_X_val.feather", data=self.enc_X_val)
             if not self.enc_X_test.empty:
-                self.save_dataframe(path=dataset_dir / "test", filename="enc_X_test.feather", data=self.enc_X_test)
+                self.save_dataframe(
+                    path=dataset_dir / "test", filename="enc_X_test.feather", data=self.enc_X_test)
 
-            self.save_dataframe(path=dataset_dir, filename="enc_data.feather", data=self.enc_data)
+            self.save_dataframe(
+                path=dataset_dir, filename="enc_data.feather", data=self.enc_data)
