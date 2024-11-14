@@ -22,7 +22,7 @@ from src.models.loss import *
 from src.models.obectives import *
 
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric=None, params: dict = None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric = None, params: dict = None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -40,13 +40,92 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
     if isinstance(test_metrics, str):
         test_metrics = [test_metrics]
 
-    if eval_metric is not None:
+    # eval_metric = params.get('eval_metric', None)
+    objective = params.get('objective', None)
+
+    # Check if eval_metric and objective are compatible
+    
+    if objective:
+        
+        if eval_metric:
+            # Check that eval metric is compatible with objective
+            is_supported = False
+            if objective in objective_metrics:
+                for metric in objective_metrics[objective]:
+                    if metric == eval_metric:
+                        is_supported = True
+            else:
+                raise ValueError(f'Objective {objective} not supported. Supported objectives are {list(objective_metrics.keys())}')
+            
+            if not is_supported:
+                raise ValueError(f'The {eval_metric} metric is not supported by the {objective} objective.')
+            
+            params.update({'eval_metric': eval_metric})
+        else:
+            if callable(objective): # Its a custom objective
+                if objective in objective_metrics:
+                    eval_metric = objective_metrics[objective][0]
+                else:
+                    raise ValueError(f'{objective} custom objective is unknown and so does not have a default eval metric, please provide one')
+                
+                params.update({'eval_metric': eval_metric})
+    
+            else: # It's a built-in objective
+                # TODO: check if objective specific params are defined
+                
+                if objective in objective_metrics:
+                    eval_metric = objective_metrics[objective][0]
+                else:
+                    raise ValueError(f'{objective} built-in objective is unknown please provide a function instead or a well defined built-in objective')
+
+    else: # Using xgboost's default objective
+        if eval_metric:
+            if task_type == 'regression':
+                if eval_metric not in objective_metrics['reg:squarederror']:
+                    raise ValueError(f'{eval_metric} is not supported by the reg:squarederror objective.')
+            else:
+                if eval_metric not in objective_metrics['binary:logistic']:
+                    raise ValueError(f'{eval_metric} is not supported by the binary:logistic objective.')
+        else:
+            if task_type == 'regression':
+                eval_metric = 'rmse'
+            else:
+                eval_metric = 'aucpr'
+
+    def unique_with_first_preserved(lst):
+        result = []
+
+        # Ajoute le premier élément et le conserve
+        first_element = lst[0]
+        result.append(first_element)
+
+        # Parcourt le reste de la liste
+        for item in lst[1:]:
+            if item not in result:
+                result.append(item)
+
+        return result
+
+    # Add eval_metric at the beginning of test_metric if it's not already there, and move it at the beginning if it's already in the list
+    # if eval_metric is not None:
+    test_metrics.insert(0,eval_metric)
+
+    test_metrics = unique_with_first_preserved(test_metrics)
+
+    test_metrics_f = []
+    for metric in test_metrics:
+        test_metrics_f.append(metrics[metric])
+    test_metrics = test_metrics_f
+
+
+    if params.get('eval_metric', None) is not None:
         eval_metric = metrics[eval_metric]
-    else:
-        eval_metric = metrics[test_metrics[0]]
+        params.update({'eval_metric': eval_metric})
+
+    print(eval_metric)
+
 
     if model_type == 'xgboost':
-        params.update({'eval_metric': eval_metric})
         model = config_xgboost(device, task_type, params)
     elif model_type == 'lightgbm':
         model = config_lightGBM(device, task_type, params)
@@ -122,25 +201,6 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
             'random_state': 42,
             'tree_method': 'hist',
         }
-
-    # Check if eval_metric and objective are compatible
-    if 'objective' in params:
-        objective = params['objective']
-        if 'eval_metric' not in params:
-            for metric, obj in loss_metrics.items():
-                if obj == objective:
-                    params['eval_metric'] = metric
-                    break
-        else:
-            if params['eval_metric'] not in loss_metrics or loss_metrics[params['eval_metric']] != objective:
-                raise ValueError(
-                    f"The eval_metric '{params['eval_metric']}' is not compatible with the custom objective function.")
-    elif 'eval_metric' in params:
-        eval_metric = params['eval_metric']
-        if eval_metric not in loss_metrics:
-            raise ValueError(
-                f"The eval_metric '{eval_metric}' is not compatible with the custom objective function.")
-        params['objective'] = loss_metrics[eval_metric]
 
     if device == 'cuda':
         params['device'] = 'cuda'

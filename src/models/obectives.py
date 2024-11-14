@@ -92,13 +92,44 @@ def rmsle_objective(y_true, y_pred):
     hess = (1 - np.log1p(y_pred) + np.log1p(y_true)) / (y_pred + 1)**2
     return grad, hess
 
+def mean_quartic_error_obj(y_true, y_pred):
+    # Calculate the difference
+    diff = y_true - y_pred
+    # Gradient: -4 * (y_true - y_pred)^3
+    grad = -4 * diff**3
+    # Hessian: 12 * (y_true - y_pred)^2
+    hess = 12 * diff**2
+    return grad, hess
 
-loss_metrics = {
-    weighted_rmse: weighted_rmse_obj,
-    percentiles_weighted_rmse: percentiles_weighted_rmse_obj,
-    root_mean_squared_error: 'reg:squarederror',
-    mean_squared_error: 'reg:squarederror',
-    mean_absolute_error: 'reg:absoluteerror',
-    root_mean_squared_log_error: 'reg:squaredlogerror',
-    mean_squared_log_error: 'reg:squaredlogerror'
+
+# loss_metrics = {
+#     weighted_rmse: weighted_rmse_obj,
+#     percentiles_weighted_rmse: percentiles_weighted_rmse_obj,
+#     root_mean_squared_error: 'reg:squarederror',
+#     mean_squared_error: 'reg:squarederror',
+#     mean_absolute_error: 'reg:absoluteerror',
+#     root_mean_squared_log_error: 'reg:squaredlogerror',
+#     mean_squared_log_error: 'reg:squaredlogerror',
+#     r2_score: 'reg:logistic',
+#     'tweedie-nloglik@1.5': 'reg:tweedie',
+#     'gamma-nloglik': 'reg:gamma',
+#     'poisson-nloglik': 'count:poisson',
+#     'mphe': 'reg:pseudohubererror',
+#     mean_quartic_error_loss: mean_quartic_error_obj
+# }
+
+objective_metrics = {
+    'reg:squarederror': ['rmse', 'mse'],
+    'reg:absoluteerror': ['mae'],
+    'reg:squaredlogerror': ['rmsle', 'msle'],
+    'reg:logistic': ['r2_score'],
+    'reg:tweedie': ['tweedie-nloglik@1.7'],
+    'reg:gamma': ['gamma-deviance'],
+    'count:poisson': ['poisson-nloglik'],
+    # 'reg:pseudohubererror': ['mphe'],
+    'reg:quantileerror': ['pinball'],
+    weighted_rmse_obj: ['w_rmse'],
+    percentiles_weighted_rmse_obj: ['pw_rmse'],
+    mean_quartic_error_obj :['mqe', 'explained_variance', 'max_error', 'msse'],
+    'binary:logistic': ['logloss']
 }

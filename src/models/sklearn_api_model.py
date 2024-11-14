@@ -53,11 +53,11 @@ from sklearn.utils.validation import check_is_fitted
 
 from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor, RegressorChain, ClassifierChain
 
-from sklearn.metrics import make_scorer
+from sklearn.metrics import make_scorer, PredictionErrorDisplay
 
 
 from tools import *
-from src.models.loss import metrics
+from src.models.loss import metrics, metric_params
 
 # from scripts.probability_distribution import weight
 
@@ -106,11 +106,13 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #     self.best_estimator_ = MultiOutputRegressor(self.best_estimator_)
         #     grid_params = {'estimator__' + key: value for key, value in grid_params.items()}
 
+        print("Scoring using: ", self.get_scorer())
+
         # Train the final model with all selected features
         if optimization == 'grid':
             assert grid_params is not None
             grid_search = GridSearchCV(
-                self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
+                self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False, error_score='raise')
             grid_search.fit(X, y, **fit_params)
             best_params = grid_search.best_params_
             # self.best_estimator_ = grid_search.best_estimator_
@@ -390,14 +392,15 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             else:
                 loss = self.loss
             for metric_name, func in metrics.items():
-                if loss == metric_name:
+                if loss == func:
                     return func(y, y_pred)
             raise ValueError(f"Unknown loss function: {loss}")
         scores = {}
 
         for metric_name, func in metrics.items():
-            if metric_name in self.loss:
-                scores[metric_name] = func(y, y_pred)
+            if func in self.loss:
+                print(f'Scoring with {metric_name}')
+                scores[metric_name.replace("@", "_")] = func(y, y_pred)
         return scores
 
     def score_with_prediction(self, y_pred, y, sample_weight=None, single_score=True):
@@ -417,6 +420,32 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                 scores[metric_name] = func(y, y_pred)
 
         return scores
+    
+    def get_prediction_error_display(self, y, y_pred):
+        fig, axs = plt.subplots(nrows=1 , ncols = 2, sharex=False, sharey=False)
+        # print(f"Taille de y : {len(y)}, Taille de y_pred : {len(y_pred)}")
+        # print(y)
+        # print(y_pred)
+        # PredictionErrorDisplay.from_predictions(
+        #     y,
+        #     y_pred,
+        #     kind="residual_vs_predicted",
+        #     ax=axs[0],
+        #     scatter_kwargs={"alpha": 0.5},
+        # )
+        print(f"Taille de y : {len(y)}, Taille de y_pred : {len(y_pred)}")
+        print(y)
+        print(y_pred)
+        PredictionErrorDisplay.from_predictions(
+            y_true=y,
+            y_pred=y_pred,
+            kind="actual_vs_predicted",
+            ax=axs[1],
+            scatter_kwargs={"alpha": 0.5},
+        )
+
+        return fig
+
 
     def get_params(self, deep=True):
         """
@@ -466,14 +495,24 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         return self
 
-    def get_scorer(self):
+    def get_scorer(self, single=True):
         """
         Return the scoring function based on the chosen loss function.
         """
-
+        
+        scorers = {}
+        # def scoring_func(y_true, y_pred, func, **kwargs):
+        #     y_pred = y_pred.mean(axis=1) # Do this only if using ensembling or quantile regression
+        #     return func(y_true, y_pred, **kwargs)
         for metric_name, func in metrics.items():
-            if self.loss[0] == metric_name:
-                return make_scorer(func, greater_is_better=False)
+            if func in self.loss:
+                kwargs = metric_params[metric_name]
+                scorers[metric_name] = make_scorer(func, greater_is_better=True if metric_name in ['r2', 'explained_variance'] else False, **kwargs)
+
+                if single:
+                    if func == self.loss[0]:
+                        return scorers[metric_name]
+
 
         # Not used
         # if self.loss == 'log_loss':
@@ -499,7 +538,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         # elif self.loss == 'exponential_loss':
         #     return 'neg_mean_squared_error'
         # else:
-        raise ValueError(f"Unknown loss function: {self.loss}")
+        if scorers == {}:
+            raise ValueError(f"Unknown loss function: {self.loss}")
+        else:
+            return scorers
 
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """
