@@ -155,11 +155,12 @@ def find_coordinates_etab(name, path: str = ETAB_FILE) -> gpd.GeoDataFrame:
 
 
 class Location():
-    def __init__(self, name: str, coordinates: Tuple[float, float] = (None, None)) -> None:
+    def __init__(self, name: str, coordinates: Tuple[float, float] = (None, None), etab_file=ETAB_FILE) -> None:
+        self.etab_file = etab_file
         self.name = name
         if coordinates == (None, None):
-            self.coordinates = find_coordinates_etab(self.get_name(mode=1))
-
+            self.coordinates = find_coordinates_etab(
+                self.get_name(mode=1), self.etab_file)
             if self.coordinates != (None, None):
                 self.scale = Scale.ETAB
         else:

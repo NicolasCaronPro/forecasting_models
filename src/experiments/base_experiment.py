@@ -24,16 +24,14 @@ import mlflow.data.pandas_dataset
 from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
-import cudf as cd
+# import cudf as cd
 import numpy as np
 import re
 
 
 class BaseExperiment:
     def __init__(self, logger, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[ModelTree, List[ModelTree]]] = None) -> None:
-        self.experiment_name = 'exp_' + dataset.__class__.__name__ + '_' + \
-            '_'.join(dataset.targets_names) + '_' + \
-            model.name if name is None else name
+        self.experiment_name = '_'.join(dataset.targets_names) if name is None else name
         self.dataset = dataset
         self.model = model
         self.logger: logging.Logger = logger
@@ -77,7 +75,7 @@ class BaseExperiment:
             mlflow.log_table(data=self.dataset.data,
                             artifact_file='datasets/full_dataset.json')
             if find_best_features:
-                # selected_features = self.get_important_features(dataset=dataset, model=self.model, model_config=model_config)
+                # selected_features = self.get_important_features(dataset=self.dataset, model=self.model, model_config=model_config)
                 selected_features = ['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2','nb_emmergencies%%J-3', 'nb_emmergencies', 'NO2_FR26094%%mean_7J', 'nb_emmergencies%%mean_365J', 'eveBankHolidays', 'meteo_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'trend_hopital%%J-3', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7', 'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J', 'trend_paralysie%%J-7', 'trend_accident de voiture%%mean_7J', 'trend_paralysie%%mean_7J', 'meteo_tavg%%mean_7J', 'trend_insuffisance cardiaque', 'trend_fièvre%%J-7', 'trend_infection respiratoire%%mean_7J']
                 # selected_features.extend(['PM10_FR26005%%mean_31J', 'foot%%std_14J', 'inc_ira%%mean_31J', 
                 #                      'meteo_tmin%%mean_31J', 'trend_vaccin%%mean_31J', 'confinement2',
