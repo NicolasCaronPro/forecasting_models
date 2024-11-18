@@ -8,7 +8,6 @@ import sys
 import datetime as dt
 from typing import List, Union, Optional
 import pathlib
-import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
@@ -24,7 +23,11 @@ import mlflow.data.pandas_dataset
 from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
-# import cudf as cd
+try:
+    import cudf as pd
+except ImportError as e:
+    import pandas as pd
+
 import numpy as np
 import re
 
@@ -309,7 +312,7 @@ class BaseExperiment:
         Returns:
         DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
         """
-        df = cd.DataFrame(dataset.enc_X_train)
+        df = pd.DataFrame(dataset.enc_X_train)
         predictions = pd.DataFrame(index=dataset.y_test.index)
 
         # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles
@@ -331,8 +334,8 @@ class BaseExperiment:
                 if j > 0:
                     # Pour les jours suivants, remplacer les colonnes target%%J-1, target%%J-2 par les prédictions
                     for k in range(1, j+1):
-                        for target in dataset.targets:
-                            target = target.replace('target_', '')
+                        for target in dataset.targets_names:
+                            # target = target.replace('target_', '')
                             colonne_a_remplacer = f'{target}%%J-{k}'
                             # Simuler l'existence des colonnes target%%J-k en utilisant les features (ajuster selon ton dataset réel)
                             if colonne_a_remplacer in groupe.columns:
