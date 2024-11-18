@@ -10,6 +10,7 @@ from typing import List, Union, Optional
 import pathlib
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.utils import resample
 from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -50,7 +51,7 @@ class BaseExperiment:
         runs = mlflow.search_runs(experiment_names=[self.experiment_name])
         self.run_nb = len(runs)
 
-    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False) -> None:
+    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False, int_pred: bool = False, balance_target=False) -> None:
         """
         Run the experiment.
 
@@ -113,7 +114,47 @@ class BaseExperiment:
             mlflow.log_params(model_config['fit_params'])
             mlflow.log_param('optimization', model_config['optimization'])
 
-            self.model.fit(cd.DataFrame(dataset.enc_X_train),
+            # balance training set
+            if balance_target:
+                # Combine x_train and y_train
+                combined = pd.concat(
+                    [dataset.enc_X_train, dataset.y_train], axis=1)
+
+                # find majority and minority classes
+                # Count the occurrences of each category
+                category_counts = dataset.y_train[dataset.targets_names[0]].value_counts(
+                )
+
+                # Identify majority and minority categories
+                # Category with the most occurrences
+                majority_category = category_counts.idxmax()
+                # Category with the least occurrences
+                minority_category = category_counts.idxmin()
+
+                # Separate majority and minority classes
+                majority = combined[combined[dataset.targets_names[0]]
+                                    == majority_category]
+                minority = combined[combined[dataset.targets_names[0]]
+                                    == minority_category]
+
+                # Oversample minority class
+                minority_oversampled = resample(minority,
+                                                replace=True,    # Sample with replacement
+                                                # Match number of majority
+                                                n_samples=len(majority),
+                                                random_state=42)  # Reproducibility
+
+                # Combine back the oversampled minority class with the majority class
+                print('Before:', dataset.enc_X_train.shape)
+                balanced = pd.concat([majority, minority_oversampled])
+                print('After:', balanced.shape)
+
+                # Split back to dataset.enc_X_train and dataset.y_train
+                dataset.enc_X_train = balanced.drop(
+                    columns=[dataset.targets_names[0]])
+                dataset.y_train = balanced[dataset.targets_names[0]]
+
+            self.model.fit(pd.DataFrame(dataset.enc_X_train),
                            dataset.y_train, **model_config)
             self.logger.info("Model fitted.")
 
@@ -140,6 +181,9 @@ class BaseExperiment:
             # mlflow.log_metric(self.model.get_scorer(), scores)
 
             y_pred = self.predict(dataset)
+            if int_pred:
+                y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
+                )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
             figure = self.plot(dataset, y_pred, scores)
 
@@ -261,7 +305,7 @@ class BaseExperiment:
         """
         self.logger.info("Testing the model...")
 
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[
+        y_pred = pd.DataFrame(self.model.predict(pd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[
                               f'y_pred_{target}' for target in dataset.targets_names])
 
         return y_pred
@@ -279,7 +323,7 @@ class BaseExperiment:
         Returns:
         DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
         """
-        df = cd.DataFrame(dataset.enc_X_train)
+        df = pd.DataFrame(dataset.enc_X_train)
         predictions = pd.DataFrame(index=dataset.y_test.index)
 
         # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles

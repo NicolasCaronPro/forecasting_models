@@ -19,8 +19,8 @@ class PopulationFeatures(BaseFeature):
 
         population = pd.DataFrame()
 
-        from_years = from_date[0:4]
-        to_years = to_date[0:4]
+        from_years = from_date.year  # from_date[0:4]
+        to_years = to_date.year  # to_date[0:4]
         years = [str(i) for i in range(int(from_years), int(to_years) + 1)]
         # today's year
         current_year = dt.datetime.now().year

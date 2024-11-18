@@ -5,6 +5,7 @@ from sklearn.pipeline import Pipeline
 import src.features as ft
 from src.encoding.tools import create_encoding_pipeline
 from src.tools.utils import list_constant_columns
+from src.location.location import Location
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from copy import deepcopy
@@ -16,14 +17,14 @@ import pathlib
 
 
 def categorize(df, column, bins=[0, 0.1, 0.3, 0.7, 0.9, 0.97, 1.0], labels=None, drop=False):
+    label_offset = 0
     if labels == None and type(bins) == int:
-        labels = [f'{i+1}' for i in range(bins)]
+        labels = [f'{i+label_offset}' for i in range(bins)]
     elif labels == None and type(bins) == list:
-        labels = [f'{i+1}' for i in range(len(bins) - 1)]
-    df[f'{column}_category'] = pd.qcut(df[column], q=bins, labels=labels)
-    df[f'{column}_category'] = df[f'{column}_category'].astype('category')
-    if drop:
-        df.drop(columns=[column], inplace=True)
+        labels = [f'{i+label_offset}' for i in range(len(bins) - 1)]
+    col_category = (column if drop else f'{column}_category')
+    df[col_category] = pd.qcut(df[column], q=bins, labels=labels)
+    df[col_category] = df[col_category].astype(np.float64)
     return df
 
 
@@ -206,8 +207,10 @@ class BaseTabularDataset():
             print(
                 f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
 
+            print(self.y_train)
             self.enc_X_train = pipeline.fit_transform(
                 X=self.X_train[to_encode], y=self.y_train)
+            print(self.enc_X_train)
             # print(self.enc_X_train.iloc[0])
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
@@ -423,6 +426,7 @@ class BaseTabularDataset():
                       targets: Union[str, List[str]],
                       targets_locations: List[Location],
                       bins: Optional[int] = None,
+                      replace_target: Optional[bool] = True,
                       targets_shift: Optional[int] = None,
                       targets_rolling_window: Optional[int] = None,
                       targets_history_shifts: Optional[int] = [],
@@ -537,6 +541,14 @@ class BaseTabularDataset():
                     data[f'{target_name}%%std{rw}J%%J-{min_shift}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift}'].bfill(
                         limit_area='outside')
 
+                if bins:
+                    # print(data[target_name])
+                    data = data.dropna(subset=[target_name])
+                    self.logger.info(
+                        "Categorizing the target columns...")
+                    data = categorize(data, target_name,
+                                      bins=bins, drop=replace_target)
+
             data = data.loc[:, data.columns.str.startswith(target_name)]
             self.data = self.data.merge(
                 data, how="left", left_index=True, right_index=True)
@@ -607,6 +619,7 @@ class BaseTabularDataset():
                     freq: Optional[str] = None,
                     shift: Optional[int] = [],
                     target_bins: Optional[int] = None,
+                    replace_target: Optional[bool] = True,
                     rolling_window: Optional[Union[int, List[int]]] = [],
                     drop_constant_thr=1.0,
                     data_dir: Optional[Union[str, pathlib.Path]] = None,
@@ -715,7 +728,7 @@ class BaseTabularDataset():
                            targets_rolling_window=targets_rolling_window,
 
                            targets_history_shifts=targets_history_shifts,
-                           targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins,
+                           targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins, replace_target=replace_target,
                            axis=axis,
                            nb_data_location=len(locations))
 
