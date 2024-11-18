@@ -27,8 +27,8 @@ def list_constant_columns(data: pd.DataFrame, threshold: float = 1.0, exclude_ca
         # Vérifier si cette proportion dépasse le seuil (threshold)
         if most_frequent_value_ratio >= threshold:
             const_cols.append(col)
-            print(
-                f"Column '{col}' is constant at {most_frequent_value} for {most_frequent_value_ratio:.2%} of the rows.")
+            # print(
+            #     f"Column '{col}' is constant at {most_frequent_value} for {most_frequent_value_ratio:.2%} of the rows.")
 
     return const_cols
 
@@ -41,9 +41,9 @@ def clean_dataframe(data:pd.DataFrame, drop_constant_thr=1.0, exclude_categories
     """
     # Step 1: Drop columns with zero variance
     constant_columns = list_constant_columns(data=data, threshold=drop_constant_thr, exclude_categories=exclude_categories, exclude_booleans=exclude_booleans)
-
     df_clean = data.drop(columns=constant_columns)
-    print(f"Dropped columns with zero variance: {constant_columns}")
+    if constant_columns != []:
+        print(f"Dropped columns with zero variance: {constant_columns}")
     
     # Step 2: Replace NaN values with column mean
     df_clean = df_clean.apply(lambda x: x.fillna(x.mean()) if x.dtype in [np.float64, np.float32, np.int64] else x)

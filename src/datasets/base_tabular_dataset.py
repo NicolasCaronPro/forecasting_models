@@ -14,6 +14,7 @@ import numpy as np
 import logging
 import sys
 import pathlib
+from src.location import Location
 
 
 def categorize(df, column, bins=[0, 0.1, 0.3, 0.7, 0.9, 0.97, 1.0], labels=None, drop=False):
@@ -165,12 +166,11 @@ class BaseTabularDataset():
         assert all(isinstance(location, (str, Location))
                    for location in locations), "locations must be a list of strings or Location objects"
 
+        self.logger.info("Fetching dataset")
         # Get data from each feature
         for feature in self.features:
             for location in locations:
-                self.logger.info(
-                    f"Fetching data for {feature.name} at {location}")
-                self.logger.setLevel(logging.WARNING)
+                # self.logger.info(f"Fetching data for {feature.name} at {location}")
                 feature.fetch_data(
                     data_start, data_stop, location=location, features_dir=data_dir / 'features')
                 self.logger.setLevel(logging.INFO)
@@ -215,7 +215,8 @@ class BaseTabularDataset():
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
             not_encoded_df = self.X_train[not_to_encode]
-            print(not_encoded_df.columns)
+            self.logger.info(
+                f'{len(not_encoded_df.columns.to_list())} features not encoded (same unit as target)')
             self.enc_X_train = pd.concat(
                 [self.enc_X_train, not_encoded_df], axis=1)
             # print(self.enc_X_train.columns.to_list())
@@ -306,8 +307,11 @@ class BaseTabularDataset():
 
         self.data.drop(columns=constant_columns, inplace=True)
 
+        dropped = [col.split('%%')[0] for col in constant_columns]
+        dropped = set(dropped)
+
         print(
-            f"Dropped {len(constant_columns)} constant columns from both sets: {constant_columns}")
+            f"Dropped {len(constant_columns)} constant columns from both sets: {dropped}")
 
     def split(self, train_size: Optional[Union[float, int]] = None,
               test_size: Optional[Union[float, int]] = None,
@@ -432,8 +436,7 @@ class BaseTabularDataset():
                       targets_history_shifts: Optional[int] = [],
                       targets_history_rolling_windows: Optional[Union[int, List[int]]] = [
                       ],
-                      axis='columns',
-                      nb_data_location=1) -> str:
+                      axis='columns') -> str:
 
         self.targets_names = []
 
@@ -443,14 +446,14 @@ class BaseTabularDataset():
         if isinstance(targets, str):
             targets = [targets]
 
-        #  Check if targets are in data, and suffix them with location name if not already specified
-        # NOTE: no matter if the dataset is concatenated on rows or columns, we always specify targets locations
         for location in targets_locations:
             assert isinstance(
                 location, Location), "targets_locations must be a list of Location"
             data = self.data.copy(deep=True)
             fully_named_targets = []
 
+            #  Check if targets are in data, and suffix them with location name if not already specified
+            # NOTE: no matter if the dataset is concatenated on rows or columns, we always specify targets locations
             for i, target in enumerate(targets):
                 assert isinstance(
                     target, str), "targets must be a list of strings or a string"
@@ -475,6 +478,8 @@ class BaseTabularDataset():
 
                 if (targets_shift is None or targets_shift >= 0):
                     if "%%" in target_name:
+                        self.logger.info(
+                            "Passed target name already point to a shifted column, we don't shift again")
                         targets_shift = 0
                     else:
                         self.logger.warning("Not shifting the target is not allowed as some features might not be available for today's date,\
@@ -492,6 +497,7 @@ class BaseTabularDataset():
                         data[target_name] = data[target].shift(targets_shift)
                         self.targets_names.append(target_name)
                         # df['shift_final'] = self.data[target_name]
+                    targets_rolling_window = 0
 
                 else:
                     self.logger.info(
@@ -516,6 +522,7 @@ class BaseTabularDataset():
 
                 self.logger.info("Creating target history columns...")
                 min_shift = abs(targets_shift) + targets_rolling_window
+                # min_shift = 0
                 for shift in targets_history_shifts:
                     if shift < min_shift:
                         self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
@@ -669,7 +676,7 @@ class BaseTabularDataset():
                 locations[i] = Location(locations[i])
 
         self.logger.info(
-            f"Getting the dataset from {from_date} to {to_date} for {locations}")
+            f"Getting the dataset from {from_date} to {to_date} for {', '.join([location.name for location in locations])}")
 
         assert isinstance(targets_locations, (list, str, Location)
                           ), "targets_locations must be a list of strings, Location objects or a string or a Location object"
@@ -720,7 +727,7 @@ class BaseTabularDataset():
         if self.data.index.name not in self.data.columns:
             new_column = {str(self.data.index.name): self.data.index}
             self.data = self.data.assign(**new_column)
-
+            # self.data.index.rename('index', inplace=True)
         # Créer les targets
         self.create_target(targets=targets_names,
                            targets_locations=targets_locations,
@@ -743,10 +750,14 @@ class BaseTabularDataset():
                     self.logger.warning(
                         "Target %s not in features_names, adding it to continue", target)
                     features_names.append(target)
+
         else:
             features_names = self.data.columns.to_list()
 
+        features_names = list(set(features_names))
+
         # print(self.data.columns.to_list())
+        # print(features_names)
         self.data = self.data[features_names]
 
         # print(self.data.columns.to_list())

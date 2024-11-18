@@ -32,9 +32,8 @@ import re
 
 class BaseExperiment:
     def __init__(self, logger, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[ModelTree, List[ModelTree]]] = None) -> None:
-        self.experiment_name = 'exp_' + dataset.__class__.__name__ + '_' + \
-            '_'.join(dataset.targets_names) + '_' + \
-            model.name if name is None else name
+        self.experiment_name = '_'.join(
+            dataset.targets_names) if name is None else name
         self.dataset = dataset
         self.model = model
         self.logger: logging.Logger = logger
@@ -68,45 +67,67 @@ class BaseExperiment:
 
             # Get a dataset object corresponding to the dataset_config
             # dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
-            dataset = self.dataset
+            # dataset = self.dataset
 
             # TODO: Certain fit_params doivent être initialisés après la création des datasets : eval_set
             model_config['fit_params'].update({'eval_set': [(
-                dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets_names]})
+                self.dataset.enc_X_val, self.dataset.y_val[target]) for target in self.dataset.targets_names]})
 
             # print(dataset.data[['target_Total_CHU Dijon%%mean_7J', 'Total_CHU Dijon%%mean_7J']])
-
+            mlflow.log_table(data=self.dataset.data,
+                             artifact_file='datasets/full_dataset.json')
             if find_best_features:
-                selected_features = self.get_important_features(
-                    dataset=dataset, model=self.model, model_config=model_config)
+                # selected_features = self.get_important_features(dataset=self.dataset, model=self.model, model_config=model_config)
+                selected_features = ['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'nb_emmergencies', 'NO2_FR26094%%mean_7J', 'nb_emmergencies%%mean_365J', 'eveBankHolidays', 'meteo_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'trend_hopital%%J-3', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7',
+                                     'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J', 'trend_paralysie%%J-7', 'trend_accident de voiture%%mean_7J', 'trend_paralysie%%mean_7J', 'meteo_tavg%%mean_7J', 'trend_insuffisance cardiaque', 'trend_fièvre%%J-7', 'trend_infection respiratoire%%mean_7J']
+                # selected_features.extend(['PM10_FR26005%%mean_31J', 'foot%%std_14J', 'inc_ira%%mean_31J',
+                #                      'meteo_tmin%%mean_31J', 'trend_vaccin%%mean_31J', 'confinement2',
+                #                      'meteo_tmax%%mean_31J', 'after_HNFC_moving', 'trend_vaccin%%mean_14J',
+                #                      'trend_hopital%%mean_31J', 'trend_hopital%%mean_14J', 'date##week_cos',
+                #                      'O3_FR26010%%mean_31J', 'O3_FR26005%%mean_31J', 'meteo_tavg%%mean_31J',
+                #                      'inc_grippe%%mean_31J', 'inc_grippe%%mean_14J', 'date##week_sin',
+                #                      'date##dayofYear_sin', 'confinement1'])
+
+                if dataset_config['axis'] == 'columns':
+                    selected_features = [
+                        feat + '_CHU Dijon' for feat in selected_features]
+                else:
+                    selected_features.append('location')
                 # selected_features = dataset.enc_X_train.columns.to_list()
                 dataset_config['features_names'] = selected_features
                 self.logger.info(
                     'Features selected: {}'.format(selected_features))
                 # print(dataset.y_train)
-                dataset.get_dataset(**dataset_config)
+                self.dataset.get_dataset(**dataset_config)
+                mlflow.log_table(data=self.dataset.data,
+                                 artifact_file='datasets/full_dataset_feature_selection.csv')
                 model_config['fit_params']['eval_set'] = [
-                    (dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets_names]
+                    (self.dataset.enc_X_val, self.dataset.y_val[target]) for target in self.dataset.targets_names]
 
-            mlflow.log_table(data=dataset.train_set,
+            mlflow.log_table(data=self.dataset.train_set,
                              artifact_file='datasets/train_set.json')
-            mlflow.log_table(data=dataset.val_set,
+            mlflow.log_table(data=self.dataset.val_set,
                              artifact_file='datasets/val_set.json')
-            mlflow.log_table(data=dataset.test_set,
+            mlflow.log_table(data=self.dataset.test_set,
                              artifact_file='datasets/test_set.json')
 
             train_dataset = mlflow.data.pandas_dataset.from_pandas(
-                dataset.train_set)
+                self.dataset.train_set)
             val_dataset = mlflow.data.pandas_dataset.from_pandas(
-                dataset.val_set)
+                self.dataset.val_set)
             test_dataset = mlflow.data.pandas_dataset.from_pandas(
-                dataset.test_set)
+                self.dataset.test_set)
 
             mlflow.log_input(dataset=train_dataset, context='training')
             mlflow.log_input(dataset=val_dataset, context='validation')
             mlflow.log_input(dataset=test_dataset, context='testing')
 
-            mlflow.log_params(dataset_config)
+            dataset_config_log = dataset_config.copy()
+            dataset_config_log['locations'] = [
+                loc.name for loc in dataset_config_log.pop('locations')]
+            dataset_config_log['targets_locations'] = [
+                loc.name for loc in dataset_config_log.pop('targets_locations')]
+            mlflow.log_params(dataset_config_log)
 
             mlflow.log_params({f'grid_{key}': value for key,
                               value in model_config['grid_params'].items()})
@@ -168,14 +189,27 @@ class BaseExperiment:
 
             # print(self.model.get_params(deep=True))
             params = self.model.get_params(deep=True)
+            if params['objective'] is not None:
+                # Check if objective is a function
+                if callable(params['objective']):
+                    params['objective'] = params['objective'].__name__
 
-            signature = infer_signature(
-                dataset.enc_X_test, self.model.predict(dataset.enc_X_test))
+            if params['eval_metric'] is not None:
+                if callable(params['eval_metric']):
+                    params['eval_metric'] = params['eval_metric'].__name__
+                else:
+                    params['eval_metric'] = params['eval_metric']
+
+            y_pred = self.predict(self.dataset)
+            mlflow.log_table(data=y_pred, artifact_file='datasets/pred.json')
+
+            signature = infer_signature(self.dataset.enc_X_test, y_pred)
 
             mlflow.log_params(params=params)
             mlflow.sklearn.log_model(self.model, "model", signature=signature)
 
-            scores = self.score(dataset)
+            scores = self.score(self.dataset)
+            print(scores)
 
             mlflow.log_metrics(scores)
             # mlflow.log_metric(self.model.get_scorer(), scores)
@@ -185,9 +219,12 @@ class BaseExperiment:
                 y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
                 )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
-            figure = self.plot(dataset, y_pred, scores)
-
+            figure = self.plot(self.dataset, y_pred, scores)
             mlflow.log_figure(figure, 'predictions.png')
+
+            error_fig = self.model.get_prediction_error_display(
+                y=self.dataset.y_test, y_pred=y_pred)
+            mlflow.log_figure(error_fig, 'errors.png')
 
             self.run_nb += 1
 
@@ -254,7 +291,7 @@ class BaseExperiment:
             bjml = self.get_bjml()
             bjml.plot(ax=ax, label='BJML', use_index=True)
 
-        return fig
+        return fig, ax
 
     def get_important_features(self, dataset: BaseTabularDataset = None, model: Model = None, preselection: List[str] = [], model_config: dict = None) -> List[str]:
         selected_features = []

@@ -235,26 +235,42 @@ class BaseFeature(object):
             if not os.path.isdir(feature_dir):
                 os.makedirs(feature_dir, exist_ok=True)
             
+            data_has_changed = False
+
             if os.path.isfile(feature_dir / filename):
-                self.logger.info(f"Data already fetched for {self.name}")
+                self.logger.info(f"{self.name}'s data already fetched for {location.name}")
                 # TODO: check for updates
                 data = pd.read_feather(feature_dir / filename)
 
+                data_min = data.index.min()
+                data_max = data.index.max()
+
                 if data is None or len(data)==0:
-                    self.logger.warning("No data found")
+                    self.logger.error(f"No data found: empty dataframe in {self.name}'s data file")
 
                 # Check if update is needed
-                if data.index.max() < stop_date:
+                if  start_date < data_min or data_max < stop_date:
                     self.logger.warning("Updating data")
-                    data = pd.concat(data, func(self, start_date=data.index.max(), stop_date=stop_date, location=location, *args, **kwargs))
-                    self.save_dataframe(data, feature_dir, filename=filename)
+                    self.logger.setLevel(logging.WARNING)
+                    if start_date < data_min:
+                        new_future_data = func(self, start_date=data_max, stop_date=stop_date, location=location, *args, **kwargs)
+                        data = pd.concat(data, new_future_data)
+                    if data_max < stop_date:
+                        new_past_data = func(self, start_date=data_min, stop_date=start_date, location=location, *args, **kwargs)
+                        data = pd.concat(new_past_data, data)
+                    self.logger.setLevel(logging.INFO)
+                    data_has_changed = True
 
             else:
-                self.logger.info(f"Fetching data for {self.name}...")
+                self.logger.info(f"Fetching {self.name}'s data for {location.name}...")
 
                 # Fetch the data
+                # self.logger.setLevel(logging.WARNING)
                 data:pd.DataFrame = func(self, start_date=start_date, stop_date=stop_date, location=location, *args, **kwargs)
-                # Check that    
+                self.logger.setLevel(logging.INFO)
+                data_has_changed = True
+
+            if data_has_changed:
                 self.save_dataframe(data, feature_dir, filename=filename)
 
             # # Identifier les colonnes catégorielles
@@ -396,8 +412,6 @@ class BaseFeature(object):
         return data
 
     def save_dataframe(self, data:pd.DataFrame, path: Union[str, pathlib.Path], filename: Optional[str] = 'data.feather') -> None:
-
-        self.logger.info(f"Saving data for {self.name}...")
 
         assert isinstance(path, str) or isinstance(
             path, pathlib.Path), f"path must be of type str or pathlib.Path, not {type(path)}"
