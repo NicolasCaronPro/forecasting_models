@@ -202,6 +202,9 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
             'tree_method': 'hist',
         }
 
+    if 'eval_metric' in params:
+        params['disable_default_eval_metric'] = True
+
     if device == 'cuda':
         params['device'] = 'cuda'
 

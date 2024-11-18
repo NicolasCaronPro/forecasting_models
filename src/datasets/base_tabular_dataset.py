@@ -739,11 +739,9 @@ class BaseTabularDataset():
                            targets_locations=targets_locations,
                            targets_shift=targets_shift,
                            targets_rolling_window=targets_rolling_window,
-
                            targets_history_shifts=targets_history_shifts,
                            targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins, replace_target=replace_target,
-                           axis=axis,
-                           nb_data_location=len(locations))
+                           axis=axis)
 
         # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
