@@ -9,6 +9,7 @@ import datetime as dt
 from typing import List, Union, Optional
 import pathlib
 from sklearn.model_selection import train_test_split
+from sklearn.utils import resample
 from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -34,7 +35,8 @@ import re
 
 class BaseExperiment:
     def __init__(self, logger, name=None, dataset: Optional[BaseTabularDataset] = None, model: Optional[Union[ModelTree, List[ModelTree]]] = None) -> None:
-        self.experiment_name = '_'.join(dataset.targets_names) if name is None else name
+        self.experiment_name = '_'.join(
+            dataset.targets_names) if name is None else name
         self.dataset = dataset
         self.model = model
         self.logger: logging.Logger = logger
@@ -51,7 +53,7 @@ class BaseExperiment:
         runs = mlflow.search_runs(experiment_names=[self.experiment_name])
         self.run_nb = len(runs)
 
-    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False) -> None:
+    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False, int_pred: bool = False, balance_target=False) -> None:
         """
         Run the experiment.
 
@@ -76,11 +78,12 @@ class BaseExperiment:
 
             # print(dataset.data[['target_Total_CHU Dijon%%mean_7J', 'Total_CHU Dijon%%mean_7J']])
             mlflow.log_table(data=self.dataset.data,
-                            artifact_file='datasets/full_dataset.json')
+                             artifact_file='datasets/full_dataset.json')
             if find_best_features:
                 # selected_features = self.get_important_features(dataset=self.dataset, model=self.model, model_config=model_config)
-                selected_features = ['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2','nb_emmergencies%%J-3', 'nb_emmergencies', 'NO2_FR26094%%mean_7J', 'nb_emmergencies%%mean_365J', 'eveBankHolidays', 'meteo_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'trend_hopital%%J-3', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7', 'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J', 'trend_paralysie%%J-7', 'trend_accident de voiture%%mean_7J', 'trend_paralysie%%mean_7J', 'meteo_tavg%%mean_7J', 'trend_insuffisance cardiaque', 'trend_fièvre%%J-7', 'trend_infection respiratoire%%mean_7J']
-                # selected_features.extend(['PM10_FR26005%%mean_31J', 'foot%%std_14J', 'inc_ira%%mean_31J', 
+                selected_features = ['nb_emmergencies%%J-7', 'nb_emmergencies%%J-1', 'nb_emmergencies%%J-2', 'nb_emmergencies%%J-3', 'nb_emmergencies', 'NO2_FR26094%%mean_7J', 'nb_emmergencies%%mean_365J', 'eveBankHolidays', 'meteo_wdir%%J-7', 'confinement1', 'trend_grippe%%mean_7J', 'trend_hopital%%J-3', 'trend_vaccin%%J-2', 'inc_diarrhee%%J-7', 'PM25_FR26094%%J-7',
+                                     'trend_crampes abdominales%%J-7', 'trend_médecin', 'trend_crampes abdominales%%mean_7J', 'confinement2', 'NO2_FR26010', 'trend_hopital%%J-2', 'trend_mal de tête%%mean_7J', 'trend_paralysie%%J-7', 'trend_accident de voiture%%mean_7J', 'trend_paralysie%%mean_7J', 'meteo_tavg%%mean_7J', 'trend_insuffisance cardiaque', 'trend_fièvre%%J-7', 'trend_infection respiratoire%%mean_7J']
+                # selected_features.extend(['PM10_FR26005%%mean_31J', 'foot%%std_14J', 'inc_ira%%mean_31J',
                 #                      'meteo_tmin%%mean_31J', 'trend_vaccin%%mean_31J', 'confinement2',
                 #                      'meteo_tmax%%mean_31J', 'after_HNFC_moving', 'trend_vaccin%%mean_14J',
                 #                      'trend_hopital%%mean_31J', 'trend_hopital%%mean_14J', 'date##week_cos',
@@ -89,7 +92,8 @@ class BaseExperiment:
                 #                      'date##dayofYear_sin', 'confinement1'])
 
                 if dataset_config['axis'] == 'columns':
-                    selected_features = [feat + '_CHU Dijon' for  feat in selected_features]
+                    selected_features = [
+                        feat + '_CHU Dijon' for feat in selected_features]
                 else:
                     selected_features.append('location')
                 # selected_features = dataset.enc_X_train.columns.to_list()
@@ -99,7 +103,7 @@ class BaseExperiment:
                 # print(dataset.y_train)
                 self.dataset.get_dataset(**dataset_config)
                 mlflow.log_table(data=self.dataset.data,
-                             artifact_file='datasets/full_dataset_feature_selection.csv')
+                                 artifact_file='datasets/full_dataset_feature_selection.csv')
                 model_config['fit_params']['eval_set'] = [
                     (self.dataset.enc_X_val, self.dataset.y_val[target]) for target in self.dataset.targets_names]
 
@@ -122,8 +126,10 @@ class BaseExperiment:
             mlflow.log_input(dataset=test_dataset, context='testing')
 
             dataset_config_log = dataset_config.copy()
-            dataset_config_log['locations'] = [loc.name for loc in dataset_config_log.pop('locations')]
-            dataset_config_log['targets_locations'] = [loc.name for loc in dataset_config_log.pop('targets_locations')]
+            dataset_config_log['locations'] = [
+                loc.name for loc in dataset_config_log.pop('locations')]
+            dataset_config_log['targets_locations'] = [
+                loc.name for loc in dataset_config_log.pop('targets_locations')]
             mlflow.log_params(dataset_config_log)
 
             mlflow.log_params({f'grid_{key}': value for key,
@@ -132,8 +138,48 @@ class BaseExperiment:
             mlflow.log_params(model_config['fit_params'])
             mlflow.log_param('optimization', model_config['optimization'])
 
-            self.model.fit(cd.DataFrame(self.dataset.enc_X_train),
-                           self.dataset.y_train, **model_config)
+            # balance training set
+            if balance_target:
+                # Combine x_train and y_train
+                combined = pd.concat(
+                    [dataset.enc_X_train, dataset.y_train], axis=1)
+
+                # find majority and minority classes
+                # Count the occurrences of each category
+                category_counts = dataset.y_train[dataset.targets_names[0]].value_counts(
+                )
+
+                # Identify majority and minority categories
+                # Category with the most occurrences
+                majority_category = category_counts.idxmax()
+                # Category with the least occurrences
+                minority_category = category_counts.idxmin()
+
+                # Separate majority and minority classes
+                majority = combined[combined[dataset.targets_names[0]]
+                                    == majority_category]
+                minority = combined[combined[dataset.targets_names[0]]
+                                    == minority_category]
+
+                # Oversample minority class
+                minority_oversampled = resample(minority,
+                                                replace=True,    # Sample with replacement
+                                                # Match number of majority
+                                                n_samples=len(majority),
+                                                random_state=42)  # Reproducibility
+
+                # Combine back the oversampled minority class with the majority class
+                print('Before:', dataset.enc_X_train.shape)
+                balanced = pd.concat([majority, minority_oversampled])
+                print('After:', balanced.shape)
+
+                # Split back to dataset.enc_X_train and dataset.y_train
+                dataset.enc_X_train = balanced.drop(
+                    columns=[dataset.targets_names[0]])
+                dataset.y_train = balanced[dataset.targets_names[0]]
+
+            self.model.fit(pd.DataFrame(dataset.enc_X_train),
+                           dataset.y_train, **model_config)
             self.logger.info("Model fitted.")
 
             # self.model.plot_tree(dir_output=run_dir)
@@ -171,11 +217,16 @@ class BaseExperiment:
             mlflow.log_metrics(scores)
             # mlflow.log_metric(self.model.get_scorer(), scores)
 
+            y_pred = self.predict(dataset)
+            if int_pred:
+                y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
+                )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
             figure = self.plot(self.dataset, y_pred, scores)
             mlflow.log_figure(figure, 'predictions.png')
 
-            error_fig = self.model.get_prediction_error_display(y=self.dataset.y_test, y_pred=y_pred)
+            error_fig = self.model.get_prediction_error_display(
+                y=self.dataset.y_test, y_pred=y_pred)
             mlflow.log_figure(error_fig, 'errors.png')
 
             self.run_nb += 1
@@ -294,7 +345,7 @@ class BaseExperiment:
         """
         self.logger.info("Testing the model...")
 
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[
+        y_pred = pd.DataFrame(self.model.predict(pd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[
                               f'y_pred_{target}' for target in dataset.targets_names])
 
         return y_pred

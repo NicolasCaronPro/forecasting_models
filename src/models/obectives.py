@@ -1,14 +1,15 @@
 import numpy as np
 from .loss import *
 
+
 def weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     """
     Custom objective function for RMSE weighted by deviation from mean.
-    
+
     Parameters:
     y_true (array): True values.
     y_pred (array): Predicted values.
-    
+
     Returns:
     grad (array): Gradient of the loss.
     hess (array): Hessian (second derivative) of the loss.
@@ -16,24 +17,26 @@ def weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
 
     mean = np.mean(y_true)
     std = np.std(y_true)
-    
+
     # Calcul des poids en fonction de l'écart par rapport à la moyenne
     weights = 1 + (np.abs(y_true - mean) / std)
-    
+    # print(y_pred)
+    # print(y_true)
     errors = y_pred - y_true
     grad = weights * errors
     hess = weights
-    
+
     return grad, hess
+
 
 def percentiles_weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     """
     Custom percentiles weighted RMSE objective function.
-    
+
     Parameters:
     y_true (array): True values.
     y_pred (array): Predicted values.
-    
+
     Returns:
     grad (array): Gradient of the loss.
     hess (array): Hessian (second derivative) of the loss.
@@ -48,7 +51,7 @@ def percentiles_weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     percentile_60 = np.percentile(y_true, 60)
     percentile_55 = np.percentile(y_true, 55)
     percentile_50 = np.percentile(y_true, 50)
-    
+
     weights = np.ones_like(y_true)
     weights[y_true > percentile_55] = 1.5
     weights[y_true > percentile_60] = 2
@@ -61,11 +64,10 @@ def percentiles_weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     weights[y_true > percentile_95] = 5.5
     # weights[y_true < percentile_5] = 5   # Poids plus élevé pour les creux
 
-
     errors = y_pred - y_true
     grad = weights * errors
     hess = weights
-    
+
     return grad, hess
 
 
@@ -87,10 +89,13 @@ def mape_objective(y_true, y_pred):
 #     return grad, hess
 
 # Not used
+
+
 def rmsle_objective(y_true, y_pred):
     grad = (np.log1p(y_pred) - np.log1p(y_true)) / (y_pred + 1)
     hess = (1 - np.log1p(y_pred) + np.log1p(y_true)) / (y_pred + 1)**2
     return grad, hess
+
 
 def mean_quartic_error_obj(y_true, y_pred):
     # Calculate the difference
@@ -101,22 +106,6 @@ def mean_quartic_error_obj(y_true, y_pred):
     hess = 12 * diff**2
     return grad, hess
 
-
-# loss_metrics = {
-#     weighted_rmse: weighted_rmse_obj,
-#     percentiles_weighted_rmse: percentiles_weighted_rmse_obj,
-#     root_mean_squared_error: 'reg:squarederror',
-#     mean_squared_error: 'reg:squarederror',
-#     mean_absolute_error: 'reg:absoluteerror',
-#     root_mean_squared_log_error: 'reg:squaredlogerror',
-#     mean_squared_log_error: 'reg:squaredlogerror',
-#     r2_score: 'reg:logistic',
-#     'tweedie-nloglik@1.5': 'reg:tweedie',
-#     'gamma-nloglik': 'reg:gamma',
-#     'poisson-nloglik': 'count:poisson',
-#     'mphe': 'reg:pseudohubererror',
-#     mean_quartic_error_loss: mean_quartic_error_obj
-# }
 
 objective_metrics = {
     'reg:squarederror': ['rmse', 'mse'],
@@ -130,6 +119,6 @@ objective_metrics = {
     'reg:quantileerror': ['pinball'],
     weighted_rmse_obj: ['w_rmse'],
     percentiles_weighted_rmse_obj: ['pw_rmse'],
-    mean_quartic_error_obj :['mqe', 'explained_variance', 'max_error', 'msse'],
+    mean_quartic_error_obj: ['mqe', 'explained_variance', 'max_error', 'msse'],
     'binary:logistic': ['logloss']
 }

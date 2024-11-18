@@ -5,6 +5,7 @@ from sklearn.pipeline import Pipeline
 import src.features as ft
 from src.encoding.tools import create_encoding_pipeline
 from src.tools.utils import list_constant_columns
+from src.location.location import Location
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from copy import deepcopy
@@ -17,14 +18,14 @@ from src.location import Location
 
 
 def categorize(df, column, bins=[0, 0.1, 0.3, 0.7, 0.9, 0.97, 1.0], labels=None, drop=False):
+    label_offset = 0
     if labels == None and type(bins) == int:
-        labels = [f'{i+1}' for i in range(bins)]
+        labels = [f'{i+label_offset}' for i in range(bins)]
     elif labels == None and type(bins) == list:
-        labels = [f'{i+1}' for i in range(len(bins) - 1)]
-    df[f'{column}_category'] = pd.qcut(df[column], q=bins, labels=labels)
-    df[f'{column}_category'] = df[f'{column}_category'].astype('category')
-    if drop:
-        df.drop(columns=[column], inplace=True)
+        labels = [f'{i+label_offset}' for i in range(len(bins) - 1)]
+    col_category = (column if drop else f'{column}_category')
+    df[col_category] = pd.qcut(df[column], q=bins, labels=labels)
+    df[col_category] = df[col_category].astype(np.float64)
     return df
 
 
@@ -170,7 +171,8 @@ class BaseTabularDataset():
         for feature in self.features:
             for location in locations:
                 # self.logger.info(f"Fetching data for {feature.name} at {location}")
-                feature.fetch_data(data_start, data_stop, location=location, features_dir=data_dir / 'features')
+                feature.fetch_data(
+                    data_start, data_stop, location=location, features_dir=data_dir / 'features')
                 self.logger.setLevel(logging.INFO)
 
     def encode(self, pipeline: Pipeline = None) -> None:
@@ -204,14 +206,18 @@ class BaseTabularDataset():
             print(
                 f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
 
+            print(self.y_train)
             self.enc_X_train = pipeline.fit_transform(
                 X=self.X_train[to_encode], y=self.y_train)
+            print(self.enc_X_train)
             # print(self.enc_X_train.iloc[0])
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
             not_encoded_df = self.X_train[not_to_encode]
-            self.logger.info(f'{len(not_encoded_df.columns.to_list())} features not encoded (same unit as target)')
-            self.enc_X_train = pd.concat([self.enc_X_train, not_encoded_df], axis=1)
+            self.logger.info(
+                f'{len(not_encoded_df.columns.to_list())} features not encoded (same unit as target)')
+            self.enc_X_train = pd.concat(
+                [self.enc_X_train, not_encoded_df], axis=1)
             # print(self.enc_X_train.columns.to_list())
 
             # print(self.enc_X_train.columns.value_counts().loc[lambda x: x > 1])
@@ -303,7 +309,8 @@ class BaseTabularDataset():
         dropped = [col.split('%%')[0] for col in constant_columns]
         dropped = set(dropped)
 
-        print(f"Dropped {len(constant_columns)} constant columns from both sets: {dropped}")
+        print(
+            f"Dropped {len(constant_columns)} constant columns from both sets: {dropped}")
 
     def split(self, train_size: Optional[Union[float, int]] = None,
               test_size: Optional[Union[float, int]] = None,
@@ -422,12 +429,14 @@ class BaseTabularDataset():
                       targets: Union[str, List[str]],
                       targets_locations: List[Location],
                       bins: Optional[int] = None,
+                      replace_target: Optional[bool] = True,
                       targets_shift: Optional[int] = None,
                       targets_rolling_window: Optional[int] = None,
                       targets_history_shifts: Optional[int] = [],
-                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
+                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = [
+                      ],
                       axis=None) -> str:
-        
+
         self.targets_names = []
 
         assert isinstance(targets, (list, str)
@@ -435,7 +444,6 @@ class BaseTabularDataset():
 
         if isinstance(targets, str):
             targets = [targets]
-        
 
         for location in targets_locations:
             assert isinstance(
@@ -470,7 +478,8 @@ class BaseTabularDataset():
 
                 if (targets_shift is None or targets_shift >= 0):
                     if "%%" in target_name:
-                        self.logger.info("Passed target name already point to a shifted column, we don't shift again")
+                        self.logger.info(
+                            "Passed target name already point to a shifted column, we don't shift again")
                         targets_shift = 0
                     else:
                         self.logger.warning("Not shifting the target is not allowed as some features might not be available for today's date,\
@@ -513,7 +522,7 @@ class BaseTabularDataset():
 
                 self.logger.info("Creating target history columns...")
                 min_shift = abs(targets_shift) + targets_rolling_window
-                min_shift = 0 # Use this if you want to use unavailable history
+                min_shift = 0  # Use this if you want to use unavailable history
                 for shift in targets_history_shifts:
                     if shift < min_shift:
                         self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
@@ -538,6 +547,14 @@ class BaseTabularDataset():
                         min_shift).rolling(rw).std()
                     data[f'{target_name}%%std{rw}J%%J-{min_shift}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift}'].bfill(
                         limit_area='outside')
+
+                if bins:
+                    # print(data[target_name])
+                    data = data.dropna(subset=[target_name])
+                    self.logger.info(
+                        "Categorizing the target columns...")
+                    data = categorize(data, target_name,
+                                      bins=bins, drop=replace_target)
 
             data = data.loc[:, data.columns.str.startswith(target_name)]
             self.data = self.data.merge(
@@ -609,6 +626,7 @@ class BaseTabularDataset():
                     freq: Optional[str] = None,
                     shift: Optional[int] = [],
                     target_bins: Optional[int] = None,
+                    replace_target: Optional[bool] = True,
                     rolling_window: Optional[Union[int, List[int]]] = [],
                     drop_constant_thr=1.0,
                     data_dir: Optional[Union[str, pathlib.Path]] = None,
@@ -657,7 +675,8 @@ class BaseTabularDataset():
             if isinstance(locations[i], str):
                 locations[i] = Location(locations[i])
 
-        self.logger.info(f"Getting the dataset from {from_date} to {to_date} for {', '.join([location.name for location in locations])}")
+        self.logger.info(
+            f"Getting the dataset from {from_date} to {to_date} for {', '.join([location.name for location in locations])}")
 
         assert isinstance(targets_locations, (list, str, Location)
                           ), "targets_locations must be a list of strings, Location objects or a string or a Location object"
@@ -677,7 +696,8 @@ class BaseTabularDataset():
 
         data = []
         if axis is None and len(locations) > 1:
-            raise ValueError("axis can't be None if you're getting the dataset for multiple locations")
+            raise ValueError(
+                "axis can't be None if you're getting the dataset for multiple locations")
         # Filtrage des données en fonction des dates et des colonnes demandées
         for location in locations:
             df = self.get_data(from_date=from_date,
@@ -702,12 +722,13 @@ class BaseTabularDataset():
             elif axis == 'rows':
                 self.data = pd.concat(data, axis='rows')
                 self.data = self.data.sort_index()
-                self.data['location'] = self.data['location'].astype('category')
+                self.data['location'] = self.data['location'].astype(
+                    'category')
             else:
                 raise ValueError("axis must be 'columns' or 'rows'")
         else:
-            self.data=data[0]
-        
+            self.data = data[0]
+
         # extraire l'index de la nouvelle data si il n'est pas déjà présent
         if self.data.index.name not in self.data.columns:
             new_column = {str(self.data.index.name): self.data.index}
@@ -720,9 +741,9 @@ class BaseTabularDataset():
                            targets_rolling_window=targets_rolling_window,
 
                            targets_history_shifts=targets_history_shifts,
-                           targets_history_rolling_windows=targets_history_rolling_windows,
-                           bins=target_bins,
-                           axis=axis)
+                           targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins, replace_target=replace_target,
+                           axis=axis,
+                           nb_data_location=len(locations))
 
         # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
@@ -741,7 +762,6 @@ class BaseTabularDataset():
 
         features_names = list(set(features_names))
 
-        
         # print(self.data.columns.to_list())
         # print(features_names)
         self.data = self.data[features_names]
