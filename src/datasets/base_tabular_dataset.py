@@ -172,7 +172,6 @@ class BaseTabularDataset():
                 # self.logger.info(f"Fetching data for {feature.name} at {location}")
                 feature.fetch_data(data_start, data_stop, location=location, features_dir=data_dir / 'features')
                 self.logger.setLevel(logging.INFO)
-        # self.data = self.data.join(feature.data)
 
     def encode(self, pipeline: Pipeline = None) -> None:
         """
@@ -427,7 +426,7 @@ class BaseTabularDataset():
                       targets_rolling_window: Optional[int] = None,
                       targets_history_shifts: Optional[int] = [],
                       targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
-                      axis='columns') -> str:
+                      axis=None) -> str:
         
         self.targets_names = []
 
@@ -450,12 +449,13 @@ class BaseTabularDataset():
                 assert isinstance(
                     target, str), "targets must be a list of strings or a string"
 
-                if not target.endswith(f'{location.get_name()}'):
-                    target += f'_{location.name}'
+                if axis is not None:
+                    if not target.endswith(f'{location.get_name()}'):
+                        target += f'_{location.name}'
 
-                if axis == 'rows':
-                    data = data[data['location'] == location.name]
-                    data.rename(columns={targets[i]: target}, inplace=True)
+                    if axis == 'rows':
+                        data = data[data['location'] == location.name]
+                        data.rename(columns={targets[i]: target}, inplace=True)
 
                 assert target in data.columns.to_list(
                 ), f"Target {target} not in data"
@@ -513,7 +513,7 @@ class BaseTabularDataset():
 
                 self.logger.info("Creating target history columns...")
                 min_shift = abs(targets_shift) + targets_rolling_window
-                # min_shift = 0
+                min_shift = 0 # Use this if you want to use unavailable history
                 for shift in targets_history_shifts:
                     if shift < min_shift:
                         self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
@@ -604,7 +604,7 @@ class BaseTabularDataset():
                     to_date: Optional[Union[str, dt.datetime]] = None,
                     locations: Optional[Union[List[str],
                                               str, List[Location], Location]] = None,
-                    axis: Optional[str] = 'columns',
+                    axis: Optional[str] = None,
                     features_names: Optional[List[str]] = None,
                     freq: Optional[str] = None,
                     shift: Optional[int] = [],
@@ -676,6 +676,8 @@ class BaseTabularDataset():
             targets_names, list) else [targets_names]
 
         data = []
+        if axis is None and len(locations) > 1:
+            raise ValueError("axis can't be None if you're getting the dataset for multiple locations")
         # Filtrage des données en fonction des dates et des colonnes demandées
         for location in locations:
             df = self.get_data(from_date=from_date,
@@ -694,16 +696,18 @@ class BaseTabularDataset():
                 df['location'] = location.name
 
             data.append(df)
-
-        if axis == 'columns':
-            self.data = pd.concat(data, axis='columns')
-        elif axis == 'rows':
-            self.data = pd.concat(data, axis='rows')
-            self.data = self.data.sort_index()
-            self.data['location'] = self.data['location'].astype('category')
+        if axis is not None:
+            if axis == 'columns':
+                self.data = pd.concat(data, axis='columns')
+            elif axis == 'rows':
+                self.data = pd.concat(data, axis='rows')
+                self.data = self.data.sort_index()
+                self.data['location'] = self.data['location'].astype('category')
+            else:
+                raise ValueError("axis must be 'columns' or 'rows'")
         else:
-            raise ValueError("axis must be 'columns' or 'rows'")
-
+            self.data=data[0]
+        
         # extraire l'index de la nouvelle data si il n'est pas déjà présent
         if self.data.index.name not in self.data.columns:
             new_column = {str(self.data.index.name): self.data.index}
