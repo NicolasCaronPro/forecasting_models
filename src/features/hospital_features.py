@@ -81,7 +81,7 @@ class HospitalFeatures(BaseFeature):
         hospitalized.rename(columns={"date_entree": "date"}, inplace=True)
         hospitalized.set_index("date", inplace=True)
         hospitalized.rename(columns={"Total": "nb_vers_hospit"}, inplace=True)
-
+        print(hospitalized)
         return hospitalized
 
     def include_nb_hospitalized_np_from_emmergencies_children(self, from_date, to_date, feature_dir):
@@ -162,6 +162,8 @@ class HospitalFeatures(BaseFeature):
         assert isinstance(etablissement, str), "etablissement must be a string"
 
         feature_dir = kwargs.get("feature_dir")
+        include_hospit_np_from_emmergencies_adults = kwargs.get(
+            "include_hospit_np_from_emmergencies_adults", False)
 
         # Set starting date, default is 01/01/1970
         start_date = kwargs.get("start_date")
@@ -178,10 +180,18 @@ class HospitalFeatures(BaseFeature):
 
         data = pd.DataFrame(index=date_range)
 
-        data = data.join(self.include_nb_emmergencies(
-            start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
+        if self.include_emmergency_arrivals:
+            data = data.merge(self.include_nb_emmergencies(
+                start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir), how="left", on="date")
+            # data = data.join(self.include_nb_emmergencies(
+            # start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
 
-        # data = data.join(self.include_nb_hospitalized_np_from_emmergencies_adults(start_date, stop_date, feature_dir))
+        if self.include_nb_hospit:
+            print('include_nb_hospit')
+            data = data.merge(self.include_nb_hospitalized_np_from_emmergencies_adults(
+                start_date, stop_date, feature_dir), how="left", on="date")
+            # data = data.join(self.include_nb_hospitalized_np_from_emmergencies_adults(
+            # start_date, stop_date, feature_dir))
 
         # data = data.join(self.include_nb_hospitalized_np_from_emmergencies_children(start_date, stop_date, feature_dir))
 

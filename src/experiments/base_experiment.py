@@ -100,7 +100,7 @@ class BaseExperiment:
                 # print(dataset.y_train)
                 self.dataset.get_dataset(**dataset_config)
                 mlflow.log_table(data=self.dataset.data,
-                                 artifact_file='datasets/full_dataset_feature_selection.csv')
+                                 artifact_file='datasets/full_dataset_feature_selection.json')
                 model_config['fit_params']['eval_set'] = [
                     (self.dataset.enc_X_val, self.dataset.y_val[target]) for target in self.dataset.targets_names]
 
@@ -139,11 +139,11 @@ class BaseExperiment:
             if balance_target:
                 # Combine x_train and y_train
                 combined = pd.concat(
-                    [dataset.enc_X_train, dataset.y_train], axis=1)
+                    [self.dataset.enc_X_train, self.dataset.y_train], axis=1)
 
                 # find majority and minority classes
                 # Count the occurrences of each category
-                category_counts = dataset.y_train[dataset.targets_names[0]].value_counts(
+                category_counts = self.dataset.y_train[self.dataset.targets_names[0]].value_counts(
                 )
 
                 # Identify majority and minority categories
@@ -153,9 +153,9 @@ class BaseExperiment:
                 minority_category = category_counts.idxmin()
 
                 # Separate majority and minority classes
-                majority = combined[combined[dataset.targets_names[0]]
+                majority = combined[combined[self.dataset.targets_names[0]]
                                     == majority_category]
-                minority = combined[combined[dataset.targets_names[0]]
+                minority = combined[combined[self.dataset.targets_names[0]]
                                     == minority_category]
 
                 # Oversample minority class
@@ -166,17 +166,17 @@ class BaseExperiment:
                                                 random_state=42)  # Reproducibility
 
                 # Combine back the oversampled minority class with the majority class
-                print('Before:', dataset.enc_X_train.shape)
+                print('Before:', self.dataset.enc_X_train.shape)
                 balanced = pd.concat([majority, minority_oversampled])
                 print('After:', balanced.shape)
 
                 # Split back to dataset.enc_X_train and dataset.y_train
-                dataset.enc_X_train = balanced.drop(
-                    columns=[dataset.targets_names[0]])
-                dataset.y_train = balanced[dataset.targets_names[0]]
+                self.dataset.enc_X_train = balanced.drop(
+                    columns=[self.dataset.targets_names[0]])
+                self.dataset.y_train = balanced[self.dataset.targets_names[0]]
 
-            self.model.fit(pd.DataFrame(dataset.enc_X_train),
-                           dataset.y_train, **model_config)
+            self.model.fit(pd.DataFrame(self.dataset.enc_X_train),
+                           self.dataset.y_train, **model_config)
             self.logger.info("Model fitted.")
 
             # self.model.plot_tree(dir_output=run_dir)
@@ -214,7 +214,7 @@ class BaseExperiment:
             mlflow.log_metrics(scores)
             # mlflow.log_metric(self.model.get_scorer(), scores)
 
-            y_pred = self.predict(dataset)
+            y_pred = self.predict(self.dataset)
             if int_pred:
                 y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
                 )

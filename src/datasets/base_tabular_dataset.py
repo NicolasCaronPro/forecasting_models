@@ -207,10 +207,10 @@ class BaseTabularDataset():
             print(
                 f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
 
-            print(self.y_train)
+            # print(self.y_train)
             self.enc_X_train = pipeline.fit_transform(
                 X=self.X_train[to_encode], y=self.y_train)
-            print(self.enc_X_train)
+            # print(self.enc_X_train)
             # print(self.enc_X_train.iloc[0])
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
@@ -736,8 +736,8 @@ class BaseTabularDataset():
 
                            targets_history_shifts=targets_history_shifts,
                            targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins, replace_target=replace_target,
-                           axis=axis,
-                           nb_data_location=len(locations))
+                           axis=axis)
+        #    nb_data_location=len(locations))
 
         # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
