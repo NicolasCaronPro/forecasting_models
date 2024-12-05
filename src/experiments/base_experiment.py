@@ -26,10 +26,25 @@ import os
 import matplotlib.pyplot as plt
 import pandas as pd
 try:
+    # Import CUDA and GPU-related modules
+    from rmm._cuda.gpu import getDeviceCount, CUDARuntimeError
     import cudf as cd
+
+    # Check if CUDA devices are available
+    gpus_count = getDeviceCount()
+    print(f"{gpus_count} GPU(s) detected.")
     USE_CUDA = True
-except ImportError as e:
+    
+except ImportError:
+    print("CUDA environment not found. Falling back to CPU.")
     USE_CUDA = False
+except CUDARuntimeError as e:
+    if "cudaErrorUnknown" in str(e):
+        print("Unknown CUDA error detected. Ensure your GPU drivers and CUDA toolkit are properly installed.")
+    elif "cudaErrorInsufficientDriver" in str(e):
+        print("Insufficient CUDA driver version. Update your drivers.")
+    else:
+        print(f"Unhandled CUDA error: {e}")
 
 import numpy as np
 import re
@@ -224,7 +239,7 @@ class BaseExperiment:
                 y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
                 )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
-            figure = self.plot(self.dataset, y_pred, scores)
+            figure = self.plot(self.dataset, y_pred)#, scores)
             mlflow.log_figure(figure, 'predictions.png')
 
             error_fig = self.model.get_prediction_error_display(
@@ -282,8 +297,8 @@ class BaseExperiment:
         ax.set_xlabel('Date')
         ax.set_ylabel('Value')
         ax.legend()
-        ax.text(0.5, 0.5, str(scores))
-        ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
+        # ax.text(0.5, 0.5, str(scores))
+        # ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
 
         dataset.y_test.plot(ax=ax, label='True', use_index=True)
         y_pred.plot(ax=ax, label='Predicted', use_index=True)

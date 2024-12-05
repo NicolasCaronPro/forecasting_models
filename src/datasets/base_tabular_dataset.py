@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import re
 from typing import Optional, Union, List
 from sklearn.pipeline import Pipeline
 import src.features as ft
@@ -165,11 +166,11 @@ class BaseTabularDataset():
             locations, list), "locations must be a list of strings or Location objects"
         assert all(isinstance(location, (str, Location))
                    for location in locations), "locations must be a list of strings or Location objects"
-
         self.logger.info("Fetching dataset")
         # Get data from each feature
         for feature in self.features:
             for location in locations:
+
                 # self.logger.info(f"Fetching data for {feature.name} at {location}")
                 feature.fetch_data(
                     data_start, data_stop, location=location, features_dir=data_dir / 'features')
@@ -206,10 +207,10 @@ class BaseTabularDataset():
             print(
                 f"X shape: {self.X_train[to_encode].shape}, y shape: {self.y_train.shape}")
 
-            print(self.y_train)
+            # print(self.y_train)
             self.enc_X_train = pipeline.fit_transform(
                 X=self.X_train[to_encode], y=self.y_train)
-            print(self.enc_X_train)
+            # print(self.enc_X_train)
             # print(self.enc_X_train.iloc[0])
             self.enc_X_train.columns = [
                 col.split('__')[-1] for col in self.enc_X_train.columns]
@@ -441,6 +442,7 @@ class BaseTabularDataset():
 
         assert isinstance(targets, (list, str)
                           ), "targets must be a list of strings or a string"
+        # TODO: check other parameters type
 
         if isinstance(targets, str):
             targets = [targets]
@@ -458,7 +460,7 @@ class BaseTabularDataset():
                     target, str), "targets must be a list of strings or a string"
 
                 if axis is not None:
-                    if not target.endswith(f'{location.get_name()}'):
+                    if not target.endswith(f'{location.name}'):
                         target += f'_{location.name}'
 
                     if axis == 'rows':
@@ -478,9 +480,7 @@ class BaseTabularDataset():
 
                 if (targets_shift is None or targets_shift >= 0):
                     if "%%" in target_name:
-                        self.logger.info(
-                            "Passed target name already point to a shifted column, we don't shift again")
-                        targets_shift = 0
+                        raise ValueError("Passed target name already point to a shifted/rolling column, please provide the base name")
                     else:
                         self.logger.warning("Not shifting the target is not allowed as some features might not be available for today's date,\
                                             \nas well as applying a positive shift as it would results in predicting the past\
@@ -493,7 +493,7 @@ class BaseTabularDataset():
                     if targets_shift != 0:
                         self.logger.info(
                             f"Creating the target columns as {target} shifted by {targets_shift}")
-                        target_name = f"{target_name}%%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
+                        target_name = f"{target_name}%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
                         data[target_name] = data[target].shift(targets_shift)
                         self.targets_names.append(target_name)
                         # df['shift_final'] = self.data[target_name]
@@ -506,7 +506,7 @@ class BaseTabularDataset():
                     # Using a rolling mean of the target without shifting (or using a positive shift) will compute means on the past
                     # and might produce a target leak if history of the variable is used,
                     # Will use a initial shift of the size of the rolling window
-                    target_name = f"{target_name}{'%%J+' if targets_shift < 0 else '%%J-' if targets_shift > 0 else ''}{str(abs(targets_shift))}%%mean_{str(targets_rolling_window)}J"
+                    target_name = f"{target_name}{'%J+' if targets_shift < 0 else '%J-' if targets_shift > 0 else ''}{str(abs(targets_shift))}%mean_{str(targets_rolling_window)}J"
 
                     if targets_shift != 0:
                         data[target_name] = data[target].shift(
@@ -522,8 +522,10 @@ class BaseTabularDataset():
 
                 self.logger.info("Creating target history columns...")
                 min_shift = abs(targets_shift) + targets_rolling_window
-                min_shift = 0  # Use this if you want to use unavailable history
+                # min_shift = 0  # Use this if you want to use unavailable history
                 for shift in targets_history_shifts:
+                    if shift and shift<0:
+                        shift = -shift
                     if shift < min_shift:
                         self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
                                             \ntarget_history_shift value will be set to {shift} + abs(targets_shift) + targets_rolling_window")
@@ -535,17 +537,19 @@ class BaseTabularDataset():
                         limit_area='outside')
 
                 if targets_history_rolling_windows is not []:
+                    targets_history_rolling_windows_str = [str(r) for r in targets_history_rolling_windows]
+                    s = ', '.join(targets_history_rolling_windows_str)
                     self.logger.info(
-                        "Rolling windows will start from %s samples before to n days before this starting sample", min_shift)
+                        f"Rolling windows will start from {min_shift} samples before to {s} days before this starting sample")
 
                 for rw in targets_history_rolling_windows:
-                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift}'] = data[target_name].shift(
-                        min_shift).rolling(rw).mean()
-                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift}'] = data[f'{target_name}%%mean_{rw}J%%J-{min_shift}'].bfill(
+                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
+                        min_shift).rolling(rw, closed="left").mean()
+                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'].bfill(
                         limit_area='outside')
-                    data[f'{target_name}%%std{rw}J%%J-{min_shift}'] = data[target_name].shift(
-                        min_shift).rolling(rw).std()
-                    data[f'{target_name}%%std{rw}J%%J-{min_shift}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift}'].bfill(
+                    data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
+                        min_shift).rolling(rw, closed="left").std()
+                    data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'].bfill(
                         limit_area='outside')
 
                 if bins:
@@ -763,6 +767,7 @@ class BaseTabularDataset():
         # print(self.data.columns.to_list())
         # print(features_names)
         self.data = self.data[features_names]
+        self.data.sort_index(axis=1, inplace=True)
 
         # print(self.data.columns.to_list())
         # # Update des noms des targets si il y a eu aggregation

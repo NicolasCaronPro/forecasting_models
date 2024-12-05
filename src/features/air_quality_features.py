@@ -39,15 +39,13 @@ class AirQualityFeatures(BaseFeature):
         
         CODES = []
         for i in range(len(df)):
-            if location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or df.iloc[i]['departement'] == location.code_departement:
-                CODES.append(df.iloc[i]['station'])
-        
+            if df.iloc[i]['departement'] == location.code_departement: #location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or 
+                CODES.append(df.iloc[i]['station'])   
         
 
         #if len(CODES) == 0:
         # CODES.append(list(df.loc[df['departement'] ==
         #             location.code_departement].station.values))
-        #print(CODES)
 
 
 
