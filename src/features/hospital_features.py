@@ -179,6 +179,8 @@ class HospitalFeatures(BaseFeature):
         assert isinstance(etablissement, str), "etablissement must be a string"
 
         feature_dir = kwargs.get("feature_dir")
+        include_hospit_np_from_emmergencies_adults = kwargs.get(
+            "include_hospit_np_from_emmergencies_adults", False)
 
         # Set starting date, default is 01/01/1970
         start_date = kwargs.get("start_date")

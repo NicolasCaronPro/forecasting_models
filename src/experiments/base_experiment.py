@@ -120,7 +120,7 @@ class BaseExperiment:
                 # print(dataset.y_train)
                 self.dataset.get_dataset(**dataset_config)
                 mlflow.log_table(data=self.dataset.data,
-                                 artifact_file='datasets/full_dataset_feature_selection.csv')
+                                 artifact_file='datasets/full_dataset_feature_selection.json')
                 model_config['fit_params']['eval_set'] = [
                     (self.dataset.enc_X_val, self.dataset.y_val[target]) for target in self.dataset.targets_names]
 

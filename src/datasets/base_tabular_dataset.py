@@ -434,8 +434,7 @@ class BaseTabularDataset():
                       targets_shift: Optional[int] = None,
                       targets_rolling_window: Optional[int] = None,
                       targets_history_shifts: Optional[int] = [],
-                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = [
-                      ],
+                      targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
                       axis=None) -> str:
 
         self.targets_names = []
