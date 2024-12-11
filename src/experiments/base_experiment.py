@@ -24,10 +24,27 @@ import mlflow.data.pandas_dataset
 from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
+import pandas as pd
 try:
-    import cudf as pd
-except ImportError as e:
-    import pandas as pd
+    # Import CUDA and GPU-related modules
+    from rmm._cuda.gpu import getDeviceCount, CUDARuntimeError
+    import cudf as cd
+
+    # Check if CUDA devices are available
+    gpus_count = getDeviceCount()
+    print(f"{gpus_count} GPU(s) detected.")
+    USE_CUDA = True
+
+except ImportError:
+    print("CUDA environment not found. Falling back to CPU.")
+    USE_CUDA = False
+except CUDARuntimeError as e:
+    if "cudaErrorUnknown" in str(e):
+        print("Unknown CUDA error detected. Ensure your GPU drivers and CUDA toolkit are properly installed.")
+    elif "cudaErrorInsufficientDriver" in str(e):
+        print("Insufficient CUDA driver version. Update your drivers.")
+    else:
+        print(f"Unhandled CUDA error: {e}")
 
 import numpy as np
 import re
@@ -66,7 +83,8 @@ class BaseExperiment:
             run_dir = self.dir_runs / f'{run.info.run_id}/artifacts/'
             run_dir = pathlib.Path(run_dir)
 
-            self.logger.info("Running the experiment...")
+            self.logger.info(
+                f"Running the experiment on {'GPU' if USE_CUDA else 'CPU'}...")
 
             # Get a dataset object corresponding to the dataset_config
             # dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
@@ -173,7 +191,7 @@ class BaseExperiment:
                 balanced = pd.concat([majority, minority_oversampled])
                 print('After:', balanced.shape)
 
-                # Split back to dataset.enc_X_train and dataset.y_train
+                # Split back to self.dataset.enc_X_train and self.dataset.y_train
                 self.dataset.enc_X_train = balanced.drop(
                     columns=[self.dataset.targets_names[0]])
                 self.dataset.y_train = balanced[self.dataset.targets_names[0]]
@@ -222,8 +240,8 @@ class BaseExperiment:
                 y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
                 )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
-            figure = self.plot(self.dataset, y_pred, scores)
-            mlflow.log_figure(figure[0], 'predictions.png')
+            figure = self.plot(self.dataset, y_pred)  # , scores)
+            mlflow.log_figure(figure, 'predictions.png')
 
             error_fig = self.model.get_prediction_error_display(
                 y=self.dataset.y_test, y_pred=y_pred)
@@ -280,8 +298,8 @@ class BaseExperiment:
         ax.set_xlabel('Date')
         ax.set_ylabel('Value')
         ax.legend()
-        ax.text(0.5, 0.5, str(scores))
-        ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
+        # ax.text(0.5, 0.5, str(scores))
+        # ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
 
         dataset.y_test.plot(ax=ax, label='True', use_index=True)
         y_pred.plot(ax=ax, label='Predicted', use_index=True)
@@ -345,7 +363,7 @@ class BaseExperiment:
         """
         self.logger.info("Testing the model...")
 
-        y_pred = pd.DataFrame(self.model.predict(pd.DataFrame(dataset.enc_X_test)), index=dataset.y_test.index, columns=[
+        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test) if USE_CUDA else dataset.enc_X_test), index=dataset.y_test.index, columns=[
                               f'y_pred_{target}' for target in dataset.targets_names])
 
         return y_pred
@@ -363,7 +381,7 @@ class BaseExperiment:
         Returns:
         DataFrame: Un nouveau dataframe avec les colonnes 'target_pred' et les prédictions.
         """
-        df = pd.DataFrame(dataset.enc_X_train)
+        df = pd.DataFrame(dataset.enc_X_test)
         predictions = pd.DataFrame(index=dataset.y_test.index)
 
         # Extraire les colonnes qui correspondent à des moyennes/écarts-types sur fenêtres mobiles

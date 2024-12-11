@@ -1175,7 +1175,7 @@ class ModelVoting(Model):
         - Aggregated predictions.
         """
         # Determine if it's a classification or regression task
-        if self.loss in ['log_loss', 'hinge_loss', 'accuracy']:
+        if self.loss[0] in ['log_loss', 'hinge_loss', 'accuracy']:
             # Classification: Use majority vote
             predictions_array = np.array(predictions_list)
             aggregated_pred = stats.mode(

@@ -20,9 +20,10 @@ if __name__ == '__main__':
 from src.models.sklearn_api_model import *
 from src.models.loss import *
 from src.models.obectives import *
+import copy
 
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric = None, params: dict = None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric = None, params: dict = None, n=1, ensemble_method=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -42,6 +43,8 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
 
     # eval_metric = params.get('eval_metric', None)
     objective = params.get('objective', None)
+
+    assert ensemble_method in ['voting', 'stacking', 'fusion', None], 'ensemble method should be one of voting, stacking, fusion or None'
 
     # Check if eval_metric and objective are compatible
     
@@ -148,11 +151,25 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
                          XGBClassifier, XGBRegressor,
                          LGBMClassifier, LGBMRegressor,
                          NGBClassifier, NGBRegressor)
+    
+    if ensemble_method:
+        # We initialize n model
+        models = [copy.deepcopy(model) for _ in range(n)]
+
+        if ensemble_method == 'stacking':
+            return ModelStacking(models, copy.deepcopy(model), loss=test_metrics)
+        elif ensemble_method == 'voting':
+            return ModelVoting(models, loss=test_metrics)
+        elif ensemble_method == 'fusion':
+            return ModelFusion(models, copy.deepcopy(model), loss=test_metrics)
+        else:
+            raise ValueError(f"Unrecognized ensemble method: {ensemble_method}")
 
     if isinstance(model, tree_based_models):
         return ModelTree(model, loss=test_metrics, name=name)
     else:
         return Model(model, loss=test_metrics, name=name)
+    
 
 
 def config_prophet(device, task_type, params=None) -> Prophet:
@@ -201,6 +218,9 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
             'random_state': 42,
             'tree_method': 'hist',
         }
+
+    if 'eval_metric' in params:
+        params['disable_default_eval_metric'] = True
 
     if device == 'cuda':
         params['device'] = 'cuda'

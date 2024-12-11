@@ -7,21 +7,20 @@ from geopy.geocoders import Nominatim
 import requests
 
 
-ETAB_FILE = '../data/geolocalisation/etab_coord.csv'
-
 GEO_DIR = '../data/geolocalisation/'
+ETAB_FILE = GEO_DIR + 'etab_coord_new.csv'
 
-ETAB_NAMES = [
-    ['CH BEAUNE', 'CH Beaune', 'CH BEAUNE'],
-    ['CH SEMUR EN AUXOIS', 'CH Semur', 'CH SEMUR EN AUXOIS'],
-    ['CH MONTBARD', 'CH Chatillon Montbard', 'CH MONTBARD'],
-    ['HNFC', 'HNFC', 'HNFC'],
-    ['CHU BESANCON', 'CHU Besançon', 'CHU BESANCON'],
-    ['CH PRIVE DIJON', 'CH privé Dijon', 'CH privé DIJON'],
-    ['CHU DIJON', 'CHU Dijon', 'CHU DIJON'],
-    ['CH LANGRES', 'CH Langres', 'CH LANGRES'],
-    ['CH CHAUMONT', 'CH Chaumont', 'CH CHAUMONT']
-]
+# ETAB_NAMES = [
+#     ['CH BEAUNE', 'HOSPICES CIVILS DE BEAUNE', 'CH BEAUNE'],
+#     ['CH SEMUR EN AUXOIS', 'CH ROBERT MORLEVAT SEMUR EN AUXOIS', 'CH SEMUR EN AUXOIS'],
+#     ['CH MONTBARD', 'CH Chatillon Montbard', 'CH MONTBARD'],
+#     ['HNFC', 'HNFC', 'HNFC'],
+#     ['CHU BESANCON', 'CHU Besançon', 'CHU BESANCON'],
+#     ['CH PRIVE DIJON', 'CH privé Dijon', 'CH privé DIJON'],
+#     ['CHU DIJON', 'CHU Dijon', 'CHU DIJON'],
+#     ['CH LANGRES', 'CH Langres', 'CH LANGRES'],
+#     ['CH CHAUMONT', 'CH Chaumont', 'CH CHAUMONT']
+# ]
 
 REGION_OLD = {
     'ALSACE': ['67', '68'],
@@ -160,7 +159,7 @@ class Location():
         self.name = name
         if coordinates == (None, None):
             self.coordinates = find_coordinates_etab(
-                self.get_name(mode=1), self.etab_file)
+                self.name, self.etab_file)
             if self.coordinates != (None, None):
                 self.scale = Scale.ETAB
         else:
@@ -183,92 +182,95 @@ class Location():
         self.__list_code = None
         # self.scale = Scale.COORDS
 
-    def get_name(self, mode: int = 0) -> str:
-        name = ""
-        match mode:
-            case 0:  # Original name
-                name = self.name
-            case 1:  # Capital letters
-                for etab in ETAB_NAMES:
-                    if self.name in etab:
-                        name = etab[0]
-                        break
-            case 2:  # Normal letters
-                for etab in ETAB_NAMES:
-                    if self.name in etab:
-                        name = etab[1]
-                        break
-            case 3:  # Capital letters with accents
-                for etab in ETAB_NAMES:
-                    if self.name in etab:
-                        name = etab[2]
-                        break
-        return name
+    # def get_name(self, mode: int = 0) -> str:
+    #     name = ""
+    #     match mode:
+    #         case 0:  # Original name
+    #             name = self.name
+    #         case 1:  # Capital letters
+    #             for etab in ETAB_NAMES:
+    #                 if self.name in etab:
+    #                     name = etab[0]
+    #                     break
+    #         case 2:  # Normal letters
+    #             for etab in ETAB_NAMES:
+    #                 if self.name in etab:
+    #                     name = etab[1]
+    #                     break
+    #         case 3:  # Capital letters with accents
+    #             for etab in ETAB_NAMES:
+    #                 if self.name in etab:
+    #                     name = etab[2]
+    #                     break
+    #     return name
 
-    def get_shape(self) -> Polygon:
-        if self.__shape is None:
-            self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
-        return self.__shape
+    # def get_shape(self) -> Polygon:
+    #     if self.__shape is None:
+    #         self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
+    #     return self.__shape
 
-    def get_centroid(self) -> Point:
-        if self.__centroid is None:
-            self.__shape, self.__centroid = self.__influence_shape()
-        return self.__centroid
+    # def get_centroid(self) -> Point:
+    #     if self.__centroid is None:
+    #         self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
+    #     return self.__centroid
 
-    def get_list_code(self) -> List[str]:
-        if self.__list_code is None:
-            self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
-        return self.__list_code
+    # def get_list_code(self) -> List[str]:
+    #     if self.__list_code is None:
+    #         self.__shape, self.__centroid, self.__list_code = self.__influence_shape()
+    #     return self.__list_code
 
-    def is_in_shape(self, point: Point) -> bool:
-        return self.get_shape().contains(point)
+    # def is_in_shape(self, point: Point) -> bool:
+    #     return self.get_shape().contains(point)
+    
+    def is_in_departement(self, point: Point) -> bool:
+        return self.code_departement == coord_info((point.x, point.y))['code_departement']
 
-    def __influence_shape(self) -> Tuple[Polygon, Point]:
-        df_code = pd.read_excel(
-            GEO_DIR + "codes postaux_PMSI_pop_ATIH_2023.xlsx")
-        df_code = df_code.drop(columns=[col for col in df_code.columns if col not in [
-                               'Code postal 2023', 'Libellé poste', 'Code géographique PMSI 2023']])
-        df_code = df_code.rename(columns={'Code postal 2023': 'code_postal',
-                                 'Libellé poste': 'libelle', 'Code géographique PMSI 2023': 'code_geo'})
-        df_code['code_geo'] = df_code['code_geo'].astype(str)
+    # def __influence_shape(self) -> Tuple[Polygon, Point]:
+    #     df_code = pd.read_excel(
+    #         GEO_DIR + "codes postaux_PMSI_pop_ATIH_2023.xlsx")
+    #     df_code = df_code.drop(columns=[col for col in df_code.columns if col not in [
+    #                            'Code postal 2023', 'Libellé poste', 'Code géographique PMSI 2023']])
+    #     df_code = df_code.rename(columns={'Code postal 2023': 'code_postal',
+    #                              'Libellé poste': 'libelle', 'Code géographique PMSI 2023': 'code_geo'})
+    #     df_code['code_geo'] = df_code['code_geo'].astype(str)
 
-        geom = gpd.read_file(
-            GEO_DIR + 'SECTEURS PMSI_BFC et limitrophes_2023/SECTEURS_PMSI_BFC_et_limitrophes_2023.shp')
-        geom.rename(columns={'PMSI_2023': 'code_geo'}, inplace=True)
-        geom['code_geo'] = geom['code_geo'].astype(str)
+    #     geom = gpd.read_file(
+    #         GEO_DIR + 'SECTEURS PMSI_BFC et limitrophes_2023/SECTEURS_PMSI_BFC_et_limitrophes_2023.shp')
+    #     geom.rename(columns={'PMSI_2023': 'code_geo'}, inplace=True)
+    #     geom['code_geo'] = geom['code_geo'].astype(str)
 
-        df_tx = pd.read_excel(
-            GEO_DIR + "tx de recours RPU et motifs.xlsx", sheet_name=self.get_name(mode=3))
+    #     df_tx = pd.read_excel(
+    #         GEO_DIR + "tx de recours RPU et motifs.xlsx", sheet_name=self.get_name(mode=3))
 
-        df_tx = df_tx.drop(columns="rs2")
-        df_tx = df_tx.rename(columns={'codegeo': 'code_geo'})
-        df_tx['code_geo'] = df_tx['code_geo'].astype(str)
+    #     df_tx = df_tx.drop(columns="rs2")
+    #     df_tx = df_tx.rename(columns={'codegeo': 'code_geo'})
+    #     df_tx['code_geo'] = df_tx['code_geo'].astype(str)
 
-        list_code = df_tx['code_geo'].tolist()
+    #     list_code = df_tx['code_geo'].tolist()
 
-        df_tx = df_tx.merge(df_code, on='code_geo')
-        df_tx = gpd.GeoDataFrame(
-            pd.merge(df_tx, geom, on='code_geo', how='left'))
-        df_tx.sort_values(by='tx_recours', ascending=False, inplace=True)
-        df_tx.drop_duplicates(subset='geometry', keep="last", inplace=True)
+    #     df_tx = df_tx.merge(df_code, on='code_geo')
+    #     df_tx = gpd.GeoDataFrame(
+    #         pd.merge(df_tx, geom, on='code_geo', how='left'))
+    #     df_tx.sort_values(by='tx_recours', ascending=False, inplace=True)
+    #     df_tx.drop_duplicates(subset='geometry', keep="last", inplace=True)
 
-        df_tx["centroid"] = df_tx.geometry.centroid.to_crs(epsg=4326)
+    #     df_tx["centroid"] = df_tx.geometry.centroid.to_crs(epsg=4326)
 
-        df_tx.geometry = df_tx.geometry.to_crs(epsg=4326)
+    #     df_tx.geometry = df_tx.geometry.to_crs(epsg=4326)
 
-        polygons = []
-        for pol in df_tx.geometry:
-            polygons.append(pol)
+    #     polygons = []
+    #     for pol in df_tx.geometry:
+    #         polygons.append(pol)
 
-        # Create a GeoSeries or GeoDataFrame from the list of polygons
-        gdf = gpd.GeoSeries(polygons)
+    #     # Create a GeoSeries or GeoDataFrame from the list of polygons
+    #     gdf = gpd.GeoSeries(polygons)
 
-        # Perform the union of all polygons
-        unioned_polygon = gdf.unary_union
+    #     # Perform the union of all polygons
+    #     unioned_polygon = gdf.unary_union
 
-        final_polygon = Polygon(unioned_polygon.exterior)
+    #     final_polygon = Polygon(unioned_polygon.exterior)
 
-        return final_polygon, df_tx['centroid'].values[0], list_code
+    #     return final_polygon, df_tx['centroid'].values[0], list_code
 
     def filter_points(self, list_points: List[Point], n_points: int = 5, buffer_range: int = 10000, buffer_incr: int = 250, verbose=False) -> gpd.GeoDataFrame:
         points_df = gpd.GeoDataFrame({'points': list_points})
@@ -283,7 +285,7 @@ class Location():
             # Trouver les points qui ne se chevauchent pas
             points_selectionnes = []
             tampons_selectionnes = []
-            for index, (point, tampon) in enumerate(zip(points_df.geometry, tampons)):
+            for point, tampon in zip(points_df.geometry, tampons):
                 intersect = False
                 for tamp in tampons_selectionnes:
                     if tampon.intersects(tamp):

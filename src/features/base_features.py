@@ -201,8 +201,12 @@ class BaseFeature(object):
                         window=rw, closed="left").mean()
                     data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
                         limit_area='outside')
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
+                        limit_area='outside')
                     data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}"].rolling(
                         window=rw, closed="left").std()
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
+                        limit_area='outside')
                     data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
                         limit_area='outside')
 
@@ -293,6 +297,8 @@ class BaseFeature(object):
 
             if data_has_changed:
                 self.save_dataframe(data, feature_dir, filename=filename)
+
+            display(data)
 
             # # Identifier les colonnes catégorielles
             self.categorical_columns = data.select_dtypes(

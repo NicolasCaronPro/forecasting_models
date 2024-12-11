@@ -1,3 +1,5 @@
+import os
+import re
 import pandas as pd
 from typing import List
 import numpy as np
@@ -59,3 +61,33 @@ def clean_dataframe(data: pd.DataFrame, drop_constant_thr=1.0, exclude_categorie
     )) if x.dtype in [np.float64, np.float32, np.int64] and np.isinf(x).any() else x)
 
     return df_clean
+
+
+def supprimer_fichier_feather_recursif(dossiers):
+    """
+    Parcourt les dossiers et leurs sous-dossiers récursivement et supprime
+    tous les fichiers 'data.feather' s'ils existent.
+
+    :param dossiers: Liste de chemins de dossiers à parcourir.
+    """
+
+    # Définir l'expression régulière pour correspondre à 'data.feather' ou 'data_<word>.feather'
+    pattern = re.compile(
+        r'^data(?:_[a-zA-ZçÇéÉèÈêÊëËàÀâÂîÎïÏôÔûÛùÙüÜœŒ\s\W]+)*\.feather$', re.UNICODE)
+    print("Deleting files...")
+    for dossier in dossiers:
+        # Parcours récursivement le dossier et ses sous-dossiers
+        for chemin_racine, sous_dossiers, fichiers in os.walk(dossier):
+            # Filtre les fichiers correspondant à l'expression régulière
+            for fichier in fichiers:
+                # print(fichier)
+                if pattern.match(fichier):
+
+                    chemin_fichier = os.path.join(chemin_racine, fichier)
+                    try:
+                        # Supprime le fichier
+                        os.remove(chemin_fichier)
+                        print(f"Fichier supprimé: {chemin_fichier}")
+                    except Exception as e:
+                        print(
+                            f"Erreur lors de la suppression de {chemin_fichier}: {e}")
