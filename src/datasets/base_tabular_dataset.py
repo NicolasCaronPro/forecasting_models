@@ -62,6 +62,10 @@ class BaseTabularDataset():
             self.name = name
         assert isinstance(self.name, str), "name should be of type str"
 
+        # self.features_classes = features_classes
+        self.fetch_config = fetch_config
+        self.getter_config = getter_config
+
         # # On initialise feature_dir
         # if data_dir:
         #     if isinstance(data_dir, str):
@@ -170,10 +174,12 @@ class BaseTabularDataset():
         # Get data from each feature
         for feature in self.features:
             for location in locations:
-                # self.logger.info(f"Fetching data for {feature.name} at {location}")
+                self.logger.info(
+                    f"Fetching data for {feature.name} at {location}")
                 feature.fetch_data(
                     data_start, data_stop, location=location, features_dir=data_dir / 'features')
                 self.logger.setLevel(logging.INFO)
+                # print(feature.date_max)
 
     def encode(self, pipeline: Pipeline = None) -> None:
         """
@@ -522,7 +528,7 @@ class BaseTabularDataset():
 
                 self.logger.info("Creating target history columns...")
                 min_shift = abs(targets_shift) + targets_rolling_window
-                min_shift = 0  # Use this if you want to use unavailable history
+                # min_shift = 0  # Use this if you want to use unavailable history
                 for shift in targets_history_shifts:
                     if shift < min_shift:
                         self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
@@ -600,16 +606,18 @@ class BaseTabularDataset():
         date = pd.date_range(start=from_date, end=to_date, freq=freq)
         data = pd.DataFrame(index=date)
         data.index.name = 'date'
-        # print(data)
+
+        # print(filename)
 
         features_data = []
         for feature in self.features:
+            # print(feature.date_max)
             feature_data = feature.get_data(from_date=from_date, to_date=to_date, location=location, freq=freq, shift=shift,
                                             rolling_window=rolling_window, drop_constant_thr=drop_constant_thr, path=features_dir / feature.name, filename=filename)
             # print(feature_data)
             # data = data.join(feature_data, on='date', how='left')
             features_data.append(feature_data)
-
+        # print(features_data)
         data = pd.concat(features_data, axis='columns')
 
         # print(data)

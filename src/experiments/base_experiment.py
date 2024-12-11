@@ -223,7 +223,7 @@ class BaseExperiment:
                 )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
             figure = self.plot(self.dataset, y_pred, scores)
-            mlflow.log_figure(figure, 'predictions.png')
+            mlflow.log_figure(figure[0], 'predictions.png')
 
             error_fig = self.model.get_prediction_error_display(
                 y=self.dataset.y_test, y_pred=y_pred)

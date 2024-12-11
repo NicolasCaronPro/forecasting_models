@@ -11,6 +11,8 @@ from pathlib import Path
 import os
 from src.location.location import Location
 from shapely.geometry import Polygon, Point
+import datetime as dt
+
 
 class AirQualityFeatures(BaseFeature):
     """
@@ -21,9 +23,9 @@ class AirQualityFeatures(BaseFeature):
         archived_data_dir (Path): The path to the archived data directory.
     """
 
-    def __init__(self, name:str = None, logger=None) -> None:
-        super().__init__(name, logger)
-
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
 
     def __include_air_quality(self, location: Location, feature_dir: str) -> pd.DataFrame:
         # Récupérer les archives sur :
@@ -35,24 +37,18 @@ class AirQualityFeatures(BaseFeature):
         # On récupère les codes des stations de mesure de la qualité de l'air pour le département
         df = pd.read_csv(feature_dir / 'stations_geodair.csv',
                          sep=';', dtype={'departement': str})
-        
-        
+
         CODES = []
         for i in range(len(df)):
             if location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or df.iloc[i]['departement'] == location.code_departement:
                 CODES.append(df.iloc[i]['station'])
-        
-        
 
-        #if len(CODES) == 0:
+        # if len(CODES) == 0:
         # CODES.append(list(df.loc[df['departement'] ==
         #             location.code_departement].station.values))
-        #print(CODES)
-
-
+        # print(CODES)
 
         self.logger.info(f"On s'intéresse aux codes : {', '.join(CODES)}")
-
 
         archived_data_dir = Path(feature_dir / 'archived')
         archived_data_dir.mkdir(exist_ok=True, parents=True)
@@ -119,10 +115,10 @@ class AirQualityFeatures(BaseFeature):
             #         self.logger.error(
             #             f"{k} possède trop de NaN ({data[k].isna().sum()})")
 
-                # data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
+            # data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
 
             data.to_feather(archived_data_dir /
-                                 'pollution_historique.feather')
+                            'pollution_historique.feather')
         else:
             self.logger.info("On relit le dataframe d'archive de l'air")
             data = pd.read_feather(

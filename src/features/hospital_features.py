@@ -38,7 +38,8 @@ class HospitalFeatures(BaseFeature):
                  include_emmergency_arrivals=True,
                  include_hnfc_moving=True,
                  include_nb_hospit=True) -> None:
-        super().__init__(name, logger)
+        super().__init__(name, logger,
+                         date_max_fetchable=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'))
         self.include_emmergency_arrivals = include_emmergency_arrivals
         self.include_hnfc_moving = include_hnfc_moving
         self.include_nb_hospit = include_nb_hospit

@@ -21,15 +21,15 @@ class PopulationFeatures(BaseFeature):
 
         from_years = from_date.year  # from_date[0:4]
         to_years = to_date.year  # to_date[0:4]
+
         years = [str(i) for i in range(int(from_years), int(to_years) + 1)]
-        # today's year
-        current_year = dt.datetime.now().year
-        if to_years != str(current_year):
+
+        if to_years < dt.datetime.now().year:
             years.append(str(int(to_years) + 1))
 
         # JSON data
         dpt = f'DEP-{location.code_departement}'
-        # years = ['2019', '2020', '2021', '2022', '2023', '2024']
+        print(dpt)
 
         requete_dataset = f"https://api.insee.fr/melodi/data/DS_ESTIMATION_POPULATION?GEO={dpt}"
 
@@ -80,7 +80,6 @@ class PopulationFeatures(BaseFeature):
         df['TIME_PERIOD'] = pd.to_datetime(df['TIME_PERIOD'], format='%Y')
 
         # Step 2: Create a full date range for each day of the year
-        # For example, for the year 2021:
         date_range = pd.date_range(
             start='2019-01-01', end='2024-12-31', freq='D')
 
@@ -99,8 +98,8 @@ class PopulationFeatures(BaseFeature):
         df_pivot.ffill(inplace=True)
 
         df_pivot = df_pivot.rename_axis(None, axis=1)
-        df_pivot = df_pivot.astype(int)
         df_pivot = df_pivot.loc[from_date:to_date]
+        df_pivot = df_pivot.astype(int)
 
         population = df_pivot.copy(deep=True)
 
@@ -114,5 +113,8 @@ class PopulationFeatures(BaseFeature):
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
         location = kwargs.get("location")
+
+        # if stop_date > self.date_max_fetchable:
+        #     stop_date = self.date_max_fetchable
 
         return self.include_population(start_date, stop_date, location)
