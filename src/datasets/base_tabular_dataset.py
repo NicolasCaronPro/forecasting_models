@@ -16,6 +16,49 @@ import logging
 import sys
 import pathlib
 from src.location import Location
+from sklearn.utils import resample
+
+
+def balance_target(dataset):
+    # Combine x_train and y_train
+    combined = pd.concat(
+        [dataset.dataset.enc_X_train, dataset.dataset.y_train], axis=1)
+
+    # find majority and minority classes
+    # Count the occurrences of each category
+    category_counts = dataset.dataset.y_train[dataset.dataset.targets_names[0]].value_counts(
+    )
+
+    # Identify majority and minority categories
+    # Category with the most occurrences
+    majority_category = category_counts.idxmax()
+    # Category with the least occurrences
+    minority_category = category_counts.idxmin()
+
+    # Separate majority and minority classes
+    majority = combined[combined[dataset.dataset.targets_names[0]]
+                        == majority_category]
+    minority = combined[combined[dataset.dataset.targets_names[0]]
+                        == minority_category]
+
+    # Oversample minority class
+    minority_oversampled = resample(minority,
+                                    replace=True,    # Sample with replacement
+                                    # Match number of majority
+                                    n_samples=len(majority),
+                                    random_state=42)  # Reproducibility
+
+    # Combine back the oversampled minority class with the majority class
+    print('Before:', dataset.dataset.enc_X_train.shape)
+    balanced = pd.concat([majority, minority_oversampled])
+    print('After:', balanced.shape)
+
+    # Split back to dataset.dataset.enc_X_train and dataset.dataset.y_train
+    dataset.dataset.enc_X_train = balanced.drop(
+        columns=[dataset.dataset.targets_names[0]])
+    dataset.dataset.y_train = balanced[dataset.dataset.targets_names[0]]
+
+    return dataset
 
 
 def categorize(df, column, bins=[0, 0.1, 0.3, 0.7, 0.9, 0.97, 1.0], labels=None, drop=False):

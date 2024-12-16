@@ -9,7 +9,6 @@ import datetime as dt
 from typing import List, Union, Optional
 import pathlib
 from sklearn.model_selection import train_test_split
-from sklearn.utils import resample
 from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -70,7 +69,7 @@ class BaseExperiment:
         runs = mlflow.search_runs(experiment_names=[self.experiment_name])
         self.run_nb = len(runs)
 
-    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False, int_pred: bool = False, balance_target=False) -> None:
+    def run(self, dataset_config: dict, model_config: dict, find_best_features: bool = False, int_pred: bool = False) -> None:
         """
         Run the experiment.
 
@@ -155,46 +154,6 @@ class BaseExperiment:
             # mlflow.log_params(model_config['params'])
             mlflow.log_params(model_config['fit_params'])
             mlflow.log_param('optimization', model_config['optimization'])
-
-            # balance training set
-            if balance_target:
-                # Combine x_train and y_train
-                combined = pd.concat(
-                    [self.dataset.enc_X_train, self.dataset.y_train], axis=1)
-
-                # find majority and minority classes
-                # Count the occurrences of each category
-                category_counts = self.dataset.y_train[self.dataset.targets_names[0]].value_counts(
-                )
-
-                # Identify majority and minority categories
-                # Category with the most occurrences
-                majority_category = category_counts.idxmax()
-                # Category with the least occurrences
-                minority_category = category_counts.idxmin()
-
-                # Separate majority and minority classes
-                majority = combined[combined[self.dataset.targets_names[0]]
-                                    == majority_category]
-                minority = combined[combined[self.dataset.targets_names[0]]
-                                    == minority_category]
-
-                # Oversample minority class
-                minority_oversampled = resample(minority,
-                                                replace=True,    # Sample with replacement
-                                                # Match number of majority
-                                                n_samples=len(majority),
-                                                random_state=42)  # Reproducibility
-
-                # Combine back the oversampled minority class with the majority class
-                print('Before:', self.dataset.enc_X_train.shape)
-                balanced = pd.concat([majority, minority_oversampled])
-                print('After:', balanced.shape)
-
-                # Split back to self.dataset.enc_X_train and self.dataset.y_train
-                self.dataset.enc_X_train = balanced.drop(
-                    columns=[self.dataset.targets_names[0]])
-                self.dataset.y_train = balanced[self.dataset.targets_names[0]]
 
             self.model.fit(pd.DataFrame(self.dataset.enc_X_train),
                            self.dataset.y_train, **model_config)
