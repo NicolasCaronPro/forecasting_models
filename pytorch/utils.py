@@ -10,9 +10,9 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 import torch_geometric.nn as nn
 from pytorch_tcn import TCN
-from torch_geometric.nn import GCNConv, TopKPooling, global_mean_pool, GATv2Conv, GATConv
+from torch_geometric.nn import GCNConv, TopKPooling, GATv2Conv, GATConv
 from torch_geometric.nn.sequential import Sequential
-from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
+from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric_temporal.nn.recurrent import A3TGCN

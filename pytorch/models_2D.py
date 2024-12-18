@@ -44,8 +44,9 @@ class Zhang(torch.nn.Module):
         self.num_fc = len(self.fc_list)
 
         self.binary = binary
+        self.is_graph_or_node = False
     
-    def forward(self, X, edge_index):
+    def forward(self, X, edge_index, graphs=None):
         # egde index not used, API configuration
         # Zhang model doesn't take in account time series
         # (B, H, W, F, T) -> (B, H, W, F)
@@ -244,8 +245,9 @@ class UNet(torch.nn.Module):
             self.ups.append(Up(features[idx], features[idx - 1], bilinear))
 
         self.outc = OutConv(features[0], n_classes)
+        self.is_graph_or_node = False
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, graph=None):
         if len(x.shape) == 5:
             x = x[:, :, :, :, -1]
             

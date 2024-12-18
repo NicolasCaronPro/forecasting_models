@@ -1,15 +1,21 @@
 import copy
 import logging
 import math
-from re import sub
+from pyclbr import Class
+from re import A, sub
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Union, final
 
 import matplotlib.pyplot as plt
 import numpy as np
+from responses import target
 import shap
-import xgboost
+from sympy import false
+from torch import poisson_nll_loss
+import xgboost as xgb
+import catboost
+from catboost import CatBoostClassifier, CatBoostRegressor
 
 from forecasting_models.pytorch.tools_2 import *
 
@@ -21,8 +27,10 @@ from ngboost.scores import LogScore
 
 from pygam import GAM
 
-from scipy import stats
+import random
 
+from scipy import stats
+from forecasting_models.sklearn.score import *
 from skopt import BayesSearchCV, Optimizer
 from skopt.space import Integer, Real
 
@@ -62,80 +70,202 @@ from sklearn.tree import (
 
 from sklearn.utils.validation import check_is_fitted
 
-from xgboost import XGBClassifier, XGBRegressor, plot_tree as xgb_plot_tree
+from xgboost import DMatrix, XGBClassifier, XGBRegressor, plot_tree as xgb_plot_tree
 
 #from scripts.probability_distribution import weight
 
-def weighted_mse_loss(y_true, y_pred, sample_weight=None):
-    squared_error = (y_pred - y_true) ** 2
-    if sample_weight is not None:
-        return np.sum(squared_error * sample_weight) / np.sum(sample_weight)
-    else:
-        return np.mean(squared_error)
+import numpy as np
 
-def poisson(y_true, y_pred, sample_weight=None):
-    y_pred = np.clip(y_pred, 1e-8, None)  # Éviter log(0)
-    loss = y_pred - y_true * np.log(y_pred)
-    if sample_weight is not None:
-        return np.sum(loss * sample_weight) / np.sum(sample_weight)
-    else:
-        return np.mean(loss)
+##########################################################################################
 
-def rmsle_loss(y_true, y_pred, sample_weight=None):
-    log_pred = np.log1p(y_pred)
-    log_true = np.log1p(y_true)
-    squared_log_error = (log_pred - log_true) ** 2
-    if sample_weight is not None:
-        return np.sqrt(np.sum(squared_log_error * sample_weight) / np.sum(sample_weight))
-    else:
-        return np.sqrt(np.mean(squared_log_error))
+class MyXGBRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, alpha=1.0, **kwargs):
+        self.alpha = alpha
+        self.kwargs = kwargs
 
-def rmse_loss(y_true, y_pred, sample_weight=None):
-    squared_error = (y_pred - y_true) ** 2
-    if sample_weight is not None:
-        return np.sqrt(np.sum(squared_error * sample_weight) / np.sum(sample_weight))
-    else:
-        return np.sqrt(np.mean(squared_error))
+    def fit(self, X, y, **fit_params):
+        # Convertir les données d'entraînement en DMatrix
 
-def huber_loss(y_true, y_pred, delta=1.0, sample_weight=None):
-    error = y_pred - y_true
-    abs_error = np.abs(error)
-    quadratic = np.where(abs_error <= delta, 0.5 * error ** 2, delta * (abs_error - 0.5 * delta))
+        sample_weight = fit_params['sample_weight']
+        dtrain = xgb.DMatrix(X, label=y, weight=sample_weight)
+        
+        # Paramètres de l'entraînement, y compris ceux passés via kwargs
+        params = self.kwargs.copy()
+
+        eval_set = fit_params.get('eval_set', None)  # Utilisation de eval_set si passé
+        early_stopping_rounds = fit_params.get('early_stopping_rounds', None)
+        num_boost_round = params.get('n_estimators', 10)
+        
+        loss = params.get('objective', 'mse')
+        #if loss == 'rmse':
+        #    loss = rmse_loss
+        if loss.find('eae') != -1:
+            alpha = int(loss.split('-')[-1])
+            loss = exponential_absolute_error_loss(alpha)
+        elif loss == 'poisson':
+            loss = poisson_loss
+        elif loss == 'area':
+            loss = smooth_area_under_prediction_loss
+        elif loss == 'rmsle':
+            loss = 'reg:squaredlogerror'
+        elif loss == 'mse' or loss == 'rmse':
+            loss = weighted_mse_loss
+            loss = 'reg:squarederror'
+        elif loss == 'sig':
+            loss = sigmoid_adjusted_loss
+        elif loss == 'sig2':
+            loss = sigmoid_adjusted_loss_adapted
+        elif loss == 'quantile':
+            loss = 'reg:quantileerror'
+            alphas = np.asarray([0.05,0.25,0.50,0.75,0.95])
+
+        custom_metric = lambda x, y : ('error_r2', -my_r2_score(x, y))
+
+        params['quantile_alpha'] = alphas if 'alphas' in locals() else None
+
+        if isinstance(loss, str):
+            params['objective'] = loss
+            self.model_ = xgb.train(
+                params=params,
+                num_boost_round=num_boost_round,
+                dtrain=dtrain,
+                evals=eval_set,
+                #custom_metric=custom_metric,
+                early_stopping_rounds=early_stopping_rounds,
+                verbose_eval=0,
+            )
+        else:
+            params['objective'] = 'reg:squarederror'
+            self.model_ = xgb.train(
+                obj=loss,
+                params=params,
+                num_boost_round=num_boost_round,
+                dtrain=dtrain,
+                evals=eval_set,
+                #custom_metric=custom_metric,
+                early_stopping_rounds=early_stopping_rounds,
+                verbose_eval=0,
+            )
+        return self
+
+    def predict(self, X):
+        # Convertir les données de test en DMatrix
+        dtest = xgb.DMatrix(X)
+        return self.model_.predict(dtest)
     
-    if sample_weight is not None:
-        return np.average(quadratic, weights=sample_weight)
-    else:
-        return np.mean(quadratic)
-
-def log_cosh_loss(y_true, y_pred, sample_weight=None):
-    error = y_pred - y_true
-    log_cosh = np.log(np.cosh(error))
+    def get_params(self, deep: bool = True) -> dict:
+        return self.kwargs
     
-    if sample_weight is not None:
-        return np.average(log_cosh, weights=sample_weight)
-    else:
-        return np.mean(log_cosh)
+    def get_booster(self):
+        """
+        Retourne l'objet booster (modèle XGBoost complet) après l'entraînement.
+        """
+        return self.model_
 
-def tukey_biweight_loss(y_true, y_pred, c=4.685, sample_weight=None):
-    error = y_pred - y_true
-    abs_error = np.abs(error)
-    mask = (abs_error <= c)
-    loss = (1 - (1 - (error / c) ** 2) ** 3) * mask
-    tukey_loss = (c ** 2 / 6) * loss
+class MyXGBClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, alpha=1.0, **kwargs):
+        self.alpha = alpha
+        self.kwargs = kwargs
+
+    def fit(self, X, y, **fit_params):
+        # Convertir les données d'entraînement en DMatrix
+        sample_weight = fit_params.get('sample_weight', None)
+        
+        y = y.astype(int)
+
+        dtrain = xgb.DMatrix(X, label=y, weight=sample_weight)
+        
+        # Paramètres de l'entraînement, y compris ceux passés via kwargs
+        params = self.kwargs.copy()
+
+        # Appeler la méthode d'entraînement avec fit_params
+        eval_set = fit_params.get('eval_set', None)  # Utilisation de eval_set si passé
+        early_stopping_rounds = fit_params.get('early_stopping_rounds', None)
+        num_boost_round = params.get('n_estimators', 10)
+        
+        # Adjust the loss/objective parameter
+        loss = params.get('objective', None)
+        if loss == 'logloss':
+            loss = 'binary:logistic'
+        elif loss == 'softmax':
+            loss = 'multi:softmax'
+
+            # Ensure num_class is set for multi-class objectives
+            num_classes = np.nanmax(y) + 1
+            if 'num_class' not in params:
+                params['num_class'] = num_classes
+            elif params['num_class'] != num_classes:
+                raise ValueError(f"Mismatch: num_class in parameters is {params['num_class']} "
+                                f"but found {num_classes} unique classes in y.")
+        elif loss == 'softprob':
+            loss = 'multi:softprob'
+
+            # Ensure num_class is set for multi-class objectives
+            num_classes = np.nanmax(y) + 1
+            if 'num_class' not in params:
+                params['num_class'] = num_classes
+            elif params['num_class'] != num_classes:
+                raise ValueError(f"Mismatch: num_class in parameters is {params['num_class']} "
+                                f"but found {num_classes} unique classes in y.")
+
+        params['objective'] = loss
+
+        if isinstance(loss, str):
+            self.model_ = xgb.train(
+                params=params,
+                num_boost_round=num_boost_round,
+                dtrain=dtrain,
+                evals=eval_set,
+                early_stopping_rounds=early_stopping_rounds,
+                verbose_eval=0,
+            )
+        else:
+            params['objective'] = 'binary:logistic'
+            self.model_ = xgb.train(
+                obj=loss,
+                params=params,
+                num_boost_round=num_boost_round,
+                dtrain=dtrain,
+                evals=eval_set,
+                early_stopping_rounds=early_stopping_rounds,
+                verbose_eval=0,
+            )
+        return self
+
+    def predict(self, X):
+        """
+        Prédit les classes pour les données d'entrée en mode multi-classe.
+        """
+        # Convertir les données de test en DMatrix
+        dtest = xgb.DMatrix(X)
+        
+        # Obtenir les probabilités prédictives
+        prob = self.model_.predict(dtest)
+        
+        # Pour multi-classes, `prob` est une matrice : une ligne par échantillon, une colonne par classe.
+        # La classe prédite est celle avec la probabilité maximale.
+
+        return prob
+
+    def predict_proba(self, X):
+        """
+        Retourne les probabilités pour chaque classe en mode multi-classe.
+        """
+        # Convertir les données de test en DMatrix
+        dtest = xgb.DMatrix(X)
+        
+        # Obtenir les probabilités prédictives
+        prob = self.model_.predict(dtest, output_margin=True)
+        
+        # Pas de modification nécessaire pour multi-classes, `prob` est déjà une matrice de probabilités.
+        return prob
     
-    if sample_weight is not None:
-        return np.average(tukey_loss, weights=sample_weight)
-    else:
-        return np.mean(tukey_loss)
+    def get_booster(self):
+        """
+        Retourne l'objet booster (modèle XGBoost complet) après l'entraînement.
+        """
+        return self.model_
 
-def exponential_loss(y_true, y_pred, sample_weight=None):
-    exp_loss = np.exp(np.abs(y_pred - y_true))
-
-    if sample_weight is not None:
-        return np.average(exp_loss, weights=sample_weight)
-    else:
-        return np.mean(exp_loss)
-    
 ##########################################################################################
 #                                                                                        #
 #                                   Base class                                           #
@@ -143,7 +273,7 @@ def exponential_loss(y_true, y_pred, sample_weight=None):
 ##########################################################################################
 
 class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
-    def __init__(self, model, loss='logloss', name='Model'):
+    def __init__(self, model, model_type, loss='logloss', name='Model', dir_log = Path('../'), non_fire_number='full', target_name='nbsinister', task_type='regrssion', post_process=None):
         """
         Initialize the CustomModel class.
 
@@ -153,25 +283,51 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - loss: Loss function to use ('logloss', 'hinge_loss', etc.).
         """
         self.best_estimator_ = model
+        self.model_type = model_type
         self.name = self.best_estimator_.__class__.__name__ if name == 'Model' else name
         self.loss = loss
         self.X_train = None
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
+        self.dir_log = dir_log
+        self.final_score = None
+        self.features_selected = None
+        self.non_fire_number = non_fire_number
+        self.target_name = target_name
+        self.task_type = task_type
+        self.post_process = post_process
 
-    def fit(self, X, y, optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
+    def fit(self, X, y, X_test=None, y_test=None, features_search=False, optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
         """
         Train the model on the data using GridSearchCV or BayesSearchCV.
 
         Parameters:
         - X: Training data.
         - y: Labels for the training data.
-        - grid_params: Parameters to optimize.
+        - grid_params: Parameters to optimize
         - optimization: Optimization method to use ('grid' or 'bayes').
         - fit_params: Additional parameters for the fit function.
         """
+                
         self.X_train = X
         self.y_train = y
+
+        if features_search:
+            features_selected, selected_features_index, final_score = self.fit_by_features(X, y, X_test, y_test, fit_params)
+            self.features_selected, self.final_score = features_selected, final_score
+            X = X[features_selected]
+            fit_params = self.update_fit_params(self.model_type, fit_params, features_selected, selected_features_index)
+            
+            df_features = pd.DataFrame(index=np.arange(0, len(features_selected)))
+            df_features['features'] = features_selected
+            df_features['r2_score'] = final_score
+            df_features.to_csv(self.dir_log / f'{self.name}_features.csv')
+        else:
+            self.features_selected = list(X.columns)
+            df_features = pd.DataFrame(index=np.arange(0, len(self.features_selected)))
+            df_features['features'] = self.features_selected
+            df_features['r2_score'] = np.nan
+            df_features.to_csv(self.dir_log / f'{self.name}_features.csv')
 
         # Train the final model with all selected features
         if optimization == 'grid':
@@ -200,7 +356,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                         param_range[0], param_range[-1])
                 elif isinstance(param_range[0], float):
                     param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
-                
+
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, Refit=False)
             bayes_search.fit(X, y, **fit_params)
@@ -219,7 +375,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
         
         # Fit the model on the entire dataset
-        self.best_estimator_.fit(X, y, **fit_params)
+        if optimization != 'skip':
+            self.best_estimator_.fit(X, y, **fit_params)
         
         # Save the best estimator as the one that had the highest cross-validation score
         """self.cv_results_['mean_cv_score'] = np.mean(cv_scores)
@@ -228,6 +385,160 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         #data_dmatrix = xgboost.DMatrix(data=X, label=y, weight=fit_params['sample_weight'])
         #self.best_estimator_ = xgboost.train(best_params, data_dmatrix)
+
+    def fit_by_features(self, X, y, X_test, y_test, fit_params_ori):
+        final_selected_features = []
+        final_selected_features_index = []
+        final_score = []
+        features = list(X.columns)
+        num_iteration = 1
+        iter_score = -math.inf
+
+        for num_iter in range(num_iteration):
+            print(f'###############################################################')
+            print(f'#                                                             #')
+            print(f'#                 Iteration {num_iter + 1}                              #')
+            print(f'#                                                             #')
+            print(f'###############################################################')
+            features_importance = []
+            selected_features_ = []
+            selected_features_index = []
+            score_ = []
+            all_score = []
+            all_features = []
+            base_score = -math.inf
+            count_max = 50
+            c = 0
+            model = copy.deepcopy(self.best_estimator_)
+
+            if num_iter != 0:
+                random.shuffle(features)
+
+            for i, fet in enumerate(features):
+                selected_features_.append(fet)
+                selected_features_index.append(features.index(fet))
+
+                X_train_single = X[selected_features_]
+                
+                fit_params = self.update_fit_params(self.model_type, fit_params_ori, selected_features_, selected_features_index)
+
+                model.fit(X=X_train_single, y=y, **fit_params)
+                self.best_estimator_ = copy.deepcopy(model)
+                self.features_selected = selected_features_
+            
+                # Calculer le score avec cette seule caractéristique
+                single_feature_score = self.score(X_test[selected_features_], y_test)
+                all_score.append(single_feature_score)
+                all_features.append(fet)
+
+                # Si le score ne s'améliore pas, on retire la variable de la liste
+                if single_feature_score <= base_score:
+                    selected_features_.pop(-1)
+                    selected_features_index.pop(-1)
+                    c += 1
+                else:
+                    print(f'With {fet} number {i}: {base_score} -> {single_feature_score}')
+                    base_score = single_feature_score
+                    score_.append(single_feature_score)
+                    c = 0
+
+                if c > count_max:
+                    print(f'Score didn t improove for {count_max} features, we break')
+                    break
+
+                features_importance.append(single_feature_score)
+
+            plt.figure(figsize=(15,10))
+            x_score = np.arange(len(all_features))
+            plt.plot(x_score, all_score)
+            plt.xticks(x_score, all_features, rotation=90)
+            plt.savefig(self.dir_log / f'{num_iter}.png')
+
+            if base_score > iter_score:
+                iter_score = base_score
+                final_selected_features = selected_features_
+                final_selected_features_index = selected_features_index
+                final_score = score_
+
+        plt.figure(figsize=(15,10))
+        x_score = np.arange(len(final_selected_features))
+        plt.plot(x_score, final_score)
+        plt.xticks(x_score, final_selected_features, rotation=90)
+        plt.savefig(self.dir_log / f'best_iter.png')
+
+        return final_selected_features, final_selected_features_index, final_score
+    
+    def update_fit_params(self, model_type, fit_params, features, features_index):
+        if model_type.find('xgboost') != -1:
+
+            dval = fit_params.get('eval_set')[1][0]  # Mise à jour de l'ensemble de validation
+            data = dval.get_data().toarray()
+            label = dval.get_label()
+            weight = dval.get_weight()
+            data_df = pd.DataFrame(index=np.arange(0, data.shape[0]))
+            data_df[features] = data[:, features_index]
+            dval = xgb.DMatrix(data_df, label=label, weight=weight)
+
+            dtrain = fit_params.get('eval_set')[0][0]# Mise à jour de l'ensemble d'entraînement
+            data = dtrain.get_data().toarray()
+            label = dtrain.get_label()
+            weight = dtrain.get_weight()
+            data_df = pd.DataFrame(index=np.arange(0, data.shape[0]))
+            data_df[features] = data[:, features_index]
+            dtrain = xgb.DMatrix(data_df, label=label, weight=weight)
+            sample_weight = fit_params.get('sample_weight')  # Mise à jour des poids
+            fit_params = {
+                'eval_set': [(dtrain, 'train'), (dval, 'validation')],
+                'sample_weight': sample_weight,
+                'verbose': fit_params.get('verbose', False),
+                'early_stopping_rounds': fit_params.get('early_stopping_rounds', 15)
+            }
+            
+        elif model_type == 'ngboost':
+            dval = fit_params.get('X_val')[features]
+            dtrain = fit_params.get('sample_weight')  # Mise à jour de l'ensemble d'entraînement
+            fit_params = {
+                'X_val': dval,
+                'Y_val': fit_params.get('Y_val'),
+                'sample_weight': fit_params.get('sample_weight'),
+                'early_stopping_rounds': 15,
+            }
+
+        elif model_type == 'rf':
+            pass
+
+        elif model_type == 'dt':
+            pass
+
+        elif model_type == 'lightgbm':
+            df_val = fit_params.get('eval_set')[0]
+            fit_params = {
+                'eval_set': [(df_val[0], df_val[1])],
+                'eval_sample_weight': [fit_params.get('eval_sample_weight')[0]],
+                'sample_weight': fit_params.get('sample_weight'),
+                'early_stopping_rounds': 15,
+                'verbose': False
+            }
+
+        elif model_type == 'svm':
+            pass
+
+        elif model_type == 'poisson':
+            pass
+
+        elif model_type == 'gam':
+            pass
+
+        elif model_type == 'linear':
+            fit_params = {}
+
+        else:
+            raise ValueError(f"Unsupported model model_type: {model_type}")
+        
+        return fit_params
+
+    def get_model(self):
+        return self.best_estimator_
 
     def recursive_fit(self, X_train, y_train, eval_set, features, n_steps, early_stopping_rounds, **fit_params):
         """
@@ -258,7 +569,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if X_val is None or y_val is None:
             raise ValueError("eval_set must be provided for early stopping.")
 
-        # Initialize lists to store scoreS
+        # Initialize lists to store score
         val_scores = []
 
         # Custom training loop
@@ -382,7 +693,6 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def simulate_fit(self, X_train, y_train, eval_set, features, n_steps, early_stopping_rounds, **fit_params):
         pass
 
-
     def predict(self, X):
         """
         Predict labels for input data.
@@ -395,9 +705,26 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         #dtest = xgboost.DMatrix(data=X)
         #return self.best_estimator_.predict(dtest)
-        return self.best_estimator_.predict(X)
+        return self.best_estimator_.predict(X[self.features_selected])
+    
+    def predict_nbsinister(self, X):
+        
+        if self.target_name == 'nbsinister':
+            return self.predict(X)
+        else:
+            assert self.post_process is not None
+            predict = self.predict(X)
+            return self.post_process.predict_nbsinister(predict)
+    
+    def predict_risk(self, X):
 
-
+        if self.task_type == 'classification':
+            return self.predict(X)
+        else:
+            assert self.post_process is not None
+            predict = self.predict(X)
+            return self.post_process.predict_risk(predict)
+        
     def predict_proba(self, X):
         """
         Predict probabilities for input data.
@@ -409,10 +736,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - Predicted probabilities.
         """
         if hasattr(self.best_estimator_, "predict_proba"):
-            return self.best_estimator_.predict_proba(X)
+            return self.best_estimator_.predict_proba(X[self.features_selected])
         elif self.name.find('gam') != -1:
             res = np.zeros((X.shape[0], 2))
-            res[:, 1] = self.best_estimator_.predict(X)
+            res[:, 1] = self.best_estimator_.predict(X[self.features_selected])
             return res
         else:
             raise AttributeError(
@@ -420,44 +747,26 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
     def score(self, X, y, sample_weight=None):
         """
-        Evaluate the model's performance.
+        Evaluate the model's performance for each ID.
 
         Parameters:
-        - X: Input data.
-        - y: True labels.
-        - sample_weight: Sample weights.
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
 
         Returns:
-        - The model's score on the provided data.
+        - Mean score across all IDs.
         """
-        y_pred = self.predict(X)
-        if self.loss == 'logloss':
-            proba = self.predict_proba(X)
-            return -log_loss(y, proba)
-        elif self.loss == 'hinge_loss':
-            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'accuracy':
-            return accuracy_score(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'mse':
-            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'rmse':
-            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
-        elif self.loss == 'rmsle':
-            return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'poisson':
-            return -poisson(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'huber_loss':
-            return -huber_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'log_cosh_loss':
-            return -log_cosh_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'tukey_biweight_loss':
-            return -tukey_biweight_loss(y, y_pred, sample_weight=sample_weight)
-        elif self.loss == 'exponential_loss':
-            return -exponential_loss(y, y_pred, sample_weight=sample_weight)
-        else:
-            raise ValueError(f"Unknown loss function: {self.loss}")
-        
+        predictions = self.predict(X)
+        return self.score_with_prediction(predictions, y, sample_weight)
+
     def score_with_prediction(self, y_pred, y, sample_weight=None):
+        #return calculate_signal_scores(y, y_pred)
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+        if self.loss == 'area':
+            return calculate_signal_scores(y, y_pred)
         if self.loss == 'logloss':
             return -log_loss(y, y_pred)
         elif self.loss == 'hinge_loss':
@@ -469,17 +778,17 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         elif self.loss == 'rmse':
             return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
         elif self.loss == 'rmsle':
-            return -rmsle_loss(y, y_pred, sample_weight=sample_weight)
+            pass
         elif self.loss == 'poisson':
-            return -poisson(y, y_pred, sample_weight=sample_weight)
+            pass
         elif self.loss == 'huber_loss':
-            return -huber_loss(y, y_pred, sample_weight=sample_weight)
+            pass
         elif self.loss == 'log_cosh_loss':
-            return -log_cosh_loss(y, y_pred, sample_weight=sample_weight)
+            pass
         elif self.loss == 'tukey_biweight_loss':
-            return -tukey_biweight_loss(y, y_pred, sample_weight=sample_weight)
+            pass
         elif self.loss == 'exponential_loss':
-            return -exponential_loss(y, y_pred, sample_weight=sample_weight)
+            pass
         else:
             raise ValueError(f"Unknown loss function: {self.loss}")
 
@@ -526,6 +835,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """
         Return the scoring function as a string based on the chosen loss function.
         """
+        return r2_score
         if self.loss == 'logloss':
             return 'neg_logloss'
         elif self.loss == 'hinge_loss':
@@ -614,7 +924,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         dir_output = Path(dir_output)
         check_and_create_path(dir_output / 'sample')
         try:
-            explainer = shap.Explainer(self.best_estimator_)
+            if isinstance(self.best_estimator_, MyXGBClassifier) or isinstance(self.best_estimator_, MyXGBRegressor):
+                explainer = shap.Explainer(self.best_estimator_.get_booster())
+            else:
+                explainer = shap.Explainer(self.best_estimator_)
             shap_values = explainer(df_set, check_additivity=False)
             plt.figure(figsize=figsize)
             if mode == 'bar':
@@ -673,6 +986,14 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         plt.savefig(Path(dir_output) / f"{self.name}_{param}_influence.png")
         plt.close('all')
 
+    def log(self, dir_output):
+        assert self.final_score is not None
+        check_and_create_path(dir_output)
+        plt.figure(figsize=(15,5))
+        plt.plot(self.final_score)
+        x_score = np.arange(len(self.features_selected))
+        plt.xticks(x_score, self.features_selected, rotation=45)
+        plt.savefig(self.dir_log / f'{self.name}.png')
 
 class MeanFeaturesModel(Model):
     def __init__(self):
@@ -691,7 +1012,6 @@ class MeanFeaturesModel(Model):
 
         return 1 - (A * B)
 
-
 ##########################################################################################
 #                                                                                        #
 #                                   Tree                                                 #
@@ -699,7 +1019,7 @@ class MeanFeaturesModel(Model):
 ##########################################################################################
 
 class ModelTree(Model):
-    def __init__(self, model, loss='logloss', name='ModelTree'):
+    def __init__(self, model, model_type, loss='logloss', name='ModelTree', non_fire_number='full', target_name='nbsinister'):
         """
         Initialize the ModelTree class.
 
@@ -708,7 +1028,7 @@ class ModelTree(Model):
         - name: The name of the model.
         - loss: Loss function to use ('logloss', 'hinge_loss', etc.).
         """
-        super().__init__(model, loss, name)
+        super().__init__(model=model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name)
 
     def plot_tree(self, features_name=None, class_names=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20, 20)):
         """
@@ -767,262 +1087,15 @@ class ModelTree(Model):
         else:
             raise AttributeError(
                 "The chosen model does not support tree plotting.")
-
-##########################################################################################
-#                                                                                        #
-#                                   Fusion                                               #
-#                                   (Not used)                                           #
-##########################################################################################
-
-class ModelFusion(Model):
-    def __init__(self, model_list, model, loss='logloss', name='ModelFusion'):
-        """
-        Initialize the ModelFusion class.
-
-        Parameters:
-        ----------
-        - model_list : list
-            A list of models to use as base learners.
-        - model : object
-            The model to use for the fusion.
-        - loss : str, optional (default='logloss')
-            Loss function to use ('logloss', 'hinge_loss', etc.).
-        - name : str, optional (default='ModelFusion')
-            The name of the model.
-        """
-        super().__init__(model, loss, name)
-        self.model_list = model_list
-
-    def fit(self, X_list, y_list, y, optimization_list='skip', grid_params_list=None, fit_params_list=None, fit_params=None, grid_params=None, deep=True):
-        """
-        Train the fusion model on the data using the predictions from the base models.
-
-        Parameters:
-        ----------
-        - X_list : list of np.array
-            List of training data for each base model.
-        - y_list : list of np.array
-            List of labels for the training data for each base model.
-        - y : np.array
-            Labels for the training data of the fusion model.
-        - optimization_list : str or list of str, optional (default='skip')
-            List of optimization methods to use ('grid', 'bayes', or 'skip') for each base model.
-        - grid_params_list : list of dict, optional
-            List of parameters to optimize for each base model.
-        - fit_params_list : list of dict, optional
-            List of additional parameters for the fit function for each base model.
-        - fit_params : dict, optional
-            Additional parameters for the fit function of the fusion model.
-        - grid_params : dict, optional
-            Parameters to optimize for the fusion model.
-        - deep : bool, optional (default=True)
-            Whether to perform deep training on the base models.
-        """
-        base_predictions = []
-
-        for i, model in enumerate(self.model_list):
-            X = X_list[i]
-            y = y_list[i]
-
-            if deep:
-                optimization = optimization_list[i] if isinstance(
-                    optimization_list, list) else optimization_list
-                grid_params = grid_params_list[i] if grid_params_list else None
-                fit_params = fit_params_list[i] if fit_params_list else {}
-
-                model.fit(X, y, optimization=optimization,
-                          grid_params=grid_params, fit_params=fit_params)
-                # Use the last X_list for consistency
-                base_predictions.append(model.predict(X))
-
-        # Stack predictions to form new feature set
-        stacked_predictions = np.column_stack(base_predictions)
-
-        # Fit the fusion model
-        super().fit(stacked_predictions, y, optimization='skip',
-                    grid_params=grid_params, fit_params=fit_params)
-
-    def predict(self, X):
-        """
-        Predict labels for input data.
-
-        Parameters:
-        ----------
-        - X : list of np.array
-            Data to predict labels for.
-
-        Returns:
-        -------
-        - np.array
-            Predicted labels.
-        """
-        base_predictions = [model.predict(X[i])
-                            for i, model in enumerate(self.model_list)]
-        stacked_predictions = np.column_stack(base_predictions)
-        return self.best_estimator_.predict(stacked_predictions)
-
-    def predict_proba(self, X):
-        """
-        Predict probabilities for input data.
-
-        Parameters:
-        ----------
-        - X : list of np.array
-            Data to predict probabilities for.
-
-        Returns:
-        -------
-        - np.array
-            Predicted probabilities.
-        """
-        base_predictions = [model.predict(X[i])
-                            for i, model in enumerate(self.model_list)]
-        stacked_predictions = np.column_stack(base_predictions)
-        return self.best_estimator_.predict_proba(stacked_predictions)
-
-    def score(self, X, y, sample_weight=None):
-        """
-        Evaluate the model's performance.
-
-        Parameters:
-        ----------
-        - X : list of np.array
-            Input data.
-        - y : np.array
-            True labels.
-        - sample_weight : np.array, optional
-            Sample weights.
-
-        Returns:
-        -------
-        - float
-            The model's score on the provided data.
-        """
-        base_predictions = [model.predict(X[i])
-                            for i, model in enumerate(self.model_list)]
-        stacked_predictions = np.column_stack(base_predictions)
-        return super().score(stacked_predictions, y, sample_weight)
-
-    def plot_features_importance(self, X, y_list, y, names, outname, dir_output, mode='bar', figsize=(50, 25), deep=True):
-        """
-        Display the importance of features using feature permutation.
-
-        Parameters:
-        ----------
-        - X : list of np.array
-            Data to evaluate feature importance.
-        - y_list : list of np.array
-            Corresponding labels for each base model.
-        - y : np.array
-            Labels for the fusion model.
-        - names : list
-            Names of the features.
-        - outname : str
-            Name of the test set.
-        - dir_output : Path
-            Directory to save the plot.
-        - mode : str, optional (default='bar')
-            Plot mode ('bar' or 'mustache').
-        - figsize : tuple, optional (default=(50, 25))
-            Figure size for the plot.
-        - deep : bool, optional (default=True)
-            Whether to perform deep plotting for base models.
-        """
-        if deep:
-            for i, model in enumerate(self.model_list):
-                model.plot_features_importance(
-                    X[i], y_list[i], names[i], f'{model.name}_{outname}', dir_output, mode=mode, figsize=figsize)
-        base_predictions = [model.predict(X[i])
-                            for i, model in enumerate(self.model_list)]
-        stacked_predictions = np.column_stack(base_predictions)
-        names = [f'{model.name}_prediction' for model in self.model_list]
-        super().plot_features_importance(stacked_predictions, y, outname, dir_output, mode=mode, figsize=figsize)
-
-    def plot_tree(self, deep, features_name_list=None, class_names_list=None, filled=True, outname="tree_plot", dir_output=".", figsize=(20, 20)):
-        """
-        Plot each model from the model list.
-
-        Parameters:
-        ----------
-        - deep : bool, optional (default=True)
-            Whether to perform deep plotting for base models.
-        - features_name_list : list of list, optional
-            List of feature names for each base model.
-        - class_names_list : list of list, optional
-            List of class names for each base model.
-        - filled : bool, optional (default=True)
-            Whether to color the nodes to reflect the majority class or value.
-        - outname : str, optional (default='tree_plot')
-            Name of the output file.
-        - dir_output : Path, optional (default='.')
-            Directory to save the plots.
-        - figsize : tuple, optional (default=(20, 20))
-            Figure size for the plot.
-        """
-        if deep:
-            for i, model in enumerate(self.model_list):
-                if isinstance(model, ModelTree):
-                    model.plot_tree(outname=f'{model.name}_tree_plot', dir_output=dir_output,
-                                    figsize=figsize, filled=filled, features_name=features_name_list[i], class_names=class_names_list[i])
-
-        features_name = [
-            f'{model.name}_prediction' for model in self.model_list]
-
-        if isinstance(self.best_estimator_, DecisionTreeClassifier) or isinstance(self.best_estimator_, DecisionTreeRegressor):
-            # Plot for DecisionTree
-            plt.figure(figsize=figsize)
-            sklearn_plot_tree(
-                self.best_estimator_, feature_names=features_name, class_names=None, filled=filled)
-            plt.savefig(Path(dir_output) / f"{outname}.png")
-            plt.close('all')
-        elif isinstance(self.best_estimator_, RandomForestClassifier) or isinstance(self.best_estimator_, RandomForestRegressor):
-            # Plot for RandomForest - only the first tree
-            plt.figure(figsize=figsize)
-            sklearn_plot_tree(self.best_estimator_.estimators_[
-                              0], feature_names=features_name, class_names=None, filled=filled)
-            plt.savefig(Path(dir_output) / f"{outname}.png")
-            plt.close('all')
-        elif isinstance(self.best_estimator_, XGBClassifier) or isinstance(self.best_estimator_, XGBRegressor):
-            # Plot for XGBoost
-            plt.figure(figsize=figsize)
-            xgb_plot_tree(self.best_estimator_, num_trees=0)
-            plt.savefig(Path(dir_output) / f"{outname}.png")
-            plt.close('all')
-        elif isinstance(self.best_estimator_, LGBMClassifier) or isinstance(self.best_estimator_, LGBMRegressor):
-            # Plot for LightGBM
-            plt.figure(figsize=figsize)
-            lgb_plot_tree(self.best_estimator_, tree_index=0, figsize=figsize, show_info=[
-                          'split_gain', 'internal_value', 'internal_count', 'leaf_count'])
-            plt.savefig(Path(dir_output) / f"{outname}.png")
-            plt.close('all')
-        elif isinstance(self.best_estimator_, NGBClassifier) or isinstance(self.best_estimator_, NGBRegressor):
-            # Plot for NGBoost - not directly supported, but you can plot the base learner
-            if hasattr(self.best_estimator_, 'learners_'):
-                learner = self.best_estimator_.learners_[0][0]
-                if hasattr(learner, 'tree_'):
-                    plt.figure(figsize=figsize)
-                    sklearn_plot_tree(
-                        learner, feature_names=features_name, class_names=None, filled=filled)
-                    plt.savefig(Path(dir_output) / f"{outname}.png")
-                    plt.close('all')
-                else:
-                    raise AttributeError(
-                        "The base learner of NGBoost does not support tree plotting.")
-            else:
-                raise AttributeError(
-                    "The chosen NGBoost model does not support tree plotting.")
-        else:
-            raise AttributeError(
-                "The chosen model does not support tree plotting.")
         
 ##########################################################################################
 #                                                                                        #
-#                                   Votting                                              #
+#                                   Voting                                              #
 #                                                                                        #
 ##########################################################################################
 
-class ModelVoting(Model):
-    def __init__(self, models, loss='mse', name='ModelVoting'):
+class ModelVoting(RegressorMixin, ClassifierMixin):
+    def __init__(self, models, features, loss='mse', name='ModelVoting', dir_log=Path('../'), non_fire_number='full', target_name='nbsinister'):
         """
         Initialize the ModelVoting class.
 
@@ -1031,16 +1104,21 @@ class ModelVoting(Model):
         - name: The name of the model.
         - loss: Loss function to use ('logloss', 'hinge_loss', 'mse', 'rmse', etc.).
         """
-        super().__init__(model=None, loss=loss, name=name)
+        super().__init__()
         self.best_estimator_ = models  # Now a list of models
+        self.features = features
         self.name = name
         self.loss = loss
         self.X_train = None
         self.y_train = None
         self.cv_results_ = None  # Adding the cv_results_ attribute
         self.is_fitted_ = [False] * len(models)  # Keep track of fitted models
+        self.features_per_model = []
+        self.dir_log = dir_log
+        self.non_fire_number = non_fire_number
+        self.target_name = target_name
 
-    def fit(self, X_list, y_list, optimization='skip', grid_params_list=None, fit_params_list=None, cv_folds=10):
+    def fit(self, X, y, X_test, y_test, optimization='skip', grid_params_list=None, fit_params_list=None, cv_folds=10):
         """
         Train each model on the corresponding data.
 
@@ -1052,55 +1130,209 @@ class ModelVoting(Model):
         - fit_params_list: List of additional parameters for the fit function for each model.
         - cv_folds: Number of cross-validation folds.
         """
-        if not isinstance(X_list, list) or not isinstance(y_list, list):
-            raise ValueError("X_list and y_list must be lists of datasets.")
-        if len(self.best_estimator_) != len(X_list) or len(X_list) != len(y_list):
-            raise ValueError("The length of models, X_list, and y_list must be the same.")
-
-        if grid_params_list is None:
-            grid_params_list = [None] * len(self.best_estimator_)
-        if fit_params_list is None:
-            fit_params_list = [{}] * len(self.best_estimator_)
-
-        self.X_train = X_list
-        self.y_train = y_list
-        self.cv_results_ = []
-        self.is_fitted_ = [False] * len(self.best_estimator_)
-
-        for i, estimator in enumerate(self.best_estimator_):
-            
-            if hasattr(estimator, 'feature_importances_'):
-                self.is_fitted_[i] = True
+        if self.non_fire_number != 'full':
+            if self.non_fire_number.find('binary') != -1:
+                vec = self.non_fire_number.split('-')
+                try:
+                    nb = int(vec[-1]) * len(y[y[self.target_name] > 0])
+                except:
+                    print(f'{self.non_fire_number} with undefined factor, set to 1 -> {len(y[y[self.target_name] > 0])}')
+                    nb = len(X[X[self.target_name] > 0])
                 
-            if self.is_fitted_[i]:
-                print(f"Model {i} is already fitted. Skipping retraining.")
-                continue
+                new_train_dataset = y[y[self.target_name] > 0]
+                non_fire_dataset = y[y[self.target_name] == 0]
+                nb = min(len(non_fire_dataset), nb)
+                non_fire_dataset = non_fire_dataset.sample(nb)
+                X = pd.concat((new_train_dataset, non_fire_dataset)).sort_values(by=['date', 'graph_id'])
 
-            X = X_list[i]
-            y = y_list[i]
-            grid_params = grid_params_list[i]
-            fit_params = fit_params_list[i]
+                filtered_indexes = X.index
+                y = y.loc[filtered_indexes]
+                X.reset_index(drop=True, inplace=True)
 
-            # Train the final model with all selected features
-            if optimization == 'grid':
-                assert grid_params is not None
-                grid_search = GridSearchCV(estimator, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
-                grid_search.fit(X, y, **fit_params)
-                best_params = grid_search.best_params_
-                self.cv_results_.append(grid_search.cv_results_)
-                estimator.set_params(**best_params)
-            elif optimization == 'bayes':
-                # For simplicity, bayesian optimization is not implemented here
-                raise NotImplementedError("Bayesian optimization is not implemented in ModelVoting.")
-            elif optimization == 'skip':
-                estimator.fit(X, y, **fit_params)
-            else:
-                raise ValueError("Unsupported optimization method")
+                print(f'Train mask {X.shape}')
+                print(f'Train mask with weight > 0 {X[X["weight"] > 0].shape}')
 
-            estimator.fit(X, y, **fit_params)
-            self.is_fitted_[i] = True
+        self.cv_results_ = []
+        self.is_fitted_ = [True] * len(self.best_estimator_)
 
-    def predict(self, X_list):
+        self.features_per_model, self.best_estimator_, self.final_scores = \
+                    self.fit_by_features(X, y, X_test, y_test, self.best_estimator_, optimization, grid_params_list, fit_params_list, cv_folds)
+
+    def fit_by_features(self, X, y, X_test, y_test, models, optimization, grid_params_list, fit_params_list, cv_folds):
+        final_selected_features = []
+        final_models = []
+        final_scores = []
+        final_fit_params = []
+        num_iteration = 1
+        
+        features = copy.deepcopy(self.features)  # Liste des features initiales
+
+        for model_index, model in enumerate(models):
+            best_selected_features = []
+            best_model = None
+            best_score = -math.inf
+            
+            for num_iter in range(num_iteration):
+                print(f'###############################################################')
+                print(f'#                                                             #')
+                print(f'#                 Iteration {num_iter + 1}                    #')
+                print(f'#                                                             #')
+                print(f'###############################################################')
+
+                # Mélanger les features à chaque itération
+                shuffled_features = copy.deepcopy(features)
+                random.shuffle(shuffled_features)
+
+                selected_features_ = []
+                selected_features_index = []
+                all_features = []
+                base_score = -math.inf
+                c = 0
+                count_max = 50
+
+                # Créer une copie indépendante du modèle pour chaque itération
+                current_model = copy.deepcopy(model)
+                current_model.dir_log = self.dir_log
+
+                all_score = []
+                all_features = []
+
+                score_improvment = []
+                features_improvment = []
+                
+                for i, fet in enumerate(shuffled_features):
+                    selected_features_.append(fet)
+                    selected_features_index.append(features.index(fet))
+                    X_train_selected = X[selected_features_]
+                    
+                    # Mise à jour des paramètres de fit avec les features sélectionnées
+                    fit_params = self.update_fit_params(model.model_type, fit_params_list[model_index].copy(), selected_features_, selected_features_index)
+
+                    # Entraîner le modèle avec les features sélectionnées
+                    current_model.fit(X=X_train_selected, y=y, optimization='skip', fit_params=fit_params)
+
+                    # Calculer le score avec la combinaison actuelle de features
+                    current_score = current_model.score(X_test[selected_features_], y_test)
+                    all_score.append(current_score)
+                    all_features.append(features)
+
+                    if current_score > base_score:
+                        print(f'Feature added: {fet} (index: {i}) -> Score improved: {base_score} -> {current_score}')
+                        base_score = current_score
+                        c = 0  # Réinitialiser le compteur d'arrêt
+                        best_iteration_model = copy.deepcopy(current_model)  # Sauvegarder le meilleur modèle pour cette itération
+                        score_improvment.append(current_score)
+                        features_improvment.append(features)
+                    else:
+                        print(f'Feature removed: {fet} (index: {i}) -> Score did not improve.')
+                        selected_features_.pop(-1)  # Retirer la feature
+                        selected_features_index.pop(-1)
+                        c += 1
+
+                    # Si le score n'a pas été amélioré pour un nombre consécutif de features, arrêter
+                    if c > count_max:
+                        print(f'No improvement for {count_max} features, stopping feature selection for this iteration.')
+                        break
+
+                plt.figure(figsize=(15,5))
+                x_score = np.arange(len(all_features))
+                plt.plot(x_score, all_score)
+                plt.xticks(x_score, all_features, rotation=45)
+                plt.savefig(self.dir_log / f'{model.name}_{model_index}_{num_iter}.png')
+
+                # Comparer les résultats de cette itération avec le meilleur résultat global
+                if base_score > best_score:
+                    best_score = base_score
+                    best_selected_features = selected_features_
+                    best_model = best_iteration_model
+                    best_scores_array = score_improvment
+
+            print(f"Best score for model {model_index + 1}: {best_score}")
+            print(f"Best selected features for model {model_index + 1}: {best_selected_features}")
+
+            # Entraîner le meilleur modèle trouvé avec la meilleure combinaison de features et l'optimisation finale
+            if optimization != 'skip':
+                best_model.fit(X=X[best_selected_features], y=y, optimization=optimization, grid_params=grid_params_list[model_index], cv_folds=cv_folds, fit_params=fit_params)
+
+            # Stocker les résultats finaux pour ce modèle
+            final_selected_features.append(best_selected_features)
+            final_models.append(best_model)
+            final_scores.append(best_scores_array)
+            final_fit_params.append(fit_params)
+
+        return final_selected_features, final_models, final_scores
+
+    def update_fit_params(self, model_type, fit_params, features, features_index):
+        if model_type.find('xgboost') != -1:
+
+            dval = fit_params.get('eval_set')[1][0]  # Mise à jour de l'ensemble de validation
+            data = dval.get_data().toarray()
+            label = dval.get_label()
+            weight = dval.get_weight()
+            data_df = pd.DataFrame(index=np.arange(0, data.shape[0]))
+            data_df[features] = data[:, features_index]
+            dval = xgb.DMatrix(data_df, label=label, weight=weight)
+
+            dtrain = fit_params.get('eval_set')[0][0]# Mise à jour de l'ensemble d'entraînement
+            data = dtrain.get_data().toarray()
+            label = dtrain.get_label()
+            weight = dtrain.get_weight()
+            data_df = pd.DataFrame(index=np.arange(0, data.shape[0]))
+            data_df[features] = data[:, features_index]
+            dtrain = xgb.DMatrix(data_df, label=label, weight=weight)
+            
+            sample_weight = fit_params.get('sample_weight')  # Mise à jour des poids
+            fit_params = {
+                'eval_set': [(dtrain, 'train'), (dval, 'validation')],
+                'sample_weight': sample_weight,
+                'verbose': fit_params.get('verbose', False),
+                'early_stopping_rounds': 15
+            }
+
+        elif model_type == 'ngboost':
+            dval = fit_params.get('X_val')[features]
+            dtrain = fit_params.get('sample_weight')  # Mise à jour de l'ensemble d'entraînement
+            fit_params = {
+                'X_val': dval,
+                'Y_val': fit_params.get('Y_val'),
+                'sample_weight': fit_params.get('sample_weight'),
+                'early_stopping_rounds': 15,
+            }
+
+        elif model_type == 'rf':
+            pass
+
+        elif model_type == 'dt':
+            pass
+
+        elif model_type == 'lightgbm':
+            df_val = fit_params.get('eval_set')[0]
+            fit_params = {
+                'eval_set': [(df_val[0], df_val[1])],
+                'eval_sample_weight': [fit_params.get('eval_sample_weight')[0]],
+                'sample_weight': fit_params.get('sample_weight'),
+                'early_stopping_rounds': 15,
+                'verbose': False
+            }
+
+        elif model_type == 'svm':
+            pass
+
+        elif model_type == 'poisson':
+            pass
+
+        elif model_type == 'gam':
+            pass
+
+        elif model_type == 'linear':
+            fit_params = {}
+
+        else:
+            raise ValueError(f"Unsupported model model_type: {model_type}")
+        
+        return fit_params
+
+    def predict(self, X):
         """
         Predict labels for input data using each model and aggregate the results.
 
@@ -1110,23 +1342,18 @@ class ModelVoting(Model):
         Returns:
         - Aggregated predicted labels.
         """
-        if not isinstance(X_list, list):
-            raise ValueError("X_list must be a list of datasets.")
-        if len(self.best_estimator_) != len(X_list):
-            raise ValueError("The length of models and X_list must be the same.")
-
         predictions = []
         for i, estimator in enumerate(self.best_estimator_):
-            X = X_list[i]
+            X_ = X[self.features_per_model[i]]
 
-            pred = estimator.predict(X)
+            pred = estimator.predict(X_)
             predictions.append(pred)
 
         # Aggregate predictions
         aggregated_pred = self.aggregate_predictions(predictions)
         return aggregated_pred
 
-    def predict_proba(self, X_list):
+    def predict_proba(self, X):
         """
         Predict probabilities for input data using each model and aggregate the results.
 
@@ -1136,16 +1363,11 @@ class ModelVoting(Model):
         Returns:
         - Aggregated predicted probabilities.
         """
-        if not isinstance(X_list, list):
-            raise ValueError("X_list must be a list of datasets.")
-        if len(self.best_estimator_) != len(X_list):
-            raise ValueError("The length of models and X_list must be the same.")
-
         probas = []
         for i, estimator in enumerate(self.best_estimator_):
-            X = X_list[i]
+            X_ = X[self.features_per_model[i]]
             if hasattr(estimator, "predict_proba"):
-                proba = estimator.predict_proba(X)
+                proba = estimator.predict_proba(X_)
                 probas.append(proba)
             else:
                 raise AttributeError(f"The model at index {i} does not support predict_proba.")
@@ -1172,7 +1394,6 @@ class ModelVoting(Model):
         else:
             # Regression: Average the predictions
             predictions_array = np.array(predictions_list)
-            print(predictions_array.shape)
             aggregated_pred = np.mean(predictions_array, axis=0)
             #aggregated_pred = np.max(predictions_array, axis=0)
         return aggregated_pred
@@ -1192,21 +1413,54 @@ class ModelVoting(Model):
         aggregated_proba = np.mean(probas_array, axis=0)
         return aggregated_proba
 
-    def score(self, X_list, y_true, sample_weight):
+    def score(self, X, y, sample_weight=None):
         """
-        Evaluate the ensemble model's performance.
+        Evaluate the model's performance for each ID.
 
         Parameters:
-        - X_list: List of input data.
-        - y_list: List of true labels.
-        - sample_weight_list: List of sample weights for each dataset.
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
 
         Returns:
-        - The model's score on the provided data.
+        - Mean score across all IDs.
         """
-        y_pred = self.predict(X_list)
+        predictions = self.predict(X)
+        return self.score_with_prediction(predictions, y, sample_weight)
+    
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
 
-        return self.score_with_prediction(y_pred, y_true, sample_weight=sample_weight)
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+    
+        return calculate_signal_scores(y_pred, y)
+        if self.loss == 'area':
+            return -smooth_area_under_prediction_loss(y, y_pred, loss=True)
+        if self.loss == 'logloss':
+            return -log_loss(y, y_pred)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            pass
+        elif self.loss == 'poisson':
+            pass
+        elif self.loss == 'huber_loss':
+            pass
+        elif self.loss == 'log_cosh_loss':
+            pass
+        elif self.loss == 'tukey_biweight_loss':
+            pass
+        elif self.loss == 'exponential_loss':
+            pass
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")
 
     def get_params(self, deep=True):
         """
@@ -1228,7 +1482,7 @@ class ModelVoting(Model):
                     params.update({f'model_{i}__{key}': value for key, value in estimator_params.items()})
         return params
     
-    def shapley_additive_explanation(self, df_set_list, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+    def shapley_additive_explanation(self, X, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
         """
         Perform shapley additive explanation features on each estimator
         
@@ -1245,8 +1499,7 @@ class ModelVoting(Model):
         """
 
         for i, estimator in enumerate(self.best_estimator_):
-            sub_model = Model(estimator, self.loss, name=f'estimator_{i}')
-            sub_model.shapley_additive_explanation(df_set_list[i], f'{outname}_{i}', dir_output, mode, figsize, samples, samples_name)
+            self.best_estimator_[i].shapley_additive_explanation(X[self.features_per_model[i]], f'{outname}_{i}', dir_output, mode, figsize, samples, samples_name)
 
     def set_params(self, **params):
         """
@@ -1279,13 +1532,23 @@ class ModelVoting(Model):
                         estimator.set_params(**{key: value})
         return self
     
+    def log(self, dir_output):
+        check_and_create_path(dir_output)
+        print(self.features_per_model)
+        for model_index in range(len(self.features_per_model)):
+            plt.figure(figsize=(15,5))
+            x_score = np.arange(len(self.features_per_model[model_index]))
+            plt.plot(x_score, self.final_scores[model_index])
+            plt.xticks(x_score, self.features_per_model[model_index], rotation=45)
+            plt.savefig(self.dir_log / f'{self.best_estimator_[model_index].name}_{model_index}.png')
+    
 #################################################################################
 #                                                                               #
 #                                Stacking                                       #
 #                                                                               #
 #################################################################################
 
-class ModelStacking(Model):
+class ModelStacking(RegressorMixin, ClassifierMixin):
     def __init__(self, models, final_estimator=None, loss='mse', name='ModelStacking'):
         """
         Initialize the ModelStacking class.
@@ -1394,7 +1657,7 @@ class ModelStacking(Model):
         if len(self.base_estimators) != len(X_list):
             raise ValueError("The length of models and X_list must be the same.")
 
-        # Combine X_list into single X
+        # Combine X_list into single XModelVoting
         X = np.concatenate(X_list, axis=0)
 
         # Predict using the stacking model
@@ -1491,3 +1754,633 @@ class ModelStacking(Model):
         if self.best_estimator_ is not None:
             self.best_estimator_.set_params(**params)
         return self
+    
+    def score(self, X, y, id):
+        """
+        Evaluate the model's performance for each ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Mean score across all IDs.
+        """
+        predictions = self.predict(X, id)
+        return self.score_with_prediction(predictions, y)
+
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
+
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+    
+        return calculate_signal_scores(y_pred, y)
+        if self.loss == 'area':
+            return -smooth_area_under_prediction_loss(y, y_pred, loss=True)
+        if self.loss == 'logloss':
+            return -log_loss(y, y_pred)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            pass
+        elif self.loss == 'poisson':
+            pass
+        elif self.loss == 'huber_loss':
+            pass
+        elif self.loss == 'log_cosh_loss':
+            pass
+        elif self.loss == 'tukey_biweight_loss':
+            pass
+        elif self.loss == 'exponential_loss':
+            pass
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")
+
+######################################### Model OneById ###################################################
+
+from sklearn.base import clone
+from sklearn.utils.validation import check_is_fitted
+
+class OneByID(BaseEstimator, ClassifierMixin, RegressorMixin):
+    def __init__(self, model, model_type, loss='mse', name='OneByID', col_id_name=None, id_train=None, id_val=None, id_test=None, dir_log = Path('./'), non_fire_number='full', target_name='nbsinister'):
+        """
+        Initialize the OneByID model.
+
+        Parameters:
+        - model: The base model to use (must follow the sklearn API).
+        - loss: Loss function to use ('logloss', 'hinge_loss', 'mse', 'rmse', etc.).
+        - name: The name of the model.
+        - id_train: List of unique IDs corresponding to training data.
+        - id_val: List of unique IDs corresponding to validation data.
+        """
+        super().__init__()
+        self.model = model
+        self.model_type = model_type
+        self.loss = loss
+        self.name = name
+        self.id_train = np.array(id_train) if id_train is not None else None
+        self.id_val = np.array(id_val) if id_val is not None else None
+        self.id_test = np.array(id_test) if id_val is not None else None
+        self.models_by_id = {}  # Dictionary to store models for each ID
+        self.is_fitted_ = False
+        self.col_id_name = col_id_name
+        self.dir_log = dir_log
+        self.non_fire_number = non_fire_number
+        self.target_name = target_name
+
+    def fit(self, X, y, X_test=None, y_test=None, features_search=False, optimization='skip', grid_params=None, fit_params=None):
+        """
+        Train a separate model for each unique ID in id_train.
+
+        Parameters:
+        - X_train: Training data.
+        - y_train: Training labels.
+        - optimization: Optimization method to use ('grid' or 'skip').
+        - grid_params: Parameters to optimize for each model (if optimization='grid').
+        - fit_params: Additional parameters for the fit function.
+        """
+        if fit_params is None:
+            fit_params = {}
+
+        if self.id_train is None:
+            raise ValueError("id_train must be provided to train the model.")
+
+        unique_ids = np.unique(self.id_train)
+
+        # Train a model for each unique ID
+        for uid in unique_ids:
+            print(f"Training model for ID: {uid}")
+            mask_train = self.id_train == uid  # Mask for training data corresponding to the current ID
+
+            X_id_train = X[mask_train]
+            y_id_train = y[mask_train]
+
+            if X_test is not None and self.id_test is not None:
+                mask_test = self.id_test == uid  # Mask for training data corresponding to the current ID
+                X_id_test = X_test[mask_test]
+                y_id_test = y_test[mask_test]
+            else:
+                X_id_test = X_test
+                y_id_test = y_test
+
+            if X_id_test.shape[0] == 0:
+                doFeatures_search = False
+            else:
+                doFeatures_search = features_search 
+
+            # Create a clone of the base model to avoid interference
+            model = copy.deepcopy(self.model)
+            fit_params_model = self.update_fit_params(model.model_type, fit_params.copy(), np.argwhere(self.id_train == uid)[:, 0], np.argwhere(self.id_val == uid)[:, 0])
+            model.fit(X_id_train, y_id_train, X_test=X_id_test, y_test=y_id_test, features_search=doFeatures_search, optimization=optimization, grid_params=grid_params, fit_params=fit_params_model, cv_folds=10)
+
+            self.models_by_id[uid] = model
+
+        self.is_fitted_ = True
+
+    def predict(self, X, id):
+        """
+        Predict labels for input data using the models trained by ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Predicted labels.
+        """
+        check_is_fitted(self, 'is_fitted_')
+
+        if len(X) != len(id):
+            raise ValueError("X and id must have the same length.")
+
+        predictions = np.zeros(len(X))
+
+        unique_ids = np.unique(id)
+        for uid in unique_ids:
+            print(f"Predicting for ID: {uid}")
+            mask = id == uid  # Mask for validation data corresponding to the current ID
+
+            X_id = X[mask]
+
+            if uid not in self.models_by_id:
+                raise ValueError(f"No model found for ID: {uid}")
+
+            # Predict using the model corresponding to the current ID
+            if uid not in self.models_by_id.keys():
+                continue 
+            predictions[mask] = self.models_by_id[uid].predict(X_id)
+
+        return predictions
+
+    def predict_proba(self, X, id):
+        """
+        Predict probabilities for input data using the models trained by ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Predicted probabilities.
+        """
+        check_is_fitted(self, 'is_fitted_')
+
+        if len(X) != len(id):
+            raise ValueError("X_val and id_val must have the same length.")
+
+        probabilities = np.zeros(len(X))
+
+        unique_ids = np.unique(id)
+        for uid in unique_ids:
+            print(f"Predicting probabilities for ID: {uid}")
+            mask_val = id == uid  # Mask for validation data corresponding to the current ID
+
+            X_val = X[mask_val]
+
+            if uid not in self.models_by_id:
+                raise ValueError(f"No model found for ID: {uid}")
+
+            # Predict probabilities using the model corresponding to the current ID
+            probabilities[mask_val] = self.models_by_id[uid].predict_proba(X_val)[:, 1]
+
+        return probabilities
+
+    def shapley_additive_explanation(self, X, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+        """
+        Perform shapley additive explanation features on each estimator
+        
+        Parameters:
+        - df_set_list : a list for len(self.best_estiamtor) size, with ieme element being the dataframe for ieme estimator 
+        - outname : outname of the figure
+        - mode : mode of ploting
+        - figsize : figure size
+        - samples : use for additional plot where the shapley additive explanation is done on each sample
+        - samples_name : name of each sample 
+
+        Returns:
+        - None
+        """
+
+        unique_ids = np.unique(self.id_train)
+
+        for i, estimator in enumerate(unique_ids):
+            self.models_by_id[uid].shapley_additive_explanation(X, f'{outname}_{i}', dir_output, mode, figsize, samples, samples_name)
+
+    def score(self, X, y, id, sample_weight):
+        """
+        Evaluate the model's performance for each ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Mean score across all IDs.
+        """
+        predictions = self.predict(X, id)
+        return self.score_with_prediction(predictions, y, sample_weight)
+
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
+
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+    
+        return calculate_signal_scores(y_pred, y)
+        if self.loss == 'area':
+            return -smooth_area_under_prediction_loss(y, y_pred, loss=True)
+        if self.loss == 'logloss':
+            return -log_loss(y, y_pred)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            pass
+        elif self.loss == 'poisson':
+            pass
+        elif self.loss == 'huber_loss':
+            pass
+        elif self.loss == 'log_cosh_loss':
+            pass
+        elif self.loss == 'tukey_biweight_loss':
+            pass
+        elif self.loss == 'exponential_loss':
+            pass
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")
+
+    def update_fit_params(self, model_type, fit_params, id_train, id_val):
+        if model_type.find('xgboost') != -1:
+            dval = fit_params.get('eval_set')[1][0].slice(id_val)  # Mise à jour de l'ensemble de validation
+            dtrain = fit_params.get('eval_set')[0][0].slice(id_train) # Mise à jour de l'ensemble d'entraînement
+            sample_weight = fit_params.get('sample_weight').values[id_train]  # Mise à jour des poids
+            fit_params = {
+                'eval_set': [(dtrain, 'train'), (dval, 'validation')],
+                'sample_weight': sample_weight,
+                'verbose': fit_params.get('verbose', False),
+                'early_stopping_rounds': fit_params.get('early_stopping_rounds', 15)
+            }
+
+        elif model_type == 'ngboost':
+            dval = fit_params.get('X_val')[id_val]
+            dtrain = fit_params.get('sample_weight')[id_train]  # Mise à jour de l'ensemble d'entraînement
+            fit_params = {
+                'X_val': dval,
+                'Y_val': fit_params.get('Y_val')[id_val],
+                'sample_weight': fit_params.get('sample_weight')[id_train],
+                'early_stopping_rounds': 15,
+            }
+
+        elif model_type == 'rf':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'dt':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'lightgbm':
+            df_val = fit_params.get('eval_set')[0][id_val]
+            fit_params = {
+                'eval_set': [(df_val[0], df_val[1])],
+                'eval_sample_weight': [fit_params.get('eval_sample_weight')[0][id_val]],
+                'sample_weight': fit_params.get('sample_weight')[id_train],
+                'early_stopping_rounds': 15,
+                'verbose': False
+            }
+
+        elif model_type == 'svm':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'poisson':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'gam':
+            sample_weight = fit_params.get('weights')[id_train]
+            fit_params = {
+                'weights': sample_weight
+            }
+
+        elif model_type == 'linear':
+            fit_params = {}
+
+        else:
+            raise ValueError(f"Unsupported model model_type: {model_type}")
+        
+        return fit_params
+
+############################################## Federated learning ##################################################################
+
+class FederatedByID(BaseEstimator, ClassifierMixin, RegressorMixin):
+    def __init__(self, model, model_type, n_udpate=1, loss='mse', name='FederatedByID', col_id_name=None, id_train=None, id_val=None, dir_output=Path('./')):
+        """
+        Initialize the FederatedByID model.
+
+        Parameters:
+        - model: The base model to use (must follow the sklearn API).
+        - model_type: Type of the model (e.g., 'xgboost', 'lightgbm', etc.).
+        - loss: Loss function to use ('logloss', 'hinge_loss', 'mse', 'rmse', etc.).
+        - name: The name of the model.
+        - id_train: List of unique IDs corresponding to training data.
+        - id_val: List of unique IDs corresponding to validation data.
+        """
+        super().__init__()
+        self.model = model
+        self.model_type = model_type
+        self.loss = loss
+        self.name = name
+        self.id_train = np.array(id_train) if id_train is not None else None
+        self.id_val = np.array(id_val) if id_val is not None else None
+        self.models_by_id = {}  # Dictionary to store models for each ID
+        self.global_model = None
+        self.is_fitted_ = False
+        self.n_update = n_udpate
+        self.col_id_name = col_id_name
+        self.dir_output = dir_output
+
+    def fit(self, X, y, optimization='skip', grid_params=None, fit_params=None):
+        """
+        Train a separate model for each unique ID and aggregate them into a global model.
+
+        Parameters:
+        - X: Training data.
+        - y: Training labels.
+        - optimization: Optimization method to use ('grid' or 'skip').
+        - grid_params: Parameters to optimize for each model (if optimization='grid').
+        - fit_params: Additional parameters for the fit function.
+        """
+        if fit_params is None:
+            fit_params = {}
+
+        if self.id_train is None:
+            raise ValueError("id_train must be provided to train the model.")
+
+        unique_ids = np.unique(self.id_train)
+        local_models = []  # Store local models for aggregation
+
+        # Train a model for each unique ID
+        for update in range(self.n_update):
+            for i, uid in enumerate(unique_ids):
+                print(f"Training model for ID: {uid}")
+                mask_train = self.id_train == uid  # Mask for training data corresponding to the current ID
+
+                X_id_train = X[mask_train]
+                y_id_train = y[mask_train]
+
+                # Create a clone of the base model to avoid interference
+                if len(local_models) <= i:
+                    model = copy.deepcopy(self.model)
+                else:
+                    model = local_models[i-1]
+
+                # Update fit parameters for the specific client (ID)
+                fit_params_model = self.update_fit_params(
+                    self.model_type,
+                    fit_params.copy(), 
+                    np.argwhere(self.id_train == uid)[:, 0],
+                    np.argwhere(self.id_val == uid)[:, 0]
+                )
+
+                # Train the model
+                model.fit(X_id_train, y_id_train, optimization=optimization, grid_params=grid_params, fit_params=fit_params_model)
+
+                # Store the trained model
+                self.models_by_id[uid] = model
+                if len(local_models) <= i:
+                    local_models.append(model)
+                else:
+                    local_models[i-1] = copy.deepcopy(model)
+
+            # Aggregate all local models into a global model
+            self.global_model = self.aggregate_models(local_models)
+            self.update_local_models_from_global()
+
+        self.is_fitted_ = True
+
+    def aggregate_models(self, local_models):
+        """
+        Aggregate local models into a global model.
+
+        Parameters:
+        - local_models: List of models trained on each client's data.
+
+        Returns:
+        - global_model: Aggregated model.
+        """
+        # For simplicity, we will average the parameters (e.g., weights of the trees, etc.)
+        global_model = copy.deepcopy(self.model)
+
+        if hasattr(global_model.best_estimator_, "get_booster"):
+            # If model is an XGBoost-like model, average boosters
+            boosters = [m.best_estimator_.get_booster() for m in local_models]
+            avg_booster = self.average_boosters(boosters)
+            global_model.best_estimator__Booster = avg_booster
+        else:
+            # For simpler models (e.g., linear models), average coefficients
+            coef_sum = np.sum([model.best_estimator_.coef_ for model in local_models], axis=0)
+            global_model.best_estimator_.coef_ = coef_sum / len(local_models)
+
+        return global_model
+
+    def average_boosters(self, boosters):
+        """
+        Average the weights of multiple XGBoost boosters.
+
+        Parameters:
+        - boosters: List of XGBoost boosters.
+
+        Returns:
+        - A new XGBoost booster with averaged weights.
+        """
+        avg_booster = copy.deepcopy(boosters[0])
+        trees = [b.get_dump() for b in boosters]
+
+        for i in range(len(trees[0])):
+            avg_tree = sum(float(tree[i]) for tree in trees) / len(boosters)
+            avg_booster._Booster[i] = avg_tree
+
+        return avg_booster
+    
+    def update_local_models_from_global(self):
+        """
+        Update all local models with the parameters from the global model.
+        """
+        if hasattr(self.global_model, "get_booster"):
+            global_booster = self.global_model.best_estimator_.get_booster()
+            for uid, model in self.models_by_id.items():
+                model._Booster = copy.deepcopy(global_booster)
+        else:
+            global_weights = copy.deepcopy(self.global_model.best_estimator_.coef_)
+            for uid, model in self.models_by_id.items():
+                model.coef_ = global_weights
+
+    def predict(self, X):
+        """
+        Predict labels for input data using the global model.
+
+        Parameters:
+        - X: Validation data.
+        - id: List of IDs corresponding to validation data.
+
+        Returns:
+        - Predicted labels.
+        """
+        check_is_fitted(self, 'is_fitted_')
+        return self.global_model.predict(X)
+
+    def score(self, X, y, sample_weight=None):
+        """
+        Evaluate the global model's performance.
+
+        Parameters:
+        - X: Validation data.
+        - y: True labels.
+        - id: List of IDs corresponding to validation data.
+
+        Returns:
+        - Model score.
+        """
+        predictions = self.predict(X)
+        return mean_squared_error(y, predictions)
+
+    def update_fit_params(self, model_type, fit_params, id_train, id_val):
+        if model_type.find('xgboost') != -1:
+            dval = fit_params.get('eval_set')[1][0].slice(id_val)  # Mise à jour de l'ensemble de validation
+            dtrain = fit_params.get('eval_set')[0][0].slice(id_train) # Mise à jour de l'ensemble d'entraînement
+            sample_weight = fit_params.get('sample_weight').values[id_train]  # Mise à jour des poids
+            fit_params = {
+                'eval_set': [(dtrain, 'train'), (dval, 'validation')],
+                'sample_weight': sample_weight,
+                'verbose': fit_params.get('verbose', False),
+                'early_stopping_rounds': fit_params.get('early_stopping_rounds', 15)
+            }
+
+        elif model_type == 'ngboost':
+            dval = fit_params.get('X_val')[id_val]
+            dtrain = fit_params.get('sample_weight')[id_train]  # Mise à jour de l'ensemble d'entraînement
+            fit_params = {
+                'X_val': dval,
+                'Y_val': fit_params.get('Y_val')[id_val],
+                'sample_weight': fit_params.get('sample_weight')[id_train],
+                'early_stopping_rounds': 15,
+            }
+
+        elif model_type == 'rf':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'dt':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'lightgbm':
+            df_val = fit_params.get('eval_set')[0][id_val]
+            fit_params = {
+                'eval_set': [(df_val[0], df_val[1])],
+                'eval_sample_weight': [fit_params.get('eval_sample_weight')[0][id_val]],
+                'sample_weight': fit_params.get('sample_weight')[id_train],
+                'early_stopping_rounds': 15,
+                'verbose': False
+            }
+
+        elif model_type == 'svm':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'poisson':
+            sample_weight = fit_params.get('sample_weight')[id_train]
+            fit_params = {
+                'sample_weight': sample_weight
+            }
+
+        elif model_type == 'gam':
+            sample_weight = fit_params.get('weights')[id_train]
+            fit_params = {
+                'weights': sample_weight
+            }
+
+        elif model_type == 'linear':
+            fit_params = {}
+
+        else:
+            raise ValueError(f"Unsupported model model_type: {model_type}")
+        
+        return fit_params
+    
+    def score(self, X, y, sample_weight=None):
+        """
+        Evaluate the model's performance for each ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Mean score across all IDs.
+        """
+        predictions = self.predict(X)
+        return self.score_with_prediction(predictions, y)
+    
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
+
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+        return calculate_signal_scores(y_pred, y)
+        if self.loss == 'area':
+            return -smooth_area_under_prediction_loss(y, y_pred, loss=True)
+        if self.loss == 'logloss':
+            return -log_loss(y, y_pred)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            pass
+        elif self.loss == 'poisson':
+            pass
+        elif self.loss == 'huber_loss':
+            pass
+        elif self.loss == 'log_cosh_loss':
+            pass
+        elif self.loss == 'tukey_biweight_loss':
+            pass
+        elif self.loss == 'exponential_loss':
+            pass
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")

@@ -158,3 +158,16 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
             return torch.mean(weighted_loss)
         else:
             return torch.mean(loss)
+        
+class ExponentialAbsoluteErrorLoss(torch.nn.Module):
+    def __init__(self, alpha=1.0):
+        super(ExponentialAbsoluteErrorLoss, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, y_true, y_pred):
+        # Calcul de l'erreur absolue
+        errors = torch.abs(y_true - y_pred)
+        # Application de l'exponentielle
+        loss = torch.mean(torch.exp(self.alpha * errors))
+        return loss
+        

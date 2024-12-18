@@ -19,7 +19,7 @@
 
 from forecasting_models.sklearn.sklearn_api_model import *
 
-def get_model(model_type, name, device, task_type, loss='log_loss', params=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, loss='log_loss', params=None, non_fire_number='full', target_name='nbsinister', post_process=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -60,11 +60,13 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None)
                          NGBClassifier, NGBRegressor)
 
     if isinstance(model, tree_based_models):
-        return ModelTree(model, loss=loss, name=name)
+        model_class = ModelTree(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
     else:
-        return Model(model, loss=loss, name=name)
+        model_class = Model(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
 
-def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBClassifier]:
+    return model_class
+
+def config_xgboost(device, task_type, params=None) -> Union[MyXGBRegressor, MyXGBClassifier]:
     """
     Returns a xgboost model define by params
 
@@ -94,11 +96,40 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
         params['device']='cuda'
 
     if task_type == 'regression':
-        return XGBRegressor(**params,
+        return MyXGBRegressor(**params,
                             )
     else:
-        return XGBClassifier(**params,
+        return MyXGBClassifier(**params,
                             )
+    
+def config_catboost(device, task_type, params=None) -> Union[CatBoostClassifier, CatBoostRegressor]:
+    """
+    Returns a CatBoost model defined by params.
+
+    :param device: 'cpu' or 'cuda' (GPU)
+    :param task_type: 'regression' or 'classification'
+    :param params: Optional dictionary of CatBoost hyperparameters
+    """
+    if params is None:
+        params = {
+            'iterations': 10000,
+            'learning_rate': 0.01,
+            'depth': 6,
+            'l2_leaf_reg': 3,
+            'random_seed': 42,
+            'early_stopping_rounds': 15,
+            'verbose': False,
+        }
+
+    if device == 'cuda':
+        params['task_type'] = 'GPU'
+    else:
+        params['task_type'] = 'CPU'
+
+    if task_type == 'regression':
+        return CatBoostRegressor(**params)
+    else:
+        return CatBoostClassifier(**params)
 
 def config_lightGBM(device, task_type, params=None) -> Union[LGBMClassifier, LGBMRegressor]:
     """
@@ -192,7 +223,7 @@ def config_random_forest(device, task_type, params=None) -> Union[RandomForestCl
             'max_depth': None,
             'min_samples_split': 2,
             'min_samples_leaf': 1,
-            'max_features': 'auto',
+            'max_features': 'sqrt',
             'bootstrap': True,
             'random_state': 42
         }
