@@ -1,3 +1,5 @@
+import os
+import pickle
 from typing import *
 import geopandas as gpd
 import pandas as pd
@@ -157,30 +159,65 @@ class Location():
     def __init__(self, name: str, coordinates: Tuple[float, float] = (None, None), etab_file=ETAB_FILE) -> None:
         self.etab_file = etab_file
         self.name = name
-        if coordinates == (None, None):
-            self.coordinates = find_coordinates_etab(
-                self.name, self.etab_file)
-            if self.coordinates != (None, None):
-                self.scale = Scale.ETAB
+        if self.is_saved():
+            self.load_location()
         else:
-            self.coordinates = coordinates
-            self.scale = Scale.COORDS
+            if coordinates == (None, None):
+                self.coordinates = find_coordinates_etab(
+                    self.name, self.etab_file)
+                if self.coordinates != (None, None):
+                    self.scale = Scale.ETAB
+            else:
+                self.coordinates = coordinates
+                self.scale = Scale.COORDS
 
-        city_info = coord_info(self.coordinates)
-        self.city = city_info['city']
-        self.departement = city_info['departement']
-        self.code_departement = city_info['code_departement']
-        self.region = city_info['region']
-        self.code_region = city_info['code_region']
-        self.code = city_info['code']
-        for reg, dep in REGION_OLD.items():
-            if self.code_departement in dep:
-                self.region_old = reg
-                self.region_trends = REGION_TRENDS[reg]
-        self.__shape = None
-        self.__centroid = None
-        self.__list_code = None
-        # self.scale = Scale.COORDS
+            city_info = coord_info(self.coordinates)
+            self.city = city_info['city']
+            self.departement = city_info['departement']
+            self.code_departement = city_info['code_departement']
+            self.region = city_info['region']
+            self.code_region = city_info['code_region']
+            self.code = city_info['code']
+            for reg, dep in REGION_OLD.items():
+                if self.code_departement in dep:
+                    self.region_old = reg
+                    self.region_trends = REGION_TRENDS[reg]
+            self.__shape = None
+            self.__centroid = None
+            self.__list_code = None
+            self.save_location()
+            # self.scale = Scale.COORDS
+
+    def is_saved(self) -> bool:
+        if os.path.isfile(f'{GEO_DIR}location_objects/location_{self.name}.pkl'):
+            return True
+        return False
+
+    def load_location(self):
+        with open(f'{GEO_DIR}location_objects/location_{self.name}.pkl', 'rb') as f:
+            location = pickle.load(f)
+            if location.name == self.name:
+                self.scale = location.scale
+                self.coordinates = location.coordinates
+                self.city = location.city
+                self.departement = location.departement
+                self.code_departement = location.code_departement
+                self.region = location.region
+                self.code_region = location.code_region
+                self.code = location.code
+                self.region_old = location.region_old
+                self.region_trends = location.region_trends
+                self.__shape = location.__shape
+                self.__centroid = location.__centroid
+                self.__list_code = location.__list_code
+                return True
+            else:
+                raise ValueError(
+                    "The saved location is not the same as the current location.")
+
+    def save_location(self):
+        with open(f'{GEO_DIR}location_objects/location_{self.name}.pkl', 'wb') as f:
+            pickle.dump(self, f)
 
     # def get_name(self, mode: int = 0) -> str:
     #     name = ""
