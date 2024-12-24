@@ -16,6 +16,7 @@ from sklearn.compose import ColumnTransformer
 from src.datasets.base_tabular_dataset import BaseTabularDataset
 from src.encoding.tools import create_encoding_pipeline
 from src.experiments.features_selection import get_features, explore_features
+from src.location.location import Location
 from src.models.sklearn_api_model import Model, ModelTree
 import src.features as ft
 import mlflow.sklearn
@@ -25,6 +26,7 @@ from mlflow.models import infer_signature
 import os
 import matplotlib.pyplot as plt
 import pandas as pd
+from src.tools.test_cuda import reset_gpu
 try:
     # Import CUDA and GPU-related modules
     from rmm._cuda.gpu import getDeviceCount, CUDARuntimeError
@@ -34,17 +36,17 @@ try:
     gpus_count = getDeviceCount()
     print(f"{gpus_count} GPU(s) detected.")
     USE_CUDA = True
-    
+
 except ImportError:
     print("CUDA environment not found. Falling back to CPU.")
     USE_CUDA = False
 except CUDARuntimeError as e:
     if "cudaErrorUnknown" in str(e):
         print("Unknown CUDA error detected. Ensure your GPU drivers and CUDA toolkit are properly installed.")
-    elif "cudaErrorInsufficientDriver" in str(e):
-        print("Insufficient CUDA driver version. Update your drivers.")
     else:
         print(f"Unhandled CUDA error: {e}")
+
+    raise (e)
 
 import numpy as np
 import re
@@ -83,7 +85,8 @@ class BaseExperiment:
             run_dir = self.dir_runs / f'{run.info.run_id}/artifacts/'
             run_dir = pathlib.Path(run_dir)
 
-            self.logger.info(f"Running the experiment on {'GPU' if USE_CUDA else 'CPU'}...")
+            self.logger.info(
+                f"Running the experiment on {'GPU' if USE_CUDA else 'CPU'}...")
 
             # Get a dataset object corresponding to the dataset_config
             # dataset: BaseTabularDataset = self.dataset.get_dataset(**dataset_config)
@@ -239,7 +242,7 @@ class BaseExperiment:
                 y_pred[f'y_pred_{self.dataset.targets_names[0]}'] = y_pred[f'y_pred_{self.dataset.targets_names[0]}'].round(
                 )
             # y_pred = self.predict_at_horizon(dataset, horizon=7)
-            figure = self.plot(self.dataset, y_pred)#, scores)
+            figure = self.plot(self.dataset, y_pred)  # , scores)
             mlflow.log_figure(figure, 'predictions.png')
 
             error_fig = self.model.get_prediction_error_display(
@@ -283,7 +286,7 @@ class BaseExperiment:
         daily_df.set_index('date', inplace=True)
         return daily_df
 
-    def plot(self, dataset: BaseTabularDataset, y_pred: pd.DataFrame, scores: dict) -> plt.Figure:
+    def plot(self, y_pred:pd.DataFrame, y:pd.DataFrame) -> plt.Figure: #y_pred: pd.DataFrame, scores: dict
         """
         Plot the results.
 
@@ -299,61 +302,142 @@ class BaseExperiment:
         ax.legend()
         # ax.text(0.5, 0.5, str(scores))
         # ax.text(3, 5, 'Ceci est un texte', fontsize=15, color='red')
+        print(y.index.get_level_values('date'))
+        y.plot(ax=ax, label='True', xticks=y.index.get_level_values('date'))
+        y_pred.plot(ax=ax, label='Predicted', xticks=y_pred.index.get_level_values('date'))
 
-        dataset.y_test.plot(ax=ax, label='True', use_index=True)
-        y_pred.plot(ax=ax, label='Predicted', use_index=True)
-
-        errors = pd.DataFrame(
-            dataset.y_test.iloc[:, 0] - y_pred.iloc[:, 0], columns=['Error'])
+        errors = pd.DataFrame(y.iloc[:, 0] - y_pred.iloc[:, 0], columns=['Error'])
         errors.plot(ax=ax, label='Error (target - y_pred)', use_index=True)
 
-        if 'target_nb_vers_hospit' in self.dataset.targets_names and dataset.y_test.index[0].year == 2022:
-            bjml = self.get_bjml()
-            bjml.plot(ax=ax, label='BJML', use_index=True)
+        # if 'target_nb_vers_hospit' in self.dataset.targets_names and y.index[0].year == 2022:
+        #     bjml = self.get_bjml()
+        #     bjml.plot(ax=ax, label='BJML', use_index=True)
 
         return fig, ax
 
-    def get_important_features(self, dataset: BaseTabularDataset = None, model: Model = None, preselection: List[str] = [], model_config: dict = None) -> List[str]:
-        selected_features = []
+    def get_important_features(self, dataset: BaseTabularDataset = None, model: Model = None, preselection: List[str] = [], model_config: dict = None, get_dataset_config:dict = None, predict_location = None) -> List[str]:
+        best_score = np.inf
 
-        if dataset is None:
-            dataset = self.dataset
+        model.fit(dataset.enc_X_train, dataset.y_train, **model_config)
 
-        if model is None:
-            model = self.model
+        predict_set = self.dataset.enc_X_test.copy()
+        ground_truth = self.dataset.y_test.copy()
 
-        variables = dataset.enc_data.columns.to_list()
-        targets = dataset.targets_names
+        if get_dataset_config['axis']=='rows' and len(get_dataset_config['locations']) > 1:
+            # Keep only the location we want to plot
+            predict_set = predict_set.xs(predict_location.name, level='location', drop_level=False)
+            ground_truth = ground_truth.xs(predict_location.name, level='location', drop_level=False)
 
-        encoded_data = dataset.enc_data
+        y_pred = pd.DataFrame(self.model.predict(predict_set), index=predict_set.index, columns=[
+                            f'y_pred_{target}' for target in self.dataset.targets_names])
 
-        data = pd.concat([encoded_data, dataset.data[targets]], axis=1)
+        score = model.score_from_preds(y_pred, ground_truth)
 
-        # afficher le nombre de colonnes portant le même nom si il est supérieur à 1
-        # print(data.columns.value_counts().loc[lambda x: x > 1])
+        while score < best_score and len(dataset.data.columns) >= 10:
+            print(f'On améliore le score {best_score} --> {score}')
+            best_score = score
 
-        # TODO: ne marchera pas pour du multi-target car le modèle passé à explore_features attendra plusieurs targets
-        for target in targets:
-            # print(data, variables, target)
-            important_features = get_features(
-                data, variables, target, logger=self.logger, num_feats=int(10 + 0.1*len(variables)))
+            booster = model.best_estimator_.get_booster()
+            # Un exemple pour déterminer l'importance des variables après un pré-apprentissage XGBoost
+            importance_gain = booster.get_score(importance_type='gain')
+            importance_cover = booster.get_score(importance_type='cover')
+            importance_weight = booster.get_score(importance_type='weight')
 
-            # On transforme le dictionaire de tupples en dictionaire de listes de features importantes
-            features_to_test = [f[0] for f in important_features]
-            # print(features_to_test)
+            df_gain = pd.DataFrame.from_dict(importance_gain, orient='index', columns=['gain'])
+            df_cover = pd.DataFrame.from_dict(importance_cover, orient='index', columns=['cover'])
+            df_weight = pd.DataFrame.from_dict(importance_weight, orient='index', columns=['weight'])
 
-            selected_features.extend([item for item in explore_features(model=model, model_config=model_config, features=features_to_test,
-                                                                        df_train=pd.concat(
-                                                                            [dataset.enc_X_train, dataset.y_train], axis=1),
-                                                                        df_val=pd.concat(
-                                                                            [dataset.enc_X_val, dataset.y_val], axis=1),
-                                                                        df_test=pd.concat(
-                                                                            [dataset.enc_X_test, dataset.y_test], axis=1),
-                                                                        target=target, preselection=preselection, logger=self.logger) if item not in selected_features])
+            df = df_gain.join(df_cover, how='outer').join(df_weight, how='outer')
+            df.fillna(0, inplace=True)  # Remplacer les valeurs manquantes par 0 si nécessaire
+
+            df = df_gain.join(df_cover, how='outer').join(df_weight, how='outer')
+            df.fillna(0, inplace=True)  # Remplacer les valeurs manquantes par 0 si nécessaire
+
+            df['gain_norm'] = df['gain'] / df['gain'].sum()
+            df['cover_norm'] = df['cover'] / df['cover'].sum()
+            df['weight_norm'] = df['weight'] / df['weight'].sum()
+
+            w_gain = 0.5
+            w_cover = 0.3
+            w_weight = 0.2
+
+            df['importance'] = (df['gain_norm'] * w_gain) + (df['cover_norm'] * w_cover) + (df['weight_norm'] * w_weight)
+
+            df.sort_values(by='importance', ascending=False, inplace=True)
+            df['rank'] = df['importance'].rank(ascending=False)
+
+            df.reset_index(inplace=True)
+            df.rename(columns={'index': 'feature'}, inplace=True)
+            # print(df[['feature', 'gain', 'cover', 'weight', 'importance', 'rank']])
+            # Sort features by importance
+            df_sorted = df.sort_values(by='importance', ascending=False)
+
+            # # Select only the 30 first features (based on sorted order)
+            df_sorted = df_sorted.nlargest(round(len(df_sorted)/2), 'importance')
+
+            selected_features = df_sorted['feature'].to_list()
+            get_dataset_config.update({'features_names':selected_features})
+            dataset.get_dataset(**get_dataset_config)
+
+
+            print(dataset.enc_X_train.columns)
+            model_config['fit_params'].update({'eval_set': [(dataset.enc_X_val, dataset.y_val[target]) for target in dataset.targets_names]})
+
+            model.fit(dataset.enc_X_train, dataset.y_train, **model_config)
+
+            predict_set = self.dataset.enc_X_test.copy()
+            ground_truth = self.dataset.y_test.copy()
+
+            if get_dataset_config['axis']=='rows' and len(get_dataset_config['locations']) > 1:
+                # Keep only the location we want to plot
+                predict_set = predict_set.xs(predict_location.name, level='location', drop_level=False)
+                ground_truth = ground_truth.xs(predict_location.name, level='location', drop_level=False)
+
+            y_pred = pd.DataFrame(self.model.predict(predict_set), index=predict_set.index, columns=[
+                                f'y_pred_{target}' for target in self.dataset.targets_names])
+
+            score = model.score_from_preds(y_pred, ground_truth)
+        
+        print(f'On améliore pas le score, dernier score: {score}, meilleur score: {best_score}')
+
+        # if dataset is None:
+        #     dataset = self.dataset
+
+        # if model is None:
+        #     model = self.model
+
+        # variables = dataset.enc_data.columns.to_list()
+        # targets = dataset.targets_names
+
+        # encoded_data = dataset.enc_data
+
+        # data = pd.concat([encoded_data, dataset.data[targets]], axis=1)
+
+        # # afficher le nombre de colonnes portant le même nom si il est supérieur à 1
+        # # print(data.columns.value_counts().loc[lambda x: x > 1])
+
+        # # TODO: ne marchera pas pour du multi-target car le modèle passé à explore_features attendra plusieurs targets
+        # for target in targets:
+        #     # print(data, variables, target)
+        #     important_features = get_features(
+        #         data, variables, target, logger=self.logger, num_feats=int(10 + 0.1*len(variables)))
+
+        #     # On transforme le dictionaire de tupples en dictionaire de listes de features importantes
+        #     features_to_test = [f[0] for f in important_features]
+        #     # print(features_to_test)
+
+        #     selected_features.extend([item for item in explore_features(model=model, model_config=model_config, features=features_to_test,
+        #                                                                 df_train=pd.concat(
+        #                                                                     [dataset.enc_X_train, dataset.y_train], axis=1),
+        #                                                                 df_val=pd.concat(
+        #                                                                     [dataset.enc_X_val, dataset.y_val], axis=1),
+        #                                                                 df_test=pd.concat(
+        #                                                                     [dataset.enc_X_test, dataset.y_test], axis=1),
+        #                                                                 target=target, preselection=preselection, logger=self.logger) if item not in selected_features])
 
         return selected_features
 
-    def predict(self, dataset: BaseTabularDataset) -> pd.DataFrame:
+    def predict(self, dataset: BaseTabularDataset, location: Location) -> pd.DataFrame:
         """
         Test the model.
 
@@ -361,8 +445,11 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Testing the model...")
+        predict_set = dataset.enc_X_test.copy()
+        if 'location' in dataset.enc_X_test.columns:
+            predict_set = dataset.enc_X_test.loc[dataset.enc_X_test['location'] == location.name].copy()
 
-        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(dataset.enc_X_test) if USE_CUDA else dataset.enc_X_test), index=dataset.y_test.index, columns=[
+        y_pred = pd.DataFrame(self.model.predict(cd.DataFrame(predict_set) if USE_CUDA else predict_set), index=dataset.y_test.index, columns=[
                               f'y_pred_{target}' for target in dataset.targets_names])
 
         return y_pred
@@ -447,7 +534,7 @@ class BaseExperiment:
 
         return predictions
 
-    def score(self, dataset: BaseTabularDataset) -> None:
+    def score(self, dataset: BaseTabularDataset, location:Location) -> None:
         """
         Score the model.
 
@@ -455,9 +542,14 @@ class BaseExperiment:
         - None
         """
         self.logger.info("Scoring the model...")
+        predict_set = dataset.enc_X_test.copy()
+        ground_truth = dataset.y_test.copy
+        if 'location' in dataset.enc_X_test.columns:
+            predict_set = dataset.enc_X_test.loc[dataset.enc_X_test['location'] == location.name].copy()
+            ground_truth = dataset.y_test.loc[dataset.y_test['location'] == location.name].copy()
 
-        scores = self.model.score(
-            dataset.enc_X_test, dataset.y_test, single_score=False)
+
+        scores = self.model.score(predict_set, ground_truth, single_score=False)
         # scorer = self.model.get_scorer()
 
         return scores
