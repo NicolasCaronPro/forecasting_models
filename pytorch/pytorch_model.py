@@ -11,7 +11,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 ################################# Never used ##########################################
 
 class ModelTorch():
@@ -67,5 +66,9 @@ class ModelCNN(ModelTorch):
         super().__init__(model, loss=loss, name=name, device=device)
 
 class ModelGNN(ModelTorch):
+    def __init__(self, model, loss='mse', name='ModelGNN', device='cpu'):
+        super().__init__(model, loss=loss, name=name, device=device)
+
+class ModelHybrid(ModelTorch):
     def __init__(self, model, loss='mse', name='ModelGNN', device='cpu'):
         super().__init__(model, loss=loss, name=name, device=device)

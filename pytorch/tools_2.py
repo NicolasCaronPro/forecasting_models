@@ -5,10 +5,11 @@ from pathlib import Path
 import os
 import math
 import numpy as np
-import shap
+#import shap
 from forecasting_models.pytorch.models import *
 from forecasting_models.pytorch.models_2D import *
 from forecasting_models.pytorch.kan import *
+import copy
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -150,7 +151,7 @@ def shapley_additive_explanation_neural_network(model, df_set, outname, dir_outp
             return None
     return top_features_
 
-def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, binary, device, num_lstm_layers):
+def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, binary, device, num_lstm_layers, custom_model_params=None):
     """
     Renvoie un tuple contenant le modèle spécifié et les paramètres utilisés pour sa création.
     
@@ -160,21 +161,42 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
     - in_dim_2D: Dimensions d'entrée pour les données 2D (si applicable).
     - scale: Échelle (peut être utilisé pour la normalisation).
     - dropout: Taux de dropout pour le modèle.
-    - act_func: Fonction d'activation.
+    - act_func: Fonction d'activation
     - k_days: Nombre de séquences/jours pour la prédiction.
     - binary: Indicateur pour un problème de classification binaire.
     - device: Appareil sur lequel exécuter le modèle (CPU ou GPU).
     - num_lstm_layers: Nombre de couches LSTM (si applicable).
+    - custom_model_params: Dictionnaire des paramètres spécifiques du modèle (facultatif).
     
     Returns:
     - Tuple (modèle, paramètres) où 'modèle' est le modèle spécifié et 'paramètres' est un dictionnaire des paramètres utilisés.
     """
+    scale = graph.scale
+    graph_or_node = graph.graph_method
+
+    shape2D = {
+        10: [24, 24],
+        30: [30, 30],
+        4: [15, 15],
+        5  : [25,25],
+        8: [30, 30],
+        'departement': [64, 64],
+    }
     
+    zhang_layer_conversion = {  # Fire project, if you try this model you need to adapt it scale -> fc dim
+        4 : 3,
+        5 : 3,
+        8: 15,
+        10: 12,
+        9: 15,
+    }
+
     model_params = {
         'model_name': model_name,
         'in_dim': in_dim,
         'in_dim_2D': in_dim_2D,
         'scale': scale,
+        'graph_or_node': graph_or_node,
         'dropout': dropout,
         'act_func': act_func,
         'k_days': k_days,
@@ -182,351 +204,454 @@ def make_model(model_name, in_dim, in_dim_2D, scale, dropout, act_func, k_days, 
         'device': device,
         'num_lstm_layers': num_lstm_layers
     }
-    
+
     if model_name == 'GAT':
-        model = GAT(
-            in_dim=[in_dim, 64, 64, 64],
-            heads=[4, 4, 2],
-            dropout=dropout,
-            bias=True,
-            device=device,
-            act_func=act_func,
-            n_sequences=k_days + 1,
-            binary=binary
-        )
-        model_params.update({
-            'in_dim_layers': [in_dim, 64, 64, 64],
-            'heads': [4, 4, 2],
-            'bias': True,
-        })
-    
-    elif model_name == 'GCN':
-        model = GCN(
-            n_sequences=k_days + 1,
-            in_dim=[in_dim, 64, 64, 64],
-            dropout=dropout,
-            bias=True,
-            device=device,
-            act_func=act_func,
-            binary=binary
-        )
-        model_params.update({
-            'in_dim_layers': [in_dim, 64, 64, 64],
-            'bias': True,
-        })
-    
-    elif model_name == 'DST-GCN':
-        model = DSTGCN(
-            n_sequences=k_days + 1,
-            in_channels=in_dim,
-            end_channels=64,
-            dilation_channels=[128, 256, 512, 256, 128],
-            dilations=[1, 1, 2, 1, 1],
-            dropout=dropout,
-            act_func=act_func,
-            device=device,
-            binary=binary
-        )
-        model_params.update({
+        default_params = {
+            'in_dim': in_dim,
+            'hidden_channels': [128, 256, 512],
             'end_channels': 64,
-            'dilation_channels': [128, 256, 512, 256, 128],
-            'dilations': [1, 1, 2, 1, 1],
-        })
-    
-    elif model_name == 'ST-GAT':
-        model = STGAT(
-            n_sequences=k_days + 1,
-            in_channels=in_dim,
-            hidden_channels=[256, 64],
-            end_channels=64,
-            dropout=dropout,
-            heads=6,
-            act_func=act_func,
-            device=device,
-            binary=binary
+            'heads': [6, 4, 2],
+            'dropout': dropout,
+            'bias': True,
+            'device': device,
+            'act_func': act_func,
+            'n_sequences': k_days + 1,
+            'binary': binary
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = GAT(
+            in_dim=default_params['in_dim'],
+            hidden_channels=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            heads=default_params['heads'],
+            dropout=default_params['dropout'],
+            bias=default_params['bias'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            n_sequences=default_params['n_sequences'],
+            binary=default_params['binary']
         )
-        model_params.update({
-            'hidden_channels': [256, 64],
+        model_params.update(default_params)
+
+    elif model_name == 'GCN':
+        default_params = {
+            'in_dim': in_dim,
+            'hidden_channels': [128, 256, 512],
+            'end_channels': 64,
+            'dropout': dropout,
+            'bias': True,
+            'device': device,
+            'act_func': act_func,
+            'n_sequences': k_days + 1,
+            'binary': binary,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = GCN(
+            in_dim=default_params['in_dim'],
+            hidden_channels=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            dropout=default_params['dropout'],
+            bias=default_params['bias'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            n_sequences=default_params['n_sequences'],
+            binary=default_params['binary'],
+            graph_or_node=graph_or_node
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'DST-GCN':
+        default_params = {
+            'in_channels': in_dim,
+            'dilation_channels': [64, 128, 256, 512],
+            'dilations': [1, 1, 3],
+            'end_channels': 64,
+            'dropout': dropout,
+            'act_func': act_func,
+            'device': device,
+            'binary': binary,
+            'n_sequences': k_days + 1
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = DSTGCN(
+            n_sequences=default_params['n_sequences'],
+            in_channels=default_params['in_channels'],
+            end_channels=default_params['end_channels'],
+            dilation_channels=default_params['dilation_channels'],
+            dilations=default_params['dilations'],
+            dropout=default_params['dropout'],
+            act_func=default_params['act_func'],
+            device=default_params['device'],
+            binary=default_params['binary'],
+            graph_or_node = graph_or_node
+        )
+        model_params.update(default_params)
+    elif model_name == 'DST-GAT':
+        default_params = {
+            'in_channels': in_dim,
+            'dilation_channels': [64, 128, 256, 512],
+            'dilations': [1, 3, 5],
+            'end_channels': 64,
+            'dropout': dropout,
+            'act_func': act_func,
+            'device': device,
+            'binary': binary,
+            'n_sequences': k_days + 1,
+            'heads': [4, 4, 4]
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = DSTGAT(
+            n_sequences=default_params['n_sequences'],
+            in_channels=default_params['in_channels'],
+            end_channels=default_params['end_channels'],
+            dilation_channels=default_params['dilation_channels'],
+            dilations=default_params['dilations'],
+            dropout=default_params['dropout'],
+            act_func=default_params['act_func'],
+            device=default_params['device'],
+            binary=default_params['binary'],
+            heads=default_params['heads'],
+            graph_or_node = graph_or_node
+        )
+        model_params.update(default_params)
+    elif model_name == 'ST-GAT':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': [64, 128, 256, 512],
             'end_channels': 64,
             'heads': 6,
-        })
-    
+            'dropout': dropout,
+            'act_func': act_func,
+            'device': device,
+            'binary': binary,
+            'n_sequences': k_days + 1
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = STGAT(
+            n_sequences=default_params['n_sequences'],
+            in_channels=default_params['in_channels'],
+            hidden_channels=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            heads=default_params['heads'],
+            dropout=default_params['dropout'],
+            act_func=default_params['act_func'],
+            device=default_params['device'],
+            binary=default_params['binary'],
+            graph_or_node=graph_or_node
+        )
+        model_params.update(default_params)
+
     elif model_name == 'ST-GCN':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': [64, 128, 256, 512, 512],
+            'end_channels': 64,
+            'dropout': dropout,
+            'act_func': act_func,
+            'device': device,
+            'binary': binary,
+            'n_sequences': k_days + 1,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
         model = STGCN(
-            n_sequences=k_days + 1,
-            in_channels=in_dim,
-            hidden_channels=[256, 64],
-            end_channels=64,
-            dropout=dropout,
-            act_func=act_func,
-            device=device,
-            binary=binary
+            n_sequences=default_params['n_sequences'],
+            in_channels=default_params['in_channels'],
+            hidden_channels=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            dropout=default_params['dropout'],
+            act_func=default_params['act_func'],
+            device=default_params['device'],
+            binary=default_params['binary'],
+            graph_or_node=graph_or_node
         )
-        model_params.update({
-            'hidden_channels': [256, 64],
-            'end_channels': 64,
-        })
-    
-    elif model_name == 'SDT-GCN':
-        model = SDSTGCN(
-            n_sequences=k_days + 1,
-            in_channels=in_dim,
-            hidden_channels_temporal=[256, 64],
-            dilations=[1],
-            hidden_channels_spatial=[256, 64],
-            end_channels=64,
-            dropout=dropout,
-            act_func=act_func,
-            device=device,
-            binary=binary
-        )
-        model_params.update({
-            'hidden_channels_temporal': [256, 64],
-            'hidden_channels_spatial': [256, 64],
-            'end_channels': 64,
-            'dilations': [1],
-        })
-    
+        model_params.update(default_params)
     elif model_name == 'ATGN':
-        model = TemporalGNN(
-            in_channels=in_dim,
-            hidden_channels=64,
-            out_channels=64,
-            n_sequences=k_days + 1,
-            device=device,
-            act_func=act_func,
-            dropout=dropout,
-            binary=binary
-        )
-        model_params.update({
+        default_params = {
+            'in_channels': in_dim,
             'hidden_channels': 64,
             'out_channels': 64,
-        })
-    
-    elif model_name == 'ST-GATLSTM':
-        model = ST_GATLSTM(
-            in_channels=in_dim,
-            hidden_channels=64,
-            residual_channels=64,
-            end_channels=32,
-            n_sequences=k_days + 1,
-            num_layers=num_lstm_layers,
-            device=device,
-            act_func=act_func,
-            heads=6,
-            dropout=dropout,
-            concat=False,
-            binary=binary
-        )
-        model_params.update({
-            'hidden_channels': 64,
-            'residual_channels': 64,
-            'end_channels': 32,
-            'num_layers': num_lstm_layers,
-            'heads': 6,
-            'concat': False,
-        })
-    
-    elif model_name == 'LSTM':
-        model = LSTM(
-            in_channels=in_dim,
-            residual_channels=64,
-            hidden_channels=64,
-            end_channels=32,
-            n_sequences=k_days + 1,
-            device=device,
-            act_func=act_func,
-            binary=binary,
-            dropout=dropout,
-            num_layers=num_lstm_layers
-        )
-        model_params.update({
-            'residual_channels': 64,
-            'hidden_channels': 64,
-            'end_channels': 32,
-            'num_layers': num_lstm_layers,
-        })
-    
-    elif model_name == 'Zhang':
-        model = Zhang(
-            in_channels=in_dim_2D,
-            conv_channels=[64, 128, 256],
-            fc_channels=[256 * 15 * 15, 128, 64, 32],
-            dropout=dropout,
-            binary=binary,
-            device=device,
-            n_sequences=k_days
-        )
-        model_params.update({
-            'conv_channels': [64, 128, 256],
-            'fc_channels': [256 * 15 * 15, 128, 64, 32],
-        })
-    
-    elif model_name == 'ConvLSTM':
-        model = CONVLSTM(
-            in_channels=in_dim_2D,
-            hidden_dim=[64, 128, 256],
-            end_channels=32,
-            n_sequences=k_days + 1,
-            device=device,
-            act_func=act_func,
-            dropout=dropout,
-            binary=binary
-        )
-        model_params.update({
-            'hidden_dim': [64, 128, 256],
-            'end_channels': 32,
-        })
-    
-    elif model_name == 'Unet':
-        model = UNet(
-            n_channels=in_dim_2D,
-            n_classes=1,
-            bilinear=False
-        ).to(device)
-        model_params.update({
-            'n_classes': 1,
-            'bilinear': False,
-        })
-    
-    elif model_name == 'ConvGraphNet':
-        model = ConvGraphNet(
-            Zhang(
-                in_channels=in_dim_2D,
-                conv_channels=[64, 128, 256],
-                fc_channels=[256 * 7 * 7, 128, 64, 32],
-                dropout=dropout,
-                binary=binary,
-                device=device,
-                n_sequences=k_days,
-                return_hidden=True
-            ),
-            STGCN(
-                n_sequences=k_days + 1,
-                in_channels=in_dim,
-                hidden_channels=[256, 64],
-                end_channels=64,
-                dropout=dropout,
-                act_func=act_func,
-                device=device,
-                binary=binary,
-                return_hidden=True
-            ),
-            output_layer_in_channels=64,
-            output_layer_end_channels=32,
-            n_sequence=k_days + 1,
-            binary=binary,
-            device=device,
-            act_func=act_func
-        )
-        model_params.update({
-            'conv_graph_net_params': {
-                'output_layer_in_channels': 64,
-                'output_layer_end_channels': 32,
-                'n_sequence': k_days + 1,
-            }
-        })
-    
-    elif model_name == 'HybridConvGraphNet':
-        model = HybridConvGraphNet(
-            Zhang(
-                in_channels=in_dim_2D,
-                conv_channels=[64, 128, 256],
-                fc_channels=[256 * 15 * 15, 128, 64, 32],
-                dropout=dropout,
-                binary=binary,
-                device=device,
-                n_sequences=k_days,
-                return_hidden=True
-            ),
-            GAT(
-                in_dim=[32, 64, 64],
-                heads=[4, 4],
-                dropout=dropout,
-                bias=True,
-                device=device,
-                act_func=act_func,
-                n_sequences=k_days + 1,
-                binary=binary,
-                return_hidden=True
-            ),
-            output_layer_in_channels=64,
-            output_layer_end_channels=32,
-            n_sequence=k_days + 1,
-            binary=binary,
-            device=device,
-            act_func=act_func
-        )
-        model_params.update({
-            'hybrid_conv_graph_net_params': {
-                'output_layer_in_channels': 64,
-                'output_layer_end_channels': 32,
-                'n_sequence': k_days + 1,
-            }
-        })
-    
-    elif model_name == 'KAN':
-        output_layer = 1 if not binary else 2
-        model = KAN(
-            in_channels=in_dim,
-            end_channels=64,
-            device=device,
-            binary=binary,
-            k_days=0,
-            layers_hidden=[in_dim, 256, 512, 256, 64],
-            grid_size=5,
-            spline_order=3,
-            scale_noise=0.1,
-            scale_base=1,
-            scale_spline=1,
-            act_func='relu',
-            grid_eps=0.02,
-            grid_range=[-1, 1]
-        )
-        model_params.update({
-            'layers_hidden': [in_dim, 128, 64],
-            'grid_size': 5,
-            'spline_order': 3,
-            'scale_noise': 0.1,
-            'scale_base': 1,
-            'scale_spline': 1,
-            'base_activation': act_func,
-            'grid_eps': 0.02,
-            'grid_range': [-1, 1],
-        })
-        
-    elif model_name == 'TKAN':
-        # Configuration pour le modèle TKAN
-        kan_config = {
-            'layers_hidden': [128, 64],  # Couches cachées pour le KAN
-            'grid_size': 5,
-            'spline_order': 3,
-            'scale_noise': 0.1,
-            'scale_base': 1,
-            'scale_spline': 1,
-            'grid_eps': 0.02,
-            'grid_range': [-1, 1],
+            'n_sequences': k_days + 1,
+            'device': device,
+            'act_func': act_func,
+            'dropout': dropout,
+            'binary': binary
         }
-        model = TKAN(
-            input_size=in_dim,
-            hidden_size=[64, 64],  # Tailles des couches cachées du TKAN
-            end_channels=32,
-            act_func=act_func,
-            dropout=dropout,
-            binary=binary,
-            k_days=k_days + 1,
-            return_hidden=False,
-            device=device,
-            kan_config=kan_config
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = TemporalGNN(
+            in_channels=default_params['in_channels'],
+            hidden_channels=default_params['hidden_channels'],
+            out_channels=default_params['out_channels'],
+            n_sequences=default_params['n_sequences'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            dropout=default_params['dropout'],
+            binary=default_params['binary']
         )
-        model_params.update({
+        model_params.update(default_params)
+
+    elif model_name == 'ST-GATLSTM':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': [in_dim, in_dim, in_dim],
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'num_layers': 3,
+            'heads': 6,
+            'dropout': dropout,
+            'concat': False,
+            'device': device,
+            'act_func': act_func,
+            'binary': binary
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = ST_GATLSTM(
+            in_channels=default_params['in_channels'],
+            hidden_channels_list=default_params['hidden_channels'],
+            residual_channels=default_params['residual_channels'],
+            end_channels=default_params['end_channels'],
+            n_sequences=default_params['n_sequences'],
+            num_layers=default_params['num_layers'],
+            heads=default_params['heads'],
+            dropout=default_params['dropout'],
+            concat=default_params['concat'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            binary=default_params['binary']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'LSTM':
+        default_params = {
+            'in_channels': in_dim,
+             'hidden_channels': [in_dim, in_dim, in_dim],
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'num_layers': 3,
+            'device': device,
+            'act_func': act_func,
+            'binary': binary,
+            'dropout': dropout
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = LSTM(
+            in_channels=default_params['in_channels'],
+            hidden_channels_list=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            n_sequences=default_params['n_sequences'],
+            num_layers=default_params['num_layers'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            binary=default_params['binary'],
+            dropout=default_params['dropout']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'Zhang':
+        default_params = {
+            'in_channels': in_dim_2D,
+            'conv_channels': [64, 128, 256, 512],
+            'fc_channels': [512 * zhang_layer_conversion[graph.scale] * zhang_layer_conversion[graph.scale], 128, 64],
+            'dropout': dropout,
+            'binary': binary,
+            'device': device,
+            'n_sequences': k_days
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = Zhang(
+            in_channels=default_params['in_channels'],
+            conv_channels=default_params['conv_channels'],
+            fc_channels=default_params['fc_channels'],
+            dropout=default_params['dropout'],
+            binary=default_params['binary'],
+            device=default_params['device'],
+            n_sequences=default_params['n_sequences']
+        )
+        model_params.update(default_params)
+    elif model_name == 'Zhang3D':
+        default_params = {
+            'in_channels': in_dim_2D,
+            'conv_channels': [64, 128, 256],
+            'fc_channels': [256 * zhang_layer_conversion[graph.scale] * zhang_layer_conversion[graph.scale], 128, 64, 32],
+            'dropout': dropout,
+            'binary': binary,
+            'device': device,
+            'n_sequences': k_days
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = Zhang3D(
+            in_channels=default_params['in_channels'],
+            conv_channels=default_params['conv_channels'],
+            fc_channels=default_params['fc_channels'],
+            dropout=default_params['dropout'],
+            binary=default_params['binary'],
+            device=default_params['device'],
+            n_sequences=default_params['n_sequences']
+        )
+        model_params.update(default_params)
+    elif model_name == 'ConvLSTM':
+        default_params = {
+            'in_channels': in_dim_2D,
+            'hidden_dim': [64],
+            'end_channels': 32,
+            'size': shape2D[scale],
+            'n_sequences': k_days + 1,
+            'device': device,
+            'act_func': act_func,
+            'dropout': dropout,
+            'binary': binary
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = CONVLSTM(
+            in_channels=default_params['in_channels'],
+            hidden_dim=default_params['hidden_dim'],
+            end_channels=default_params['end_channels'],
+            n_sequences=default_params['n_sequences'],
+            size=default_params['size'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            dropout=default_params['dropout'],
+            binary=default_params['binary']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'Unet':
+        default_params = {
+            'n_channels': in_dim_2D,
+            'n_classes': 1,
+            'features': [64, 128, 256, 512, 1024],
+            'bilinear': False,
+            'device': device
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = UNet(
+            n_channels=default_params['n_channels'],
+            n_classes=default_params['n_classes'],
+            features=default_params['features'],
+            bilinear=default_params['bilinear']
+        ).to(default_params['device'])
+        model_params.update(default_params)
+
+    elif model_name == 'ULSTM':
+        default_params = {
+            'n_channels': in_dim_2D,
+            'n_classes': 1,
+            'n_sequences': k_days + 1,
+            'num_lstm_layers': num_lstm_layers,
+            'features': [64, 128, 256, 512, 1024],
+            'bilinear': False,
+            'device': device
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = ULSTM(
+            n_channels=default_params['n_channels'],
+            n_classes=default_params['n_classes'],
+            n_sequences=default_params['n_sequences'],
+            num_lstm_layers=default_params['num_lstm_layers'],
+            features=default_params['features'],
+            bilinear=default_params['bilinear']
+        ).to(default_params['device'])
+        model_params.update(default_params)
+    elif model_name == 'KAN':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': [64, 32],
+            'end_channels': 16,
+            'k_days': k_days,
+            'device': device,
+            'binary': binary,
+            'act_func': act_func,
+            'args': {
+                'width': [64, 32],
+                'grid': 3,
+                'k': 3,
+                'mult_arity': 2,
+                'noise_scale': 0.3,
+                'scale_base_mu': 0.0,
+                'scale_base_sigma': 1.0,
+                'base_fun': 'silu',
+                'symbolic_enabled': True,
+                'affine_trainable': False,
+                'grid_eps': 0.02,
+                'grid_range': [-1, 1],
+                'sp_trainable': True,
+                'sb_trainable': True,
+                'seed': 1,
+                'save_act': True,
+                'sparse_init': False,
+                'auto_save': True,
+                'first_init': True,
+                'ckpt_path': './model',
+                'state_id': 0,
+                'round': 0,
+                'device': 'cpu'
+            }
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = KANnetwork(
+            default_params['in_channels'],
+            default_params['hidden_channels'],
+            default_params['end_channels'],
+            default_params['k_days'],
+            default_params['device'],
+            default_params['binary'],
+            default_params['act_func'],
+            default_params['args']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'TKAN':
+        default_params = {
             'input_size': in_dim,
             'hidden_size': [64, 64],
             'end_channels': 32,
+            'act_func': act_func,
+            'dropout': dropout,
+            'binary': binary,
+            'k_days': k_days + 1,
             'return_hidden': False,
-            'kan_config': kan_config,
-        })
-    
+            'device': device,
+            'kan_config': {
+                'layers_hidden': [128, 64],
+                'grid_size': 5,
+                'spline_order': 3,
+                'scale_noise': 0.1,
+                'scale_base': 1,
+                'scale_spline': 1,
+                'grid_eps': 0.02,
+                'grid_range': [-1, 1],
+            }
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = TKAN(
+            input_size=default_params['input_size'],
+            hidden_size=default_params['hidden_size'],
+            end_channels=default_params['end_channels'],
+            act_func=default_params['act_func'],
+            dropout=default_params['dropout'],
+            binary=default_params['binary'],
+            k_days=default_params['k_days'],
+            return_hidden=default_params['return_hidden'],
+            device=default_params['device'],
+            kan_config=default_params['kan_config']
+        )
+        model_params.update(default_params)
+
     else:
         raise ValueError(f"Modèle '{model_name}' non reconnu.")
     

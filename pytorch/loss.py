@@ -1,4 +1,7 @@
-from tools import *
+import sys
+sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
+
+from forecasting_models.pytorch.tools_2 import *
 from torch.functional import F
 
 class PoissonLoss(torch.nn.Module):
@@ -155,3 +158,16 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
             return torch.mean(weighted_loss)
         else:
             return torch.mean(loss)
+        
+class ExponentialAbsoluteErrorLoss(torch.nn.Module):
+    def __init__(self, alpha=1.0):
+        super(ExponentialAbsoluteErrorLoss, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, y_true, y_pred):
+        # Calcul de l'erreur absolue
+        errors = torch.abs(y_true - y_pred)
+        # Application de l'exponentielle
+        loss = torch.mean(torch.exp(self.alpha * errors))
+        return loss
+        

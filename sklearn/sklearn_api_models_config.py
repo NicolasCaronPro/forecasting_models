@@ -21,7 +21,8 @@ from src.models.sklearn_models import *
 from src.models.loss import *
 
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric=None, params: dict = None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, loss='log_loss', params=None, non_fire_number='full', target_name='nbsinister', post_process=None) -> Union[Model, ModelTree]:
+
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -57,8 +58,11 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
         model = config_random_forest(device, task_type, params)
     elif model_type == 'dt':
         model = config_decision_tree(device, task_type, params)
-    elif model_type == 'prophet':
-        model = config_prophet(device, task_type, params)
+    elif model_type == 'poisson':
+        model = config_poisson_regressor(device, task_type, params)
+    elif model_type == 'gam':
+        model = config_gam(device, task_type, params)
+
     else:
         raise ValueError(f"Unrecognized model: {model_type}")
     
@@ -70,31 +74,14 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
                          NGBClassifier, NGBRegressor)
 
     if isinstance(model, tree_based_models):
-        return ModelTree(model, loss=test_metrics, name=name)
+        model_class = ModelTree(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
     else:
-        return Model(model, loss=test_metrics, name=name)
+        model_class = Model(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
 
+    return model_class
 
-def config_prophet(device, task_type, params=None) -> Prophet:
-    """Configures a Prophet model.
-    Args:
-        device (str): The device to use for training the model.
-        task_type (str): The type of task to perform. Can be either 'regression' or 'classification'.
-        params (dict, optional): A dictionary containing hyperparameters for the Prophet model. Defaults to None.
-    Returns:
-        Union[ProphetRegressor, ProphetClassifier]: An instance of a Prophet regressor or classifier depending on the task type.
-    """
-    if params is None:
-        params = {}
-    
-    if task_type == 'regression':
-        return Prophet(**params)
-    elif task_type == 'classification':
-        raise ValueError("Prophet does not support classification.")
-    else:
-        raise ValueError(f"Unrecognized task type: {task_type}")
-    
-def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBClassifier]:
+def config_xgboost(device, task_type, params=None) -> Union[MyXGBRegressor, MyXGBClassifier]:
+
     """
     Returns a xgboost model define by params
 
@@ -114,14 +101,13 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
     if params is None:
         # Random parametring
         params = {
-            'verbosity': 0,
-            'early_stopping_rounds': 15,
-            'learning_rate': 0.01,
-            'min_child_weight': 5.0,
-            'max_depth': 6,
-            'max_delta_step': 1.0,
-            'subsample': 0.3,
-            'colsample_bytree': 0.8,
+            'verbosity':0,
+            'learning_rate' :0.01,
+            'min_child_weight' : 5.0,
+            'max_depth' : 6,
+            'max_delta_step' : 1.0,
+            'subsample' : 0.3,
+            'colsample_bytree' : 0.8,
             'colsample_bylevel': 0.8,
             'reg_lambda': 10.5,
             'reg_alpha': 0.9,
@@ -153,11 +139,40 @@ def config_xgboost(device, task_type, params=None) -> Union[XGBRegressor, XGBCla
         params['device'] = 'cuda'
 
     if task_type == 'regression':
-        return XGBRegressor(**params,
+        return MyXGBRegressor(**params,
                             )
     else:
-        return XGBClassifier(**params,
-                             )
+        return MyXGBClassifier(**params,
+                            )
+    
+def config_catboost(device, task_type, params=None) -> Union[CatBoostClassifier, CatBoostRegressor]:
+    """
+    Returns a CatBoost model defined by params.
+
+    :param device: 'cpu' or 'cuda' (GPU)
+    :param task_type: 'regression' or 'classification'
+    :param params: Optional dictionary of CatBoost hyperparameters
+    """
+    if params is None:
+        params = {
+            'iterations': 10000,
+            'learning_rate': 0.01,
+            'depth': 6,
+            'l2_leaf_reg': 3,
+            'random_seed': 42,
+            'early_stopping_rounds': 15,
+            'verbose': False,
+        }
+
+    if device == 'cuda':
+        params['task_type'] = 'GPU'
+    else:
+        params['task_type'] = 'CPU'
+
+    if task_type == 'regression':
+        return CatBoostRegressor(**params)
+    else:
+        return CatBoostClassifier(**params)
 
 def config_lightGBM(device, task_type, params=None) -> Union[LGBMClassifier, LGBMRegressor]:
     """
@@ -251,7 +266,7 @@ def config_random_forest(device, task_type, params=None) -> Union[RandomForestCl
             'max_depth': None,
             'min_samples_split': 2,
             'min_samples_leaf': 1,
-            'max_features': 'auto',
+            'max_features': 'sqrt',
             'bootstrap': True,
             'random_state': 42
         }
@@ -260,6 +275,51 @@ def config_random_forest(device, task_type, params=None) -> Union[RandomForestCl
         return RandomForestRegressor(**params)
     else:
         return RandomForestClassifier(**params)
+    
+def config_poisson_regressor(device: str, task_type: str, params=None) -> Union[PoissonRegressor, None]:
+    """
+    Returns a Poisson regression model defined by params.
+    
+    :param device: 'cpu' or 'cuda' (currently not used, as PoissonRegressor only runs on CPU in sklearn)
+    :param task_type: 'regression' (Poisson regression is typically used for regression tasks)
+    :param params: dictionary of hyperparameters for the PoissonRegressor
+    :return: PoissonRegressor model or None if task_type is not 'regression'
+    """
+    
+    # Default parameters for PoissonRegressor
+    if params is None:
+        params = {
+            'alpha': 1.0,            # Regularization strength (L2 penalty)
+            'max_iter': 100,          # Maximum number of iterations
+            'tol': 1e-4,              # Tolerance for stopping criteria
+            'fit_intercept': True,    # Whether to fit the intercept
+            'verbose': 0,             # Verbosity level
+            'warm_start': False,      # Reuse solution of the previous call to fit
+        }
+
+    # Ensure the task type is 'regression' since Poisson models are for regression tasks
+    if task_type == 'regression':
+        return PoissonRegressor(**params)
+    else:
+        print("PoissonRegressor is only applicable to regression tasks.")
+        return None
+    
+def config_gam(device : str, task_type : str, params = None) -> GAM:
+
+    if task_type == 'regression':
+        if params is None:
+            params = {'distribution' : 'poisson',
+                      'link': 'log',
+                      'max_iter' : 1000,
+                      } 
+        return GAM(**params)
+    else: 
+        if params is None:
+            params = {'distribution' : 'logistic',
+                      'link': 'log',
+                    'max_iter' : 1000,
+                      } 
+        return GAM(**params)
 
 def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeClassifier, DecisionTreeRegressor]:
     """
@@ -271,7 +331,7 @@ def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeCl
     """
     if params is None:
         params = {
-            'criterion': 'mse' if task_type == 'regression' else 'gini',
+            'criterion': 'squared_error' if task_type == 'regression' else 'gini',
             'splitter': 'best',
             'max_depth': None,
             'min_samples_split': 2,
