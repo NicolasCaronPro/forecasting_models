@@ -1,22 +1,21 @@
+import mlflow
+import pickle
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import xgboost as xgb
+from src.models.sklearn_models import save_object, Model
 from pathlib import Path
 import os
 import sys
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..')))
-from src.models.sklearn_models import save_object, Model
-import xgboost as xgb
-import pandas as pd
-from sklearn.model_selection import train_test_split
-import pickle
-import mlflow
-
 
 
 mlflow.sklearn.autolog()
 
 reg = xgb.XGBRegressor()
 reg.set_params(device='cuda')
-model = Model(model=reg, loss='rmse', name='Model')
+model = Model(model=reg, test_metric='rmse', name='Model')
 # with open('data/models/model.pkl', 'rb') as f:
 #     model = pickle.load(f)
 

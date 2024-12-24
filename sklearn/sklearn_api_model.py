@@ -1,4 +1,24 @@
-import copy
+from tools import *
+from prophet import Prophet
+from xgboost import XGBClassifier, XGBRegressor
+from ngboost import NGBClassifier, NGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+from sklearn.svm import SVR, SVC
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from xgboost import plot_tree as xgb_plot_tree
+from lightgbm import plot_tree as lgb_plot_tree
+from ngboost.distns import Normal
+from ngboost.scores import LogScore
+from sklearn.tree import plot_tree as sklearn_plot_tree
+from sklearn.model_selection import GridSearchCV
+from sklearn.base import clone
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor, RegressorChain, ClassifierChain
+from sklearn.metrics import log_loss, hinge_loss, accuracy_score, f1_score, precision_score, recall_score, mean_squared_log_error, mean_squared_error, make_scorer
+from skopt import Optimizer, BayesSearchCV
+from skopt.space import Integer, Real
 import logging
 import math
 from pyclbr import Class
@@ -10,6 +30,7 @@ from typing import Union, final
 import matplotlib.pyplot as plt
 import numpy as np
 from responses import target
+
 import shap
 from sympy import false
 from torch import poisson_nll_loss
@@ -17,7 +38,7 @@ import xgboost as xgb
 import catboost
 from catboost import CatBoostClassifier, CatBoostRegressor
 
-from forecasting_models.pytorch.tools_2 import *
+# from forecasting_models.pytorch.tools_2 import *
 
 from lightgbm import LGBMClassifier, LGBMRegressor, plot_tree as lgb_plot_tree
 
@@ -335,6 +356,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
             grid_search.fit(X, y, **fit_params)
             best_params = grid_search.best_params_
+            # self.best_estimator_ = grid_search.best_estimator_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
             assert grid_params is not None
@@ -358,21 +380,31 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     param_space[param_name] = Real(param_range[0], param_range[-1], prior='log-uniform')
 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
-            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, Refit=False)
+            bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, refit=False)
+            # # Check if the labels are 1D or 2D
+            # if y.ndim > 1:
+            #     bayes_search = MultiOutputRegressor(bayes_search)
+
             bayes_search.fit(X, y, **fit_params)
             best_params = bayes_search.best_estimator_.get_params()
+            # self.best_estimator_ = bayes_search.best_estimator_
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
             best_params = self.best_estimator_.get_params()
+            
+            # # Check if the labels are 1D or 2D
+            # if y.ndim > 1:
+            #     self.best_estimator_ = RegressorChain(self.best_estimator_)
+
             self.best_estimator_.fit(X, y, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
         
         self.set_params(**best_params)
-
+        
         # Perform cross-validation with the specified number of folds
-        #cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
-        #cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
+        # cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        # cv_scores = cross_val_score(self.best_estimator_, X, y, scoring=self.get_scorer(), cv=cv, params=fit_params)
         
         # Fit the model on the entire dataset
         if optimization != 'skip':
@@ -382,6 +414,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         """self.cv_results_['mean_cv_score'] = np.mean(cv_scores)
         self.cv_results_['std_cv_score'] = np.std(cv_scores)
         self.cv_results_['cv_scores'] = cv_scores"""
+
+        cv_results_df = pd.DataFrame(self.cv_results_)
+        cv_results_df.to_csv(f'{self.name}_cv_results.csv')
 
         #data_dmatrix = xgboost.DMatrix(data=X, label=y, weight=fit_params['sample_weight'])
         #self.best_estimator_ = xgboost.train(best_params, data_dmatrix)
@@ -745,7 +780,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             raise AttributeError(
                 "The chosen model does not support predict_proba.")
 
-    def score(self, X, y, sample_weight=None):
+    def score(self, X, y, sample_weight=None, single_score=True):
         """
         Evaluate the model's performance for each ID.
 
@@ -802,11 +837,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Dictionary of parameters.
         """
-        params = {'model': self.best_estimator_,
-                  'loss': self.loss, 'name': self.name}
+        params = {
+                # 'model': self.best_estimator_,
+                # 'loss': self.loss,
+                # 'name': self.name
+            }
+        
+
         if deep and hasattr(self.best_estimator_, 'get_params'):
             deep_params = self.best_estimator_.get_params(deep=True)
             params.update(deep_params)
+
+            # if isinstance(self.best_estimator_, XGBRegressor) or isinstance(self.best_estimator_, XGBClassifier):
+            #     deep_xgb_params = self.best_estimator_.get_xgb_params()
+            #     params.update(deep_xgb_params)
+                
         return params
 
     def set_params(self, **params):
@@ -1087,7 +1132,7 @@ class ModelTree(Model):
         else:
             raise AttributeError(
                 "The chosen model does not support tree plotting.")
-        
+
 ##########################################################################################
 #                                                                                        #
 #                                   Voting                                              #

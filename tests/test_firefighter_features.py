@@ -2,6 +2,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import pandas as pd
 
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..')))
@@ -20,4 +21,7 @@ fireFightersFeatures = FireFightersFeatures(config=config)
 
 fireFightersFeatures.fetch_data()
 
-fireFightersFeatures.plot(freq='1D')
+data = fireFightersFeatures.get_data(from_date=dt.datetime.strptime('01-01-2018', '%d-%m-%Y'), to_date=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'), shift=7, rolling_window=[7, 14], freq='D')
+print(data)
+
+# fireFightersFeatures.plot(freq='1D')

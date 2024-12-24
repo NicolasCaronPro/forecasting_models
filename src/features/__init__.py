@@ -1,10 +1,11 @@
 from .air_quality_features import AirQualityFeatures
-from .base_features import BaseFeature, Config
+from .base_features import BaseFeature
 from .epidemiological_features import EpidemiologicalFeatures
 from .firefigters_features import FireFightersFeatures
 from .google_trend_features import GoogleTrendFeatures
-from .hopital_features import HopitalFeatures
+from .hospital_features import HospitalFeatures
 from .meteorological_features import MeteorologicalFeatures
 from .sociological_features import SociologicalFeatures
 from .sports_features import SportsCompetitionFeatures
 from .traffic_features import TrafficFeatures
+from .population_features import PopulationFeatures

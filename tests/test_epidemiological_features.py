@@ -7,6 +7,10 @@ sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..')))
 from src.features.epidemiological_features import EpidemiologicalFeatures, Config
 
+import pandas as pd
+
+# pd.set_option('display.max_row', None)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO, encoding="utf-8",
@@ -18,6 +22,6 @@ config = Config({'max_nan': 0, "root_dir": root_dir, "start": dt.datetime.strpti
                 "shift": 7, "rolling_window": 0, "departement": "21", 'region':'BOURGOGNE'})
 epidemiologicalFeatures = EpidemiologicalFeatures(config)
 epidemiologicalFeatures.fetch_data()
-epidemiologicalFeatures.plot(freq='1ME')
-epidemiologicalFeatures.save_data()
-print(epidemiologicalFeatures.get_data())
+epidemiologicalFeatures.plot(freq='1D')
+# epidemiologicalFeatures.save_data()
+# print(epidemiologicalFeatures.get_data())

@@ -1,213 +1,361 @@
 import math
 import pathlib
 import pandas as pd
-import more_itertools
 import datetime as dt
 import os
 import sys
-from src.configs.config import Config
-from typing import List, Optional, Union
+from src.tools.utils import clean_dataframe
+from typing import List, Optional, Union, Tuple
 from copy import deepcopy
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import abc
-from sklearn.compose import make_column_transformer, make_column_selector
+import numpy as np
+import logging
+from warnings import simplefilter
+from src.location import Location
+simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
+
+
+def relative_frequency(series: pd.Series) -> pd.Series:
+    # Compter les occurrences de chaque catégorie
+    counts = (series.value_counts(normalize=True) * 100)
+
+    # Retourner la proportion (fréquence relative)
+    return counts
+
+
+def majority_rule(x):
+    mode_val = x.mode()
+    if len(mode_val) > 1:  # Si plusieurs valeurs sont à égalité, on choisit la première alphabétiquement
+        return sorted(mode_val)[0]
+    return mode_val[0]
 
 class BaseFeature(object):
-    """
-    Classe abstraite représentant une feature.
-
-    Attributes:
-    - config: Configuration.
-    - parent: Parent object.
-    - name: Nom de la feature.
-    - logger: Logger.
-    - data_dir: Répertoire des données.
-    - start: Date de début.
-    - shift: Décalage (optionel).
-    - rolling_window: Fenêtre glissante (optionel).
-    - step_unit: Unité de pas.
-    - step_value: Valeur de pas.
-    - stop: Date de fin.
-    - step: Pas. {self.step_unit: self.step_value}
-    - index: Index.
-    - data: Données.
-    - max_nan: Nombre maximum de valeurs manquantes.
-    """
 
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
-        """
-        Initialisation de la classe.
+    def __init__(self, name: str = None, logger=None, date_max_fetchable: dt.datetime = None) -> None:
 
-        Parameters:
-        - config: Configuration.
-        - parent: Parent object.
-        """
+        # On initialise name
+        if name is None:
+            self.name = self.__class__.__name__.lower()
+        else:
+            self.name = name
+        assert isinstance(self.name, str), "name should be of type str"
 
-        # TODO: Est ce bien utile de passer le parent en paramètre ?
+        # On initialise logger
+        if logger is None:
+            logger = logging.getLogger(self.name)
+        self.logger: logging.Logger = logger
+        # assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
+        # ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
 
-        self.name = self.__class__.__name__
-        print(f"Initialisation de la classe {self.name}")
+        # self.logger.info("Initialisation de la classe %s",self.name)
 
-        assert config is None or isinstance(
-            config, Config), f"config must be of type Config, not {type(config)}"
-        assert parent is None or isinstance(
-            parent, BaseFeature), f"parent must be of type BaseFeature, not {type(parent)}"
-        assert config is not None or parent is not None, "Either config or parent must be provided"
+        # assert 'root_dir' in self.config, "root_dir must be provided in config"
+        # self.data_dir = self.config.get("root_dir")
+        # assert isinstance(self.data_dir, str) or isinstance(self.data_dir, type(
+        #     pathlib.Path())), f"root_dir must be a string or a pathlib Path, not {type(self.data_dir)}"
 
-        self.config = Config()
-        if parent is not None:
-            self.config.update(parent.config.to_dict())
-        if config is not None:
-            self.config.update(config.to_dict())
+        # if isinstance(self.data_dir, str):
+        #     self.data_dir = pathlib.Path(self.data_dir)
 
-        self.parent = parent
+        # assert self.data_dir.is_dir(
+        # ), f"root_dir must be a directory, not {self.data_dir}"
 
-        assert 'logger' in self.config, "logger must be provided in config"
-        self.logger = self.config.get('logger')
-        assert isinstance(self.logger, type(sys.modules['logging'].getLogger(
-        ))), f"logger must be of type logging.Logger, not {type(self.logger)}"
+        # self.data_dir = pathlib.Path(self.config.get("root_dir")) / 'data'
 
-        assert 'root_dir' in self.config, "root_dir must be provided in config"
-        self.data_dir = self.config.get("root_dir")
-        assert isinstance(self.data_dir, str) or isinstance(self.data_dir, type(
-            pathlib.Path())), f"root_dir must be a string or a pathlib Path, not {type(self.data_dir)}"
+        # if 'features' in self.name.lower():
+        #     self.data_dir = self.data_dir / 'features'
+        # self.data_dir = self.data_dir / self.name.lower()
+        # self.data_dir.mkdir(exist_ok=True, parents=True)
 
-        if isinstance(self.data_dir, str):
-            self.data_dir = pathlib.Path(self.data_dir)
+        # TODO: REMOVE THE FOLLOWING LINES (those parameters shouldn't be passed, but determined in function of the data fetched)
+        # assert 'start' in self.config, "start must be provided in config"
+        # self.start = self.config.get('start')
+        # assert isinstance(self.start, dt.datetime) or isinstance(
+        #     self.start, str), f"start must be of type datetime.datetime or a string, not {type(self.start)}"
 
-        assert self.data_dir.is_dir(
-        ), f"root_dir must be a directory, not {self.data_dir}"
+        # if isinstance(self.start, str):
+        #     try:
+        #         self.start = dt.datetime.strptime(self.start, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"start must be of format %d-%m-%Y, not {self.start}")
 
-        self.data_dir = pathlib.Path(self.config.get("root_dir")) / 'data'
+        # if 'shift' in self.config:
+        #     self.shift = self.config.get('shift')
+        #     assert isinstance(
+        #         self.shift, int), f"shift must be of type int, not {type(self.shift)}"
 
-        if 'features' in self.__class__.__name__.lower():
-            self.data_dir = self.data_dir / 'features'
-        self.data_dir = self.data_dir / self.__class__.__name__.lower()
-        self.data_dir.mkdir(exist_ok=True, parents=True)
+        # if 'rolling_window' in self.config:
+        #     self.rolling_window = self.config.get('rolling_window')
+        #     assert isinstance(
+        #         self.rolling_window, int), f"rolling_window must be of type int, not {type(self.rolling_window)}"
 
-        assert 'start' in self.config, "start must be provided in config"
-        self.start = self.config.get('start')
-        assert isinstance(self.start, dt.datetime) or isinstance(
-            self.start, str), f"start must be of type datetime.datetime or a string, not {type(self.start)}"
+        # assert 'step_unit' in self.config, "step_unit must be provided in config"
+        # self.step_unit = self.config.get('step_unit')
+        # assert self.step_unit in ['days', 'seconds', 'microseconds', 'milliseconds', 'minutes', 'hours',
+        #                           'weeks'], f"step_unit must be one of ['days', 'seconds', 'microseconds', 'milliseconds', 'minutes', 'hours', 'weeks'], not {self.step_unit}"
 
-        if isinstance(self.start, str):
-            try:
-                self.start = dt.datetime.strptime(self.start, '%d-%m-%Y')
-            except ValueError:
-                raise ValueError(
-                    f"start must be of format %d-%m-%Y, not {self.start}")
+        # assert 'step_value' in self.config, "step_value must be provided in config"
+        # self.step_value = self.config.get('step_value')
+        # assert isinstance(
+        #     self.step_value, int), f"step_value must be an integer, not {type(self.step_value)}"
 
-        if 'shift' in self.config:
-            self.shift = self.config.get('shift')
-            assert isinstance(
-                self.shift, int), f"shift must be of type int, not {type(self.shift)}"
+        # self.start -= dt.timedelta(**{self.step_unit: self.step_value *
+        #                            max(self.shift, self.rolling_window, 0)})
 
-        if 'rolling_window' in self.config:
-            self.rolling_window = self.config.get('rolling_window')
-            assert isinstance(
-                self.rolling_window, int), f"rolling_window must be of type int, not {type(self.rolling_window)}"
+        # assert 'stop' in self.config, "stop must be provided in config"
+        # self.stop = self.config.get('stop')
+        # assert isinstance(self.stop, dt.datetime) or isinstance(
+        #     self.stop, str), f"stop must be of type datetime.datetime or a string, not {type(self.stop)}"
 
-        assert 'step_unit' in self.config, "step_unit must be provided in config"
-        self.step_unit = self.config.get('step_unit')
-        assert self.step_unit in ['days', 'seconds', 'microseconds', 'milliseconds', 'minutes', 'hours',
-                                  'weeks'], f"step_unit must be one of ['days', 'seconds', 'microseconds', 'milliseconds', 'minutes', 'hours', 'weeks'], not {self.step_unit}"
+        # if isinstance(self.stop, str):
+        #     try:
+        #         self.stop = dt.datetime.strptime(self.stop, '%d-%m-%Y')
+        #     except ValueError:
+        #         raise ValueError(
+        #             f"stop must be of format %d-%m-%Y, not {self.stop}")
 
-        assert 'step_value' in self.config, "step_value must be provided in config"
-        self.step_value = self.config.get('step_value')
-        assert isinstance(
-            self.step_value, int), f"step_value must be an integer, not {type(self.step_value)}"
+        # self.step = {self.step_unit: self.step_value}
+        # self.index: pd.Index = pd.Index(data=more_itertools.numeric_range(
+        #     self.start, self.stop + dt.timedelta(**self.step), dt.timedelta(**self.step)), name='date')
+        # self.data: pd.DataFrame = pd.DataFrame(index=self.index)
 
-        self.start -= dt.timedelta(**{self.step_unit: self.step_value *
-                                   max(max(self.shift, self.rolling_window), 0)})
+        ##########################################################################################################################################
 
-        assert 'stop' in self.config, "stop must be provided in config"
-        self.stop = self.config.get('stop')
-        assert isinstance(self.stop, dt.datetime) or isinstance(
-            self.stop, str), f"stop must be of type datetime.datetime or a string, not {type(self.stop)}"
+        # if 'max_nan' in self.config:
+        #     self.max_nan = self.config.get('max_nan')
+        #     assert isinstance(
+        #         self.max_nan, int), f"max_nan must be an integer, not {type(self.max_nan)}"
 
-        if isinstance(self.stop, str):
-            try:
-                self.stop = dt.datetime.strptime(self.stop, '%d-%m-%Y')
-            except ValueError:
-                raise ValueError(
-                    f"stop must be of format %d-%m-%Y, not {self.stop}")
+        # if 'drop_const_columns' in self.config:
+        #     self.drop_const_columns = self.config.get('drop_const_columns')
+        #     assert isinstance(
+        #         self.drop_const_columns, bool), f"drop_const_columns must be a boolean, not {type(self.drop_const_columns)}"
+        # else:
+        #     self.drop_const_columns = False
 
-        self.step = {self.step_unit: self.step_value}
-        self.index: pd.Index = pd.Index(data=more_itertools.numeric_range(
-            self.start, self.stop + dt.timedelta(**self.step), dt.timedelta(**self.step)), name='date')
-        self.data: pd.DataFrame = pd.DataFrame(index=self.index)
-
-        if 'max_nan' in self.config:
-            self.max_nan = self.config.get('max_nan')
-            assert isinstance(
-                self.max_nan, int), f"max_nan must be an integer, not {type(self.max_nan)}"
-            
         self.categorical_columns = []
         self.numeric_columns = []
 
+        # self.columns_types = {}
+
+        self.__date_max_fetchable = date_max_fetchable
+
         self.date_min = None
         self.date_max = None
+        self.freq = None
 
+        # self.is_fetched = False
+        # self.is_saved = False
 
-    def features_augmentation(self, features_names: Optional[List[str]] = None) -> None:
+        # Check if the data is saved at the location "data_dir/data.feather"
+
+        # if os.path.isfile(self.data_dir / f'data.feather') and load:
+        #     self.data = pd.read_feather(
+        #         self.data_dir / f'data.feather')
+        #     self.is_saved = True
+        #     self.is_fetched = True
+
+        # Décorateur pour fetch_data
+        # used to fetch data only if it's not already saved (then load it)
+        # then, save it if needed, format the data and set the is_fetched flag to True
+        self.fetch_data = self.fetch_decorator(self.fetch_data_function)
+
+    def features_augmentation(self, data: pd.DataFrame, features_names: Optional[List[str]] = None, shift: Union[int, List[int]] = [], rolling_window: Union[int, List[int]] = 0) -> pd.DataFrame:
+
+        self.logger.info("Augmentation des features...")
 
         if features_names is None:
-            features_names = self.get_features_names()
+            features_names = data.columns.tolist()
 
         assert isinstance(
             features_names, List), f"features_names must be of type list, not {type(features_names)}"
 
+        if isinstance(rolling_window, int):
+            rolling_window = [rolling_window]
+
+        if isinstance(shift, int):
+            shift = [shift]
+
         for feature_name in features_names:
+
+            # self.logger.info(f"Augmentation de la feature {feature_name}...")
             # On ajoute les valeurs passées
-            for dec in range(1, self.shift+1):
-                self.data[f"{feature_name}_J-{dec}"] = self.data[f"{feature_name}"].shift(
+            for dec in shift:
+                # self.logger.info(f"  - Ajout de la feature {feature_name}_J-{dec}")
+                data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}"].shift(
                     dec)
+                data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}%%J{-1*dec}"].bfill(
+                    limit_area='outside')
 
             # On ajoute la moyenne glissante, standard deviation sur FENETRE_GLISSANTE jours
-            if self.rolling_window > 0 and feature_name in self.numeric_columns:
-                self.data[f"{feature_name}_mean"] = self.data[f"{feature_name}"].rolling(
-                    window=self.rolling_window, closed="left").mean()
-                self.data[f"{feature_name}_std"] = self.data[f"{feature_name}"].rolling(
-                    window=self.rolling_window, closed="left").std()
-                
-        # Identifier les colonnes catégorielles
-        self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
-        self.numeric_columns = self.data.select_dtypes(include=['number']).columns
+            for rw in rolling_window:
+                # self.logger.info(f"  - Ajout de la moyenne et de l'écart-type de la feature {feature_name} sur {rw} jours")
+                if rw > 0 and feature_name in self.numeric_columns:
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}"].rolling(
+                        window=rw, closed="left").mean()
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
+                        limit_area='outside')
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
+                        limit_area='outside')
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}"].rolling(
+                        window=rw, closed="left").std()
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
+                        limit_area='outside')
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
+                        limit_area='outside')
+
+                    # TODO: Ajouter le mode, la valeur majoritaire, la fréquence relatives. pour les données catégorielles
+
+        return data
+
+    def fetch_decorator(self, func):
+        def wrapper(start_date, stop_date=dt.datetime.today(), *args, **kwargs):
+
+            if isinstance(start_date, str):
+                start_date = dt.datetime.strptime(start_date, "%d-%m-%Y")
+            if isinstance(stop_date, str):
+                stop_date = dt.datetime.strptime(stop_date, "%d-%m-%Y")
+            assert start_date <= stop_date, "start date must be before stop date"
+
+            location: Location = kwargs.pop('location', None)
+            assert isinstance(location, Location), f"location must be of type Location, not {type(location)}"
+
+            filename: str = kwargs.pop(
+                'filename', f'data_{location.name}.feather')
+            if not filename.endswith('.feather'):
+                filename = filename + '.feather'
+
+            if not filename.endswith(f'_{location.name}.feather'):
+                filename = filename[:-len('.feather')] + \
+                    f'_{location.name}.feather'
+
+            features_dir = kwargs.pop(
+                'features_dir', f'{os.getcwd()}/data/features')
+            if isinstance(features_dir, str):
+                features_dir = pathlib.Path(features_dir)
+            feature_dir = features_dir / f"{self.name}"
+            kwargs['feature_dir'] = feature_dir
+
+            if not os.path.isdir(feature_dir):
+                os.makedirs(feature_dir, exist_ok=True)
+
+            data_has_changed = False
+
+            if stop_date > self.get_date_max_fetchable():
+                stop_date = self.get_date_max_fetchable()
+
+            if os.path.isfile(feature_dir / filename):
+                self.logger.info(
+                    f"{self.name}'s data already fetched for {location.name}")
+                # TODO: check for updates
+                data = pd.read_feather(feature_dir / filename)
+
+                data_min = data.index.min()
+                data_max = data.index.max()
+
+                if data is None or len(data) == 0:
+                    self.logger.error(
+                        f"No data found: empty dataframe in {self.name}'s data file")
+
+                # Check if update is needed
+                if start_date < data_min or stop_date > data_max:
+                    self.logger.warning("Updating data")
+                    self.logger.setLevel(logging.WARNING)
+                    if start_date < data_min:
+                        new_past_data = func(
+                            self, start_date=start_date, stop_date=(data_min - dt.timedelta(days=1)), location=location, *args, **kwargs)
+                        data = pd.concat([new_past_data, data])
+                    if stop_date > data_max:
+                        new_future_data = func(
+                            self, start_date=(data_max + dt.timedelta(days=1)), stop_date=stop_date, location=location, *args, **kwargs)
+                        data = pd.concat([data, new_future_data])
+                        # print(data)
+                    self.logger.setLevel(logging.INFO)
+                    data_has_changed = True
+
+            else:
+                self.logger.info(
+                    f"Fetching {self.name}'s data for {location.name}...")
+
+                # Fetch the data
+                # self.logger.setLevel(logging.WARNING)
+                data: pd.DataFrame = func(
+                    self, start_date=start_date, stop_date=stop_date, location=location, *args, **kwargs)
+                self.logger.setLevel(logging.INFO)
+                data_has_changed = True
+                # print(data)
+
+            if data_has_changed:
+                self.save_dataframe(data, feature_dir, filename=filename)
+
+            display(data)
+
+            # # Identifier les colonnes catégorielles
+            self.categorical_columns = data.select_dtypes(
+                include=['object', 'category']).columns
+            self.numeric_columns = data.select_dtypes(
+                include=['number']).columns
+
+            # Définir les dates min et max (Période ou toutes les données sont disponibles)
+            # print(data)
+            self.set_availability(data)
+
+            # print(data)
+
+            # self.is_fetched = True
+
+        return wrapper
 
     @abc.abstractmethod
-    def fetch_data(self) -> None:
-        """
-        Récupère les données.
+    def fetch_data_function(self, *args, **kwargs) -> None:
+        pass
 
-        Parameters:
-        - None
-        """
+    def set_availability(self, data: pd.DataFrame) -> None:
+        self.date_min = data.dropna().index.min()
+        self.date_max = data.dropna().index.max()
+        self.freq = pd.infer_freq(data.index)
+        if self.freq == None:
+            self.freq = 'D'
 
-        # Identifier les colonnes catégorielles
-        self.categorical_columns = self.data.select_dtypes(include=['object', 'category']).columns
-        self.numeric_columns = self.data.select_dtypes(include=['number']).columns
+    def get_availability(self):
+        return self.date_min, self.date_max, self.freq
 
-        # Définir les dates min et max (Période ou toutes les données sont disponibles)
-        self.date_min = self.data.dropna().index.min()
-        self.date_max = self.data.dropna().index.max()
+    def get_date_max_fetchable(self):
+        if self.__date_max_fetchable == None:
+            return dt.datetime.now()
+        else:
+            return self.__date_max_fetchable
 
-    @abc.abstractmethod
-    def get_data(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None) -> pd.DataFrame:
-        """
-        Retourne les données.
+    def get_data(self,
+                 from_date: Optional[Union[str, dt.datetime]] = None,
+                 to_date: Optional[Union[str, dt.datetime]] = None,
+                 location: Optional[Location] = None,
+                 features_names: Optional[List[str]] = None,
+                 freq: Optional[str] = None,
+                 shift: Optional[Union[int, List[int]]] = [],
+                 rolling_window: Optional[Union[int, List[int]]] = [],
+                 drop_constant_thr=1.0,
+                 path: Optional[Union[str, pathlib.Path]] = None,
+                 filename: Optional[str] = None) -> pd.DataFrame:
 
-        Parameters:
-        - None
+        date_min, date_max, initial_freq = self.get_availability()
+        # print(date_max, date_min, initial_freq)
+        if date_min is None or date_max is None or initial_freq is None:
+            self.logger.error(
+                'It looks like you didn\'t call self.fetch_data() before, you need to call self.fetch_data() even if the data has been fetched during a previous session.')
+            return None
 
-        Returns:
-        - data: Les données.
-        """
+        # if not self.is_fetched:
+        #     raise Exception("Data not fetched, please call fetch_data() before.")
 
         if from_date is None:
-            from_date = self.start
+            from_date = date_min
         assert isinstance(from_date, dt.datetime) or isinstance(
             from_date, str), f"from_date must be of type datetime.datetime or a string, not {type(from_date)}"
         if isinstance(from_date, str):
@@ -218,7 +366,7 @@ class BaseFeature(object):
                     f"from_date must be of format %d-%m-%Y, not {from_date}")
 
         if to_date is None:
-            to_date = self.stop
+            to_date = date_max
         assert isinstance(to_date, dt.datetime) or isinstance(
             to_date, str), f"to_date must be of type datetime.datetime or a string, not {type(to_date)}"
         if isinstance(to_date, str):
@@ -228,176 +376,331 @@ class BaseFeature(object):
                 raise ValueError(
                     f"to_date must be of format %d-%m-%Y, not {to_date}")
 
+        if freq is None:
+            freq = initial_freq
+
+        self.logger.info(
+            f"Getting data for {self.name} from {from_date} to {to_date}, at a {freq} frequency")
+        if path is None:
+            path = '../data/features/' + self.name
+
+        if filename is None:
+            if location:
+                filename = f'data_{location.name}.feather'
+            else:
+                filename = 'data.feather'
+
+        if not filename.endswith('.feather'):
+            filename = filename + '.feather'
+
+        if location and not filename.endswith(f'_{location.name}.feather'):
+            filename = filename[:-len('.feather')] + \
+                f'_{location.name}.feather'
+
+        try:
+            data = self.load(path=path, filename=filename)
+        except FileNotFoundError:
+            self.logger.error(
+                f"Data not found for {self.name}, data needs to be fetched first")
+            return None
+            # self.fetch_data(start_date=from_date, stop_date=to_date)
+            # data = self.load(path=path, filename=filename)
+
+        # print(data)
+
+        # Add missing raws by copying last raw
+        if date_max < to_date:
+            # Get the last row and its index
+            last_row = data.iloc[-1]
+            last_date = data.index[-1]
+            # Generate new dates for the next year
+            days = (to_date - last_date).days
+            # print(last_date, to_date, days)
+            new_dates = pd.date_range(start=last_date + pd.Timedelta(days=1),
+                                      periods=days,
+                                      freq='D')  # Daily for one year
+            # Create a DataFrame with the new rows (copying the last row's values)
+            new_data = pd.DataFrame(
+                [last_row.values] * len(new_dates), index=new_dates, columns=data.columns)
+            # Append the new rows to the original DataFrame
+            data = pd.concat([data, new_data])
+
+        # Check if the minimum date is after from_date and the maximum date is before to_date
+        if date_min > from_date or date_max < to_date:
+            pass
+            # raise ValueError(
+            # f"{self.name} data only available between {date_min} and {date_max} while you requested from {from_date} to {to_date}")
+
+        data = clean_dataframe(data=data, drop_constant_thr=drop_constant_thr,
+                               exclude_categories=True, exclude_booleans=True)
+
+        if shift or rolling_window:
+            # if date_min > from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0))):
+            #     raise ValueError(f"{self.name} data only available from {date_min}, while shift and rolling_window require data from {from_date - dt.timedelta(days=(max(*shift, *rolling_window, 0)))}")
+
+            # Si %% est présent dans un des noms des colonnes, alors on préviens l'utilisateur que l'augmentation des features a déjà été effectuée sur ces données
+            if [col for col in data.columns if '%%' in col] != []:
+                self.logger.warning(
+                    "Features already augmented, skipping features augmentation")
+            else:
+                data = self.features_augmentation(
+                    data, features_names, shift=shift, rolling_window=rolling_window)
+        # data.dropna(inplace=True)
+
+        # On agrège le dataframe à la fréquence souhaitée
+        # Pour gagner du temps, on n'effectue pas d'agrégation si la fréquence est la même que celle des données
+        # avec 1M == 1ME == M == ME
+        # if freq and freq not in {initial_freq, f'1{initial_freq}', f'1{initial_freq}E', f'{initial_freq}E'}:
+        #     data = self.aggregate_data_by_dtype(agg_dict={'number': ['mean', 'std', 'min', 'max'], 'category': [relative_frequency]}, freq=freq, data=data)
+
         if features_names is None:
-            features_names = self.get_features_names()
+            features_names = data.columns.tolist()
         assert isinstance(
             features_names, list), f"features_names must be of type list, not {type(features_names)}"
-        
-        # print(self.data.index)
 
-        return self.data.loc[(self.data.index >= from_date) & (self.data.index <= to_date), features_names]
+        # data = data.iloc[max(0, *rolling_window, *shift):]
 
-    @abc.abstractmethod
-    def save_data(self, path: Optional[Union[str, pathlib.Path]] = None, filename: Optional[str] = None) -> None:
-        """
-        Sauvegarde les données.
+        # # Supprimer les lignes contenant des NaN
+        # data = data.dropna()
+        # print(from_date, data.index.min())
+        # print(to_date, data.index.max())
+        # print(data)
+        # print(from_date, to_date)
+        # print(data)
+        # print(data.index.is_unique)
+        data = data[~data.index.duplicated(keep='first')]
+        data = data.loc[from_date:to_date]
+        data = data[features_names]
+        data.sort_index(axis=1, inplace=True)
+        # print(data)
+        nan_rows = data[data.isna().any(axis=1)].index
+        if len(nan_rows):
+            self.logger.warning(
+                "Plage des indices des lignes contenant des NaN: {}".format(nan_rows))
+            self.logger.warning("Colonnes contenant des NaN pour ces indices: {}".format(
+                data.columns[data.isna().any()].tolist()))
 
-        Parameters:
-        - None
-        """
+        return data
 
-        if path is None:
-            path = self.data_dir
+    def save_dataframe(self, data: pd.DataFrame, path: Union[str, pathlib.Path], filename: Optional[str] = 'data.feather') -> None:
+
         assert isinstance(path, str) or isinstance(
             path, pathlib.Path), f"path must be of type str or pathlib.Path, not {type(path)}"
         if isinstance(path, str):
             path = pathlib.Path(path)
 
-        if filename is None:
-            filename = f'data_{self.name}.feather'
         assert isinstance(
             filename, str), f"filename must be of type str, not {type(filename)}"
         if not filename.endswith('.feather'):
             filename += '.feather'
 
-        self.data.to_feather(path / filename)
+        data.to_feather(path / filename)
 
-    @abc.abstractmethod
-    def get_features_names(self) -> List[str]:
-        """
-        Retourne les noms des features.
+    # def get_features_names(self) -> List[str]:
+    #     """
+    #     Retourne les noms des features.
 
-        Parameters:
-        - None
+    #     Parameters:
+    #     - None
 
-        Returns:
-        - Les noms des features.
-        """
+    #     Returns:
+    #     - Les noms des features.
+    #     """
 
-        return self.data.columns.tolist()
+    #     return self.data.columns.tolist()
 
-    @abc.abstractmethod
-    def groupby(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
-        """
-        Groupe les données.
+    # def columns_by_type(self) -> dict:
+    #     """
+    #     Retourne un dictionnaire des colonnes du DataFrame classées par type de données.
 
-        Parameters:
-        - by: L'échelle à laquelle regrouper les données. (ex: 'day', 'week', 'month', 'year')
-        - features_names: Les features à grouper.
+    #     Parameters:
+    #     - df: Le DataFrame à analyser.
 
-        Returns:
-        - data: Les données groupées.
-        """
+    #     Returns:
+    #     - dict: Un dictionnaire où les clés sont les types de données et les valeurs sont les listes de colonnes correspondantes.
+    #     """
 
-        data = self.get_data(from_date=from_date,
-                             to_date=to_date, features_names=features_names)
-        
-        # print(data.columns)
+    #     # Parcourir tous les types de données dans le DataFrame
+    #     for dtype in self.data.dtypes.unique():
+    #         # Trouver les colonnes qui correspondent à ce type de données
+    #         columns = self.data.columns[self.data.dtypes == dtype].tolist()
 
-        # Grouper les données par la fréquence spécifiée
-        grouper = pd.Grouper(freq=freq, level='date')
+    #         # Ajouter au dictionnaire, la clé est le nom du type, la valeur est la liste des colonnes
+    #         self.columns_types[str(dtype)] = columns
 
-        numeric_grouped_data = data.groupby(grouper)[self.numeric_columns].mean()
+    #     return self.columns_types
 
-        categorical_grouped_data = (data.groupby(grouper)[self.categorical_columns]
-                                       .apply(lambda x: x.apply(lambda y: y.value_counts(normalize=True) * 100))
-                                       .fillna(0))
+    def aggregate_data_by_dtype(self, agg_dict, data: pd.DataFrame, freq='1D', flatten=True) -> pd.DataFrame:
 
-        # Réorganiser les données catégorielles
-        categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0)
-        categorical_grouped_data.columns = [f'{col[0]}__{col[1]}' for col in categorical_grouped_data.columns]
+        self.logger.info("Aggregating data by data type...")
 
-        # categorical_grouped_data = (data.groupby(grouper)[categorical_columns].value_counts(normalize=True)*100)
-        # print(categorical_grouped_data)
-        # categorical_grouped_data = categorical_grouped_data.unstack(fill_value=0).rename(columns=lambda x: f'{x}_percentage')
-        # print(categorical_grouped_data)
+        # Vérifier que le DataFrame a un index de type DateTime
+        if not isinstance(data.index, pd.DatetimeIndex):
+            raise ValueError(
+                "Le DataFrame doit avoir un index de type DateTime.")
 
-        aggregated_data = pd.concat([numeric_grouped_data, categorical_grouped_data], axis=1)
-        
-        # print(aggregated_data)
-    
+        # Créer un dictionnaire pour stocker les agrégations par colonne
+        column_agg_dict = {}
 
-        return aggregated_data
+        # Pour chaque type dans agg_dict, on applique les fonctions d'agrégation aux colonnes correspondantes
+        for dtype, funcs in agg_dict.items():
+            matching_columns = data.select_dtypes(include=[dtype]).columns
+            for col in matching_columns:
+                column_agg_dict[col] = funcs
 
-    # def plot_numeric_over_time(self, df, column, resample_freq='1D'):
-    #     df[column].resample(resample_freq).mean().plot(kind='line', figsize=(10, 6))
-    #     plt.title(f'{column} over time ({resample_freq})')
-    #     plt.xlabel('Date')
-    #     plt.ylabel(column)
-    #     plt.show()
+        # Fonction d'application unifiée pour gérer les différentes fonctions d'agrégation
+        def unified_apply_func(series, funcs):
+            """
+            Applique une liste de fonctions à une série et retourne une Series ou un DataFrame.
+            """
+            results = {}
+            for func in funcs:
+                # self.logger.info(f"Applying {func} to {series.name}...")
+                if callable(func):
+                    # print("callable: ", func)
+                    result = func(series)
+                    # print(result)
+                    if isinstance(result, pd.Series):
+                        # print("isinstance: series")
+                        # Renommer les résultats de la série pour les inclure dans le MultiIndex
+                        results.update(result.rename(
+                            lambda x: f"{func.__name__}~{x}"))
+                    else:
+                        results[func.__name__] = result
+                else:
+                    # print("not callable: ", func)
+                    result = getattr(series, func)()
+                    # print(result)
+                    results[func] = result
+            return pd.Series(results)
 
-    # # Exemple de graphique pour une colonne catégorique
-    # def plot_categorical_over_time(self, df, column, resample_freq='1D'):
-    #     category_counts = df[column].resample(resample_freq).value_counts().unstack().fillna(0)
-    #     category_counts.plot(kind='bar', stacked=True, figsize=(10, 6))
-    #     plt.title(f'{column} over time ({resample_freq})')
-    #     plt.xlabel('Date')
-    #     plt.ylabel('Count')
-    #     plt.legend(title=column)
-    #     plt.show()
+        # Appliquer les agrégations à chaque groupe
+        def apply_aggregations(group):
+            aggregated = {}
+            for col, funcs in column_agg_dict.items():
+                # print(group[col])
+                # self.logger.info(f"Aggregating column {col}...")
+                aggregated[col] = unified_apply_func(group[col], funcs)
 
-    @abc.abstractmethod
-    def plot(self, from_date: Optional[Union[str, dt.datetime]] = None, to_date: Optional[Union[str, dt.datetime]] = None, features_names: Optional[List[str]] = None, freq: str = '1D') -> pd.DataFrame:
-        """
-        Affiche les données.
+                concat = pd.concat(aggregated, axis=0)
+            return concat
 
-        Parameters:
-        - features: Les features à afficher.
-        """
+        grouper = pd.Grouper(freq=freq)
+        grouped_data = data.groupby(grouper)
 
-        grouped_data = self.groupby(from_date, to_date, features_names, freq=freq)
+        # Appliquer les agrégations
+        aggregated_df = grouped_data.apply(apply_aggregations)
+
+        if not isinstance(aggregated_df, pd.DataFrame):
+            aggregated_df = aggregated_df.to_frame().unstack(
+                level=[1, 2]).droplevel(0, axis=1)
+
+        if flatten:
+            aggregated_df.columns = [
+                '~~'.join(col).strip() for col in aggregated_df.columns.values]
+
+        return aggregated_df
+
+    def plot(self, from_date: Optional[Union[str, dt.datetime]] = None,
+             to_date: Optional[Union[str, dt.datetime]] = None,
+             features_names: Optional[List[str]] = None,
+             freq: str = '1D',
+             max_subplots: int = 4,
+             data: Optional[pd.DataFrame] = None,
+             location: Optional[Location] = None) -> pd.DataFrame:
+        def custom_flatten(array, n):
+            """
+            Applati un tableau numpy selon un ordre particulier.
+            
+            Arguments:
+                array (np.ndarray): Un tableau 2D numpy de dimensions (M, N).
+                n (int): Nombre d'éléments consécutifs à prendre par colonne avant de passer au bloc suivant.
+
+            Retourne:
+                list: Une liste d'indices ordonnés pour le tableau aplati.
+            """
+            # Vérifier que n est positif
+            if n <= 0:
+                raise ValueError("Le paramètre 'n' doit être un entier positif.")
+
+            # Extraire les dimensions
+            n_rows, n_cols = array.shape
+
+            # Préparer une liste pour les indices ordonnés
+            ordered_indices = []
+
+            # Parcourir les éléments par blocs de taille n
+            for start in range(0, n_rows, n):
+                # Ajouter les indices par colonnes, n éléments à la fois
+                for col in range(n_cols):
+                    for row in range(start, min(start + n, n_rows)):
+                        ordered_indices.append((row, col))
+
+            return ordered_indices
+
+        if data is None:
+            data = self.get_data(
+                from_date=from_date, to_date=to_date, location=location, features_names=features_names, freq=freq)
+
+        # # Identifier les colonnes catégorielles
+        # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
+        # categorical_data = data[categorical_columns]
+        # data = data.drop(columns=categorical_columns)
+        # numeric_columns = data.select_dtypes(include=['number']).columns
+
+        # elif not categorical_columns.empty:
+        #     data = data.join(self.aggregate_data_by_dtype(agg_dict={'category': [relative_frequency]}, freq=freq, data=categorical_data))
+        # print(data)
+        # data = self.groupby(from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
         # # data = self.get_data(from_date=from_date, to_date=to_date, features_names=features_names)
 
         # for i in range(0, len(data.columns), min(4, len(data.columns))):
         #     data.iloc[:, i:i+5].plot()
         #     plt.show()
-
-        max_subplots = 4
-        num_cols = 2
-        num_rows = 2
+        years = data.index.year.unique()
+        num_rows = np.ceil(np.sqrt(max_subplots)).astype(int) #*len(years)
+        num_cols = np.ceil(max_subplots / num_rows).astype(int)
 
         # Calcul du nombre total de figures nécessaires
-        num_vars = len(self.data.columns)
+        num_vars = len(data.columns)
 
-        # print(self.data.columns)
         num_figures = math.ceil(num_vars / max_subplots)
 
-        # print(num_figures)
-
-        # # Identifier les colonnes catégorielles
-        # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
-        # numeric_columns = data.select_dtypes(include=['number']).columns
-
-        # print(data)
+        # if (freq != pd.infer_freq(data.index)) and (freq is not None) and (freq != '1' + pd.infer_freq(data.index)) and (freq != '1' + pd.infer_freq(data.index)+'E') and (freq != pd.infer_freq(data.index)+'E'):
+        #     agg_data = self.aggregate_data_by_dtype(agg_dict={'number': ['mean', 'std', 'min', 'max'], 'category': [relative_frequency]}, data=data, freq=freq)
+        # else:
+        #     agg_data = data
 
         for fig_num in range(num_figures):
+            fig: plt.Figure
+            axes: np.ndarray[plt.Axes]
             fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 10))
             axes = axes.flatten()
 
             start_idx = fig_num * max_subplots
             end_idx = min(start_idx + max_subplots, num_vars)
 
-            # print(start_idx, end_idx)
+            for i, variable_name in enumerate(data.columns[start_idx:end_idx]):
 
-            for i, column in enumerate(self.data.columns[start_idx:end_idx]):
-                # print(column)
-                if column in self.categorical_columns:
-                    col = grouped_data.loc[:, [col for col in grouped_data.columns if col.startswith(f'{column}__')]]
-                    print(col)
-                    col.plot(kind='bar', stacked=True, ax=axes[i])
-                    axes[i].set_title(f'{column} over time ({freq})')
-                    axes[i].set_xlabel('Date')
-                    axes[i].set_ylabel('Count')
-                    axes[i].legend(title=column)
+                for column in data.columns.to_list():
 
-                elif column in self.numeric_columns:
-                    col = grouped_data[column]
-                    # print(col)
-                    col.plot(kind='line', ax=axes[i])
-                    axes[i].set_title(f'{column} over time ({freq})')
-                    axes[i].set_xlabel('Date')
-                    axes[i].set_ylabel('Count')
-                    axes[i].legend(title=column)
+                    # if '~~' in column:
+                    #     column_name, agg_func = column.split('~~', 1)
+                    # else:
+                    #     column_name = column
+                    #     agg_func = column
+
+                    if variable_name == column:
+                        for year in data.index.year.unique():
+                            col = data[column][data.index.year == year]
+
+                            index: pd.DatetimeIndex = col.index
+                            axes[i].plot(index.day_of_year, col, label=f'{year}',linestyle='-', marker='+', alpha=0.7)
+                            # col.plot(kind='line', ax=axes[i])
+                            axes[i].set_title(f'{variable_name} over time ({freq})')
+                            axes[i].set_xlabel('Date')
+                            axes[i].set_ylabel('Value')
+                            axes[i].legend()
 
             # Supprimer les axes inutilisés
             for j in range(end_idx - start_idx, len(axes)):
@@ -407,175 +710,22 @@ class BaseFeature(object):
             plt.tight_layout()
             plt.show()
 
-    @abc.abstractmethod
-    def dtypes(self) -> pd.Series:
-        """
-        Retourne les types des données.
+    def load(self, path: Optional[Union[str, pathlib.Path]], filename: Optional[str]) -> pd.DataFrame:
 
-        Parameters:
-        - None
+        assert isinstance(path, str) or isinstance(
+            path, pathlib.Path), f"path must be of type str or pathlib.Path, not {type(path)}"
+        if isinstance(path, str):
+            path = pathlib.Path(path)
+        if not path.is_dir():
+            raise NotADirectoryError(f"'{path}' is not a directory")
 
-        Returns:
-        - Les types des données.
-        """
+        assert isinstance(
+            filename, str), f"filename must be of type str, not {type(filename)}"
+        if not filename.endswith('.feather'):
+            filename += '.feather'
 
-        return self.data.dtypes
+        if not os.path.isfile(path / filename):
+            raise FileNotFoundError(
+                f"File '{filename}' not found in \'{path}\'")
 
-    @abc.abstractmethod
-    def get_dtypes(self) -> List[str]:
-        """
-        Retourne les types des données.
-
-        Parameters:
-        - None
-
-        Returns:
-        - Les types des données.
-        """
-
-        return set(self.data.dtypes.tolist())
-
-    @abc.abstractmethod
-    def describe(self) -> pd.DataFrame:
-        """
-        Retourne les statistiques descriptives des données.
-
-        Parameters:
-        - None
-
-        Returns:
-        - Les statistiques descriptives des données.
-        """
-
-        return self.data.describe()
-
-    @abc.abstractmethod
-    def info(self) -> pd.DataFrame:
-        """
-        Retourne les informations des données.
-
-        Parameters:
-        - None
-
-        Returns:
-        - Les informations des données.
-        """
-
-        return self.data.info()
-
-    @abc.abstractmethod
-    def head(self, n: int = 5) -> pd.DataFrame:
-        """
-        Retourne les premières lignes des données.
-
-        Parameters:
-        - n: Le nombre de lignes à retourner.
-
-        Returns:
-        - Les premières lignes des données.
-        """
-
-        return self.data.head(n)
-
-    @abc.abstractmethod
-    def tail(self, n: int = 5) -> pd.DataFrame:
-        """
-        Retourne les dernières lignes des données.
-
-        Parameters:
-        - n: Le nombre de lignes à retourner.
-
-        Returns:
-        - Les dernières lignes des données.
-        """
-
-        return self.data.tail(n)
-
-    @abc.abstractmethod
-    def __str__(self) -> str:
-        """
-        Retourne une représentation de la classe.
-
-        Parameters:
-        - None
-
-        Returns:
-        - La représentation de la classe.
-        """
-
-        return f"{self.name}({self.config})"
-
-    @abc.abstractmethod
-    def __repr__(self) -> str:
-        """
-        Retourne une représentation de la classe.
-
-        Parameters:
-        - None
-
-        Returns:
-        - La représentation de la classe.
-        """
-
-        return self.__str__()
-
-    @abc.abstractmethod
-    def __len__(self) -> int:
-        """
-        Retourne la taille des données.
-
-        Parameters:
-        - None
-
-        Returns:
-        - La taille des données.
-        """
-
-        return len(self.data)
-
-    @abc.abstractmethod
-    def __getitem__(self, key: str) -> pd.Series:
-        """
-        Retourne une colonne des données.
-
-        Parameters:
-        - key: La colonne à retourner.
-
-        Returns:
-        - La colonne des données.
-        """
-
-        return self.data[key]
-
-    # @abc.abstractmethod
-    # def fit(self) -> None:
-    #     """
-    #     Encode les données.
-
-    #     Parameters:
-    #     - None
-    #     """
-        
-    #     self.ct.fit(self.data)
-
-    # @abc.abstractmethod
-    # def transform(self) -> None:
-    #     """
-    #     Encode les données.
-
-    #     Parameters:
-    #     - None
-    #     """
-        
-    #     self.ct.transform(self.data)
-
-    # @abc.abstractmethod
-    # def fit_transform(self) -> None:
-    #     """
-    #     Encode les données.
-
-    #     Parameters:
-    #     - None
-    #     """
-        
-    #     self.ct.fit_transform(self.data)
+        return pd.read_feather(path / filename)

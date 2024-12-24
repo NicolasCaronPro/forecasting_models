@@ -1,16 +1,24 @@
-from src.features.base_features import BaseFeature, Config
+from src.features.base_features import BaseFeature
 from typing import Optional, Dict
 import pandas as pd
+from pathlib import Path
+from src.location.location import Location
+import datetime as dt
+
 
 class TrafficFeatures(BaseFeature):
-    def __init__(self, config: Optional['Config'] = None, parent: Optional['BaseFeature'] = None) -> None:
-        super().__init__(config, parent)
-    
-    def include_trafic(self):
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
+
+    def include_trafic(self, feature_dir, date_range, departement):
         # Historique des accidents de la route
+        feature_dir = Path(feature_dir)
+        data = pd.DataFrame(index=date_range)
         self.logger.info("Intégration des données de trafic")
-        accidents = pd.read_csv(self.data_dir / 'nombre_accidents_par_date_par_departement.csv', sep=',')
-        accidents = accidents.loc[accidents['dep'] == self.config.get('departement')]
+        accidents = pd.read_csv(
+            feature_dir / 'nombre_accidents_par_date_par_departement.csv', sep=',')
+        accidents = accidents.loc[accidents['dep'] == departement]
         accidents['date'] = pd.to_datetime(accidents['date_entree'])
         accidents.drop(columns=['date_entree'], inplace=True)
         accidents.set_index('date', inplace=True)
@@ -28,20 +36,29 @@ class TrafficFeatures(BaseFeature):
         # accidents = pd.concat([accidents, df_2023])
 
         # Intégration des données au dataframe
-        self.data = self.data.merge(accidents['nb_accidents'], left_index=True, right_index=True, how='left')
+        data = data.merge(
+            accidents['nb_accidents'], left_index=True, right_index=True, how='left')
 
         # On remplit les jours sans accidents par 0
-        self.data['nb_accidents'].fillna(0, inplace=True)
+        data['nb_accidents'] = data['nb_accidents'].fillna(0)
 
-        # # Ajout des features décalés pour les DECALAGE_TRAFIC jours précédents
-        # for dec in range(1,DECALAGE_TRAFIC+1):
-        #     features['nb_accidents-'+str(dec)] = features['nb_accidents'].shift(dec)
-        
-        # # Ajout de la moyenne glissante sur FENETRE_GLISSANTE jours
-        # features['nb_accidents_rolling'] = features['nb_accidents'].rolling(window=FENETRE_GLISSANTE, closed="left").mean()
+        return data
 
-        # return features
-    
-    def fetch_data(self) -> None:
-        self.include_trafic()
-        super().fetch_data()
+    def fetch_data_function(self, *args, **kwargs) -> None:
+        assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
+        assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
+        assert 'location' in kwargs, "location must be provided in config"
+        location = kwargs.get('location')
+        departement = location.code_departement
+        feature_dir = kwargs.get("feature_dir")
+        start_date = kwargs.get("start_date")
+        stop_date = kwargs.get("stop_date")
+        # TODO: do not hardcode freq
+        date_range = pd.date_range(
+            start=start_date, end=stop_date, freq='1D', name="date")
+        data = pd.DataFrame(index=date_range)
+
+        data = data.join(self.include_trafic(
+            feature_dir, date_range, departement))
+        return data

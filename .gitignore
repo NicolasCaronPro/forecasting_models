@@ -177,4 +177,15 @@ mlruns/
 mlartifacts/
 
 # geodata
-src/geolocalisation/
+# src/geolocalisation/
+# src/features/geolocalisation/
+
+# miscelaneous
+misc/
+.DS_Store
+
+.cody/
+
+datasets
+datasets_sorted
+plots_*
