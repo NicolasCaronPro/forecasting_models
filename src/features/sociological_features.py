@@ -98,6 +98,7 @@ class SociologicalFeatures(BaseFeature):
             x.date(), get_academic_zone(academie, x)) else 0).astype('boolean')
         data['holidays-1'] = data['holidays'].shift(-1)
         data['borderHolidays'] = data.apply(lambda x: x['holidays'] != x['holidays-1'], axis=1).astype('boolean')
+        data['borderHolidays'] = data['borderHolidays'].ffill()
         data.drop('holidays-1', axis=1, inplace=True)
         self.logger.info("Variables de vacances intégrées")
         return data
@@ -198,4 +199,6 @@ class SociologicalFeatures(BaseFeature):
         data = data.join(self.include_HNFC_moving(date_range))
         data = data.join(self.include_COVID(date_range))
 
+        # Prefix all columns with sociological_
+        data.columns = [f"sociological_{col}" for col in data.columns]
         return data

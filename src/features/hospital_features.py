@@ -35,17 +35,17 @@ class HospitalFeatures(BaseFeature):
     """
 
     def __init__(self, name: str = None, logger=None,
-                 include_emmergency_arrivals=True,
+                 include_emergency_arrivals=True,
                  include_hnfc_moving=True,
                  include_nb_hospit_np_from_ED_children=True,
                  include_nb_hospit_np_from_ED_adults=True) -> None:
         super().__init__(name, logger)
-        self.include_emmergency_arrivals = include_emmergency_arrivals
+        self.include_emergency_arrivals = include_emergency_arrivals
         self.include_hnfc_moving = include_hnfc_moving
         self.include_nb_hospit_np_from_ED_children = include_nb_hospit_np_from_ED_children
         self.include_nb_hospit_np_from_ED_adults = include_nb_hospit_np_from_ED_adults
 
-    def include_nb_emmergencies(self, from_date, to_date, etablissement, feature_dir) -> None:
+    def include_nb_emergencies(self, from_date, to_date, etablissement, feature_dir) -> None:
         """
         Adds the target to the features.
         """
@@ -66,19 +66,23 @@ class HospitalFeatures(BaseFeature):
             data.drop(axis=1, columns="annee", inplace=True)
 
         data.rename(columns={
-            "Total": f"nb_emmergencies", "date_entree": "date"}, inplace=True)
+            "Total": f"nb_emergencies", "date_entree": "date"}, inplace=True)
 
         if data["date"].dtype != "datetime64[ns]":
-            data["date"] = pd.to_datetime(data["date"])
+            try:
+                data["date"] = pd.to_datetime(data["date"], format="%Y-%m-%d")
+            except Exception as e:
+                print(e)
+                print(etablissement)
+                raise(e)
 
         data.sort_values(by="date", inplace=True)
         data.set_index('date', inplace=True)
 
-        data.dropna(subset=[f"nb_emmergencies"], inplace=True)
-
+        data.dropna(subset=[f"nb_emergencies"], inplace=True)
         return data
 
-    def include_nb_hospitalized_np_from_emmergencies_adults(self, from_date, to_date, etablissement, feature_dir):
+    def include_nb_hospitalized_np_from_emergencies_adults(self, from_date, to_date, etablissement, feature_dir):
         # hospitalized = pd.read_excel(
         #     feature_dir / "hospitalisations/non-programé/urgences/RPU_vers_hospit_adultes.xlsx")
         # hospitalized['date_entree'] = pd.to_datetime(
@@ -89,25 +93,25 @@ class HospitalFeatures(BaseFeature):
 
         data.rename(columns={"Total": "nb_hospit_np_from_ED_adults", "date_entree": "date"}, inplace=True)
         if data["date"].dtype != "datetime64[ns]":
-            data["date"] = pd.to_datetime(data["date"])
+            data["date"] = pd.to_datetime(data["date"], format="%Y-%m-%d")
         data.sort_values(by="date", inplace=True)
         data.set_index("date", inplace=True)
 
         return data
 
-    def include_nb_hospitalized_np_from_emmergencies_children(self, from_date, to_date, etablissement, feature_dir):
+    def include_nb_hospitalized_np_from_emergencies_children(self, from_date, to_date, etablissement, feature_dir):
         file_name_all = f'rpu_hospit_total_{etablissement}.csv'
         hospitalized_all = pd.read_csv(feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_all}", sep=";")
         hospitalized_all.rename(columns={"date_entree": "date"}, inplace=True)
         if hospitalized_all["date"].dtype != "datetime64[ns]":
-            hospitalized_all["date"] = pd.to_datetime(hospitalized_all["date"])
+            hospitalized_all["date"] = pd.to_datetime(hospitalized_all["date"], format="%Y-%m-%d")
         hospitalized_all.set_index('date', inplace=True)
 
         file_name_adults = f'rpu_hospit_adultes_{etablissement}.csv'
         hospitalized_adultes = pd.read_csv(feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_adults}", sep=";")
         hospitalized_adultes.rename(columns={"date_entree": "date"}, inplace=True)
         if hospitalized_adultes["date"].dtype != "datetime64[ns]":
-            hospitalized_adultes["date"] = pd.to_datetime(hospitalized_adultes["date"])
+            hospitalized_adultes["date"] = pd.to_datetime(hospitalized_adultes["date"], format="%Y-%m-%d")
         hospitalized_adultes.set_index('date', inplace=True)
 
         hospitalized_children = pd.DataFrame(hospitalized_all['Total'] - hospitalized_adultes['Total'], columns=[
@@ -179,8 +183,8 @@ class HospitalFeatures(BaseFeature):
         assert isinstance(etablissement, str), "etablissement must be a string"
 
         feature_dir = kwargs.get("feature_dir")
-        include_hospit_np_from_emmergencies_adults = kwargs.get(
-            "include_hospit_np_from_emmergencies_adults", False)
+        # include_hospit_np_from_emergencies_adults = kwargs.get(
+        #     "include_hospit_np_from_emergencies_adults", False)
 
         # Set starting date, default is 01/01/1970
         start_date = kwargs.get("start_date")
@@ -199,21 +203,22 @@ class HospitalFeatures(BaseFeature):
 
         include_nb_hospit_np_from_ED_children = kwargs.get('include_nb_hospit_np_from_ED_children', self.include_nb_hospit_np_from_ED_children)
         include_nb_hospit_np_from_ED_adults = kwargs.get('include_nb_hospit_np_from_ED_adults', self.include_nb_hospit_np_from_ED_adults)
-        include_emmergency_arrivals = kwargs.get('include_emmergency_arrivals', self.include_emmergency_arrivals)
-
-        if include_emmergency_arrivals:
-            data = data.join(self.include_nb_emmergencies(
+        include_emergency_arrivals = kwargs.get('include_emergency_arrivals', self.include_emergency_arrivals)
+        # pd.set_option('display.max_rows', None)
+        if include_emergency_arrivals:
+            data = data.join(self.include_nb_emergencies(
                 start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))
-        self.logger.info(f"{data}")
 
         if include_nb_hospit_np_from_ED_children:
-            data = data.join(self.include_nb_hospitalized_np_from_emmergencies_children(start_date, stop_date, etablissement, feature_dir))
-        self.logger.info(f"{data}")
+            data = data.join(self.include_nb_hospitalized_np_from_emergencies_children(start_date, stop_date, etablissement, feature_dir))
+        # self.logger.info(f"{data}")
 
         if include_nb_hospit_np_from_ED_adults:
-            data = data.join(self.include_nb_hospitalized_np_from_emmergencies_adults(start_date, stop_date, etablissement, feature_dir))
-        self.logger.info(f"{data}")
+            data = data.join(self.include_nb_hospitalized_np_from_emergencies_adults(start_date, stop_date, etablissement, feature_dir))
+        # self.logger.info(f"{data}")
 
+        # Prefix all columns with hospital_
+        data.columns = [f"hospital_{col}" for col in data.columns]
         # data = data.join(self.include_nb_hospitalized_np_adults(start_date, stop_date, feature_dir=feature_dir))
 
         return data
