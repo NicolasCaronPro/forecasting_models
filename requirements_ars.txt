@@ -41,7 +41,7 @@ cucim-cu12==24.8.0
 cuda-python==12.4.0
 cudf-cu12==24.8.2
 cugraph-cu12==24.8.0
-cuml-cu12==24.8.0
+# cuml-cu12==24.8.0 needs to be installed with pip install --extra-index-url https://pypi.nvidia.com cuml-cu12
 cuproj-cu12==24.8.0
 cupy-cuda12x==13.1.0
 curl_cffi==0.6.2
@@ -138,14 +138,14 @@ jupyterlab_server==2.27.3
 jupyterlab_widgets==3.0.11
 jupytext==1.16.2
 kiwisolver==1.4.5
-langchain==0.1.16
-langchain-community==0.0.34
-langchain-core==0.1.52
-langchain-mistralai==0.1.10
-langchain-openai==0.1.6
-langchain-text-splitters==0.0.1
+langchain
+langchain-community
+langchain-core
+langchain-mistralai
+langchain-openai
+langchain-text-splitters
 langdetect==1.0.9
-langsmith==0.1.50
+langsmith
 lazy_loader==0.4
 libucx-cu12==1.15.0.post1
 lifelines==0.29.0
@@ -165,8 +165,7 @@ mdit-py-plugins==0.4.1
 mdurl==0.1.2
 meteostat==1.6.7
 mistune==3.0.2
-mlflow==2.15.1
-mlflow-skinny==2.15.1
+mlflow==2.19.0 
 more-itertools==10.2.0
 mpld3==0.5.10
 msgpack==1.0.8
