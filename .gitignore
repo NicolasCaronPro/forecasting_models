@@ -189,8 +189,6 @@ misc/
 datasets
 datasets_sorted
 plots_*
-
 .vscode/
 __pycache__/
-
 .DS_Store
