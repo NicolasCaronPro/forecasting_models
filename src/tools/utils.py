@@ -57,7 +57,7 @@ def clean_dataframe(data:pd.DataFrame, drop_constant_thr=1.0, exclude_categories
 import os
 import re
 
-def supprimer_fichier_feather_recursif(dossiers):
+def supprimer_fichier_feather_recursif(dossiers, filename_base="data", extension=".feather"):
     """
     Parcourt les dossiers et leurs sous-dossiers récursivement et supprime
     tous les fichiers 'data.feather' s'ils existent.
@@ -66,7 +66,7 @@ def supprimer_fichier_feather_recursif(dossiers):
     """
 
     # Définir l'expression régulière pour correspondre à 'data.feather' ou 'data_<word>.feather'
-    pattern = re.compile(r'^data(?:_[a-zA-ZçÇéÉèÈêÊëËàÀâÂîÎïÏôÔûÛùÙüÜœŒ\s\W]+)*\.feather$', re.UNICODE)
+    pattern = re.compile(rf'^{filename_base}(?:_[a-zA-ZçÇéÉèÈêÊëËàÀâÂîÎïÏôÔûÛùÙüÜœŒ\s\W]+)*\{extension}$', re.UNICODE)
     print("Deleting files...")
     for dossier in dossiers:
         # Parcours récursivement le dossier et ses sous-dossiers
