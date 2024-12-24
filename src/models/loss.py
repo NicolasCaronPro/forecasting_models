@@ -6,6 +6,27 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 
 # mae, mse, rmse, msle, mape, huber, logcosh
 import numpy as np
+max_weight = 100
+threshold = 100
+
+def exponential_weights(y_true, threshold, max_weight):
+    weights = np.ones_like(y_true)
+    mask = y_true > threshold
+    weights[mask] = 1 + (np.exp((y_true[mask] - threshold) / (np.max(y_true) - threshold)) - 1) / (np.e - 1) * (max_weight - 1)
+    return weights
+
+def exp_weighted_rmse(y_true, y_pred):
+    global threshold, max_weight
+    try:
+        y_true = y_true.values
+    except:
+        y_true = y_true
+    weights = exponential_weights(y_true, threshold, max_weight)
+    errors = y_pred - y_true
+    weighted_squared_errors = weights * errors ** 2
+    weighted_rmse_value = np.sqrt(np.mean(weighted_squared_errors))
+    return weighted_rmse_value
+
 
 def weighted_rmse(y_true, y_pred, sample_weight=None):
     """
@@ -220,6 +241,11 @@ def mean_seasonal_squared_error(y_true, y_pred, alpha=0.5, freq=7):
     Returns:
         float: The calculated MSSE value.
     """
+    # Convert DataFrames to numpy arrays if needed
+    if isinstance(y_true, pd.DataFrame):
+        y_true = y_true.values
+    if isinstance(y_pred, pd.DataFrame):
+        y_pred = y_pred.values
     # Decompose the true values into trend and residual components
     decomposition_true = seasonal_decompose(y_true, period=freq, model='additive', extrapolate_trend='freq')
     y_trend_true = decomposition_true.trend
@@ -238,19 +264,20 @@ def mean_seasonal_squared_error(y_true, y_pred, alpha=0.5, freq=7):
     # y_residuals_pred = y_residuals_pred[mask]
 
     # Compute MSE for trend and residuals
-    mse_trend = np.mean((y_trend_true - y_trend_pred) ** 2)
+    mse_trend = np.mean((y_trend_true - y_trend_true) ** 2)
     mse_residuals = np.mean((y_residuals_true - y_residuals_pred) ** 2)
 
     # Compute the Mean Squared Seasonality Error (MSSE)
     msse = alpha * mse_trend + (1 - alpha) * mse_residuals
     return msse
 
-metrics = {
+regression_metrics = {
     'mae': mean_absolute_error,
     'mse': mean_squared_error,
     'rmse': root_mean_squared_error,
     'w_rmse': weighted_rmse,
     'pw_rmse': percentiles_weighted_rmse,
+    'ew_rmse': exp_weighted_rmse,
     'msle': mean_squared_log_error,
     'rmsle': root_mean_squared_log_error,
     'r2': r2_score,
@@ -262,6 +289,9 @@ metrics = {
     'poisson-nloglik': mean_poisson_deviance,
     'max_error': max_error,
     'explained_variance': explained_variance_score,
+}
+
+classification_metrics = {
     'logloss': log_loss
 }
 
@@ -269,6 +299,7 @@ metric_params = {
     'mae': {},
     'mse': {},
     'rmse': {},
+    'ew_rmse': {},
     'w_rmse': {},
     'pw_rmse': {},
     'msle': {},
@@ -278,7 +309,7 @@ metric_params = {
     'msse': {'alpha': 0.5, 'freq': 7},
     'pinball': {'alpha': 0.5},
     'gamma-deviance': {},
-    'tweedie-nloglik@1.7': {'power': 1.7},
+    'tweedie-nloglik@1.5': {'power': 1.5},
     'poisson-nloglik': {},
     'max_error': {},
     'explained_variance': {}

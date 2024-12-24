@@ -1,7 +1,18 @@
 import numpy as np
 from .loss import *
 
-
+def exp_weighted_rmse_obj(y_pred: np.ndarray, dtrain):
+    global threshold, max_weight
+    try:
+        y_true = dtrain.get_label()  # Obtenir les vraies étiquettes
+    except:
+        y_true = dtrain
+    weights = exponential_weights(y_true, threshold, max_weight)
+    errors = y_pred - y_true
+    grad = weights * errors
+    hess = weights
+    return grad, hess
+    
 def weighted_rmse_obj(y_true: np.ndarray, y_pred: np.ndarray):
     """
     Custom objective function for RMSE weighted by deviation from mean.
@@ -107,18 +118,29 @@ def mean_quartic_error_obj(y_true, y_pred):
     return grad, hess
 
 
-objective_metrics = {
-    'reg:squarederror': ['rmse', 'mse'],
+regression_objective_metrics = {
+    'reg:squarederror': ['rmse'],
     'reg:absoluteerror': ['mae'],
-    'reg:squaredlogerror': ['rmsle', 'msle'],
+    'reg:squaredlogerror': ['rmsle'],
     'reg:logistic': ['r2_score'],
-    'reg:tweedie': ['tweedie-nloglik@1.7'],
+    'reg:tweedie': ['tweedie-nloglik@1.5'],
     'reg:gamma': ['gamma-deviance'],
     'count:poisson': ['poisson-nloglik'],
     # 'reg:pseudohubererror': ['mphe'],
     'reg:quantileerror': ['pinball'],
-    weighted_rmse_obj: ['w_rmse'],
-    percentiles_weighted_rmse_obj: ['pw_rmse'],
-    mean_quartic_error_obj: ['mqe', 'explained_variance', 'max_error', 'msse'],
+    weighted_rmse_obj.__name__: ['w_rmse'],
+    percentiles_weighted_rmse_obj.__name__: ['pw_rmse'],
+    mean_quartic_error_obj.__name__: ['mqe'],
+    exp_weighted_rmse_obj.__name__: ['ew_rmse']
+}
+
+for obj in list(regression_objective_metrics.keys()):
+    regression_objective_metrics[obj].extend([x for x in regression_metrics if x not in regression_objective_metrics[obj]])
+
+
+classification_objective_metrics = {
     'binary:logistic': ['logloss']
 }
+
+for obj in list(classification_objective_metrics.keys()):
+    classification_objective_metrics[obj].extend([x for x in classification_metrics if x not in classification_objective_metrics[obj]])
