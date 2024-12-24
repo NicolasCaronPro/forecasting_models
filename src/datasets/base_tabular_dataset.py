@@ -942,73 +942,74 @@ class BaseTabularDataset():
         # if not inplace:
         #     return new_dataset
 
-    def save_dataset(self, dataset_dir: str = None) -> None:
-        """
-        Save the dataset.
+    # Unused, should be rewritten
+    # def save_dataset(self, dataset_dir: str = None) -> None:
+    #     """
+    #     Save the dataset.
 
-        Parameters:
-        - root_dir: str - The root directory where to save the dataset
-        - name: str - The name of the dataset
-        """
+    #     Parameters:
+    #     - root_dir: str - The root directory where to save the dataset
+    #     - name: str - The name of the dataset
+    #     """
 
-        if dataset_dir is None:
-            dataset_dir = self.data_dir
+    #     if dataset_dir is None:
+    #         dataset_dir = self.data_dir
 
-        dataset_dir = Path(dataset_dir)
+    #     dataset_dir = Path(dataset_dir)
 
-        if not dataset_dir.exists():
-            dataset_dir.mkdir(parents=True)
+    #     if not dataset_dir.exists():
+    #         dataset_dir.mkdir(parents=True)
 
-        self.logger.info("Saving the raw dataset...")
-        # self.save_dataframe(path=dataset_dir, data=self.data, filename="data.feather")
+    #     self.logger.info("Saving the raw dataset...")
+    #     # self.save_dataframe(path=dataset_dir, data=self.data, filename="data.feather")
 
-        if not self.train_set.empty:
-            self.logger.info("Saving splits...")
-            if not dataset_dir.joinpath("train").exists():
-                (dataset_dir / "train").mkdir(parents=True)
-            self.save_dataframe(path=dataset_dir / "train",
-                                filename="train_set.feather", data=self.train_set)
+    #     if not self.train_set.empty:
+    #         self.logger.info("Saving splits...")
+    #         if not dataset_dir.joinpath("train").exists():
+    #             (dataset_dir / "train").mkdir(parents=True)
+    #         self.save_dataframe(path=dataset_dir / "train",
+    #                             filename="train_set.feather", data=self.train_set)
 
-            if not self.val_set.empty:
-                if not dataset_dir.joinpath("validation").exists():
-                    (dataset_dir / "validation").mkdir(parents=True)
-                self.save_dataframe(
-                    path=dataset_dir / "validation", filename="val_set.feather", data=self.val_set)
-            if not self.test_set.empty:
-                if not dataset_dir.joinpath("test").exists():
-                    (dataset_dir / "test").mkdir(parents=True)
-                self.save_dataframe(
-                    path=dataset_dir / "test", filename="test_set.feather", data=self.test_set)
+    #         if not self.val_set.empty:
+    #             if not dataset_dir.joinpath("validation").exists():
+    #                 (dataset_dir / "validation").mkdir(parents=True)
+    #             self.save_dataframe(
+    #                 path=dataset_dir / "validation", filename="val_set.feather", data=self.val_set)
+    #         if not self.test_set.empty:
+    #             if not dataset_dir.joinpath("test").exists():
+    #                 (dataset_dir / "test").mkdir(parents=True)
+    #             self.save_dataframe(
+    #                 path=dataset_dir / "test", filename="test_set.feather", data=self.test_set)
 
-        if not self.X_train.empty:
-            self.logger.info("Saving X and y...")
-            self.save_dataframe(path=dataset_dir / "train",
-                                filename="X_train.feather", data=self.X_train)
-            self.save_dataframe(path=dataset_dir / "train",
-                                filename="y_train.feather", data=self.y_train)
+    #     if not self.X_train.empty:
+    #         self.logger.info("Saving X and y...")
+    #         self.save_dataframe(path=dataset_dir / "train",
+    #                             filename="X_train.feather", data=self.X_train)
+    #         self.save_dataframe(path=dataset_dir / "train",
+    #                             filename="y_train.feather", data=self.y_train)
 
-            if not self.X_val.empty:
-                self.save_dataframe(
-                    path=dataset_dir / "validation", filename="X_val.feather", data=self.X_val)
-                self.save_dataframe(
-                    path=dataset_dir / "validation", filename="y_val.feather", data=self.y_val)
-            if not self.X_test.empty:
-                self.save_dataframe(path=dataset_dir / "test",
-                                    filename="X_test.feather", data=self.X_test)
-                self.save_dataframe(path=dataset_dir / "test",
-                                    filename="y_test.feather", data=self.y_test)
+    #         if not self.X_val.empty:
+    #             self.save_dataframe(
+    #                 path=dataset_dir / "validation", filename="X_val.feather", data=self.X_val)
+    #             self.save_dataframe(
+    #                 path=dataset_dir / "validation", filename="y_val.feather", data=self.y_val)
+    #         if not self.X_test.empty:
+    #             self.save_dataframe(path=dataset_dir / "test",
+    #                                 filename="X_test.feather", data=self.X_test)
+    #             self.save_dataframe(path=dataset_dir / "test",
+    #                                 filename="y_test.feather", data=self.y_test)
 
-        if not self.enc_X_train.empty:
-            self.logger.info("Saving encodings...")
-            self.save_dataframe(path=dataset_dir / "train",
-                                filename="enc_X_train.feather", data=self.enc_X_train)
+    #     if not self.enc_X_train.empty:
+    #         self.logger.info("Saving encodings...")
+    #         self.save_dataframe(path=dataset_dir / "train",
+    #                             filename="enc_X_train.feather", data=self.enc_X_train)
 
-            if not self.enc_X_val.empty:
-                self.save_dataframe(path=dataset_dir / "validation",
-                                    filename="enc_X_val.feather", data=self.enc_X_val)
-            if not self.enc_X_test.empty:
-                self.save_dataframe(
-                    path=dataset_dir / "test", filename="enc_X_test.feather", data=self.enc_X_test)
+    #         if not self.enc_X_val.empty:
+    #             self.save_dataframe(path=dataset_dir / "validation",
+    #                                 filename="enc_X_val.feather", data=self.enc_X_val)
+    #         if not self.enc_X_test.empty:
+    #             self.save_dataframe(
+    #                 path=dataset_dir / "test", filename="enc_X_test.feather", data=self.enc_X_test)
 
-            self.save_dataframe(
-                path=dataset_dir, filename="enc_data.feather", data=self.enc_data)
+    #         self.save_dataframe(
+    #             path=dataset_dir, filename="enc_data.feather", data=self.enc_data)

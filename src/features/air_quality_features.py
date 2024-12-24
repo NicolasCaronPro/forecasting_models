@@ -166,9 +166,9 @@ class AirQualityFeatures(BaseFeature):
         for fic in archived_data_dir.iterdir():
             if fic.suffix == '.csv':
                 df = pd.read_csv(fic, sep=";")
-                display(df)
+                # display(df)
                 df = df[df['code site'].isin(CODES)]
-                display(df)
+                # display(df)
                 assert len(df['Polluant'].unique()) == 1, f"Le fichier contient plusieurs polluants : {df['Polluant'].unique()}"
                 polluant = df['Polluant'].unique()[0].replace('.', '')
                 if polluant not in polluants:
