@@ -23,7 +23,7 @@ from src.models.obectives import *
 import copy
 
 
-def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval_metric = None, params: dict = None, n=1, ensemble_method=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, test_metrics=None, eval_metric = None, params: dict = None, n=1, ensemble_method=None) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -33,19 +33,27 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
     :param task_type: Task type ('regression' or 'classification')
     :param params: Dictionary of model parameters
     :param test_metrics: Metrics to use for testing the model (default: 'log_loss')
-    :param eval_metric: Evaluation metric for the model. Default is the first element in test_metrics list
+    :param eval_metric: Evaluation metric for the model. Default is the default metric of the objective
     :return: Configured model and hyperparameter search grid
     """
     model = None
 
-    if isinstance(test_metrics, str):
-        test_metrics = [test_metrics]
+    # if isinstance(test_metrics, str):
+    #     test_metrics = [test_metrics]
 
     # eval_metric = params.get('eval_metric', None)
     objective = params.get('objective', None)
 
     assert ensemble_method in ['voting', 'stacking', 'fusion', None], 'ensemble method should be one of voting, stacking, fusion or None'
 
+    if task_type == 'regression':
+        objective_metrics = copy.deepcopy(regression_objective_metrics)
+        test_metrics = copy.deepcopy(regression_metrics)
+    elif task_type == 'classification':
+        objective_metrics = copy.deepcopy(classification_objective_metrics)
+        test_metrics = copy.deepcopy(classification_metrics)
+    else:
+        raise ValueError("Unsupported task_type, should be one of 'regression', 'classification'")
     # Check if eval_metric and objective are compatible
     
     if objective:
@@ -54,24 +62,26 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
             # Check that eval metric is compatible with objective
             is_supported = False
             if objective in objective_metrics:
-                for metric in objective_metrics[objective]:
-                    if metric == eval_metric:
-                        is_supported = True
+                if eval_metric in objective_metrics[objective]:
+                    is_supported = True
+                    print("Given objective and eval_metric are compatible")
             else:
                 raise ValueError(f'Objective {objective} not supported. Supported objectives are {list(objective_metrics.keys())}')
             
             if not is_supported:
-                raise ValueError(f'The {eval_metric} metric is not supported by the {objective} objective.')
+                print(f'The {eval_metric} metric is not supported by the {objective} objective.')
             
-            params.update({'eval_metric': eval_metric})
+            params.update({'eval_metric': test_metrics[eval_metric]})
         else:
             if callable(objective): # Its a custom objective
-                if objective in objective_metrics:
-                    eval_metric = objective_metrics[objective][0]
+                if objective.__name__ in objective_metrics:
+                    eval_metric = objective_metrics[objective.__name__][0]
                 else:
-                    raise ValueError(f'{objective} custom objective is unknown and so does not have a default eval metric, please provide one')
+                    print(objective_metrics)
+                    raise ValueError(f'{objective.__name__} custom objective is unknown and so does not have a default eval metric, please provide one')
                 
-                params.update({'eval_metric': eval_metric})
+                params.update({'eval_metric': test_metrics[eval_metric]})
+                print(f"Custom objective {objective.__name__}  passed, {eval_metric} selected as the default eval_metric")
     
             else: # It's a built-in objective
                 # TODO: check if objective specific params are defined
@@ -80,53 +90,56 @@ def get_model(model_type, name, device, task_type, test_metrics='log_loss', eval
                     eval_metric = objective_metrics[objective][0]
                 else:
                     raise ValueError(f'{objective} built-in objective is unknown please provide a function instead or a well defined built-in objective')
+                params.update({'eval_metric': test_metrics[eval_metric]})
+                print(f"Built-in objective {objective} passed, {eval_metric} selected as the default eval_metric")
+
 
     else: # Using xgboost's default objective
         if eval_metric:
-            if task_type == 'regression':
-                if eval_metric not in objective_metrics['reg:squarederror']:
-                    raise ValueError(f'{eval_metric} is not supported by the reg:squarederror objective.')
-            else:
-                if eval_metric not in objective_metrics['binary:logistic']:
-                    raise ValueError(f'{eval_metric} is not supported by the binary:logistic objective.')
+            default_obj = next(iter(objective_metrics))
+            if eval_metric not in objective_metrics[default_obj]:
+                print(f'{eval_metric} is not supported by the {default_obj} objective.')
         else:
-            if task_type == 'regression':
-                eval_metric = 'rmse'
-            else:
-                eval_metric = 'aucpr'
+            eval_metric = objective_metrics[default_obj][0]
 
-    def unique_with_first_preserved(lst):
-        result = []
+    def unique_with_first_preserved(dct, key_to_preserve):
+        """
+        Crée un dictionnaire avec des clés uniques tout en préservant l'ordre d'insertion.
+        La clé `key_to_preserve` est déplacée au début si elle est présente.
 
-        # Ajoute le premier élément et le conserve
-        first_element = lst[0]
-        result.append(first_element)
+        Parameters:
+            dct (dict): Dictionnaire d'origine {metric_name: metric_function}.
+            key_to_preserve (str): Clé à déplacer en tête si elle existe.
 
-        # Parcourt le reste de la liste
-        for item in lst[1:]:
-            if item not in result:
-                result.append(item)
+        Returns:
+            dict: Nouveau dictionnaire avec la clé `key_to_preserve` en premier (si elle existe).
+        """
+        # Crée une liste des clés, en déplaçant key_to_preserve au début si elle existe
+        keys = list(dct.keys())
+        if key_to_preserve in keys:
+            keys.remove(key_to_preserve)
+            keys.insert(0, key_to_preserve)
 
-        return result
+        # Reconstruit un dictionnaire ordonné
+        return {key: dct[key] for key in keys}
 
     # Add eval_metric at the beginning of test_metric if it's not already there, and move it at the beginning if it's already in the list
     # if eval_metric is not None:
-    test_metrics.insert(0,eval_metric)
+    test_metrics = unique_with_first_preserved(test_metrics, eval_metric)
 
-    test_metrics = unique_with_first_preserved(test_metrics)
-
-    test_metrics_f = []
-    for metric in test_metrics:
-        test_metrics_f.append(metrics[metric])
-    test_metrics = test_metrics_f
+    # test_metrics_f = []
+    # for metric in test_metrics:
+    #     test_metrics_f.append(metrics[metric])
+    # test_metrics = test_metrics_f
 
 
-    if params.get('eval_metric', None) is not None:
-        eval_metric = metrics[eval_metric]
-        params.update({'eval_metric': eval_metric})
-
+    # if params.get('eval_metric', None) is not None:
+    #     print(params.get('eval_metric', None))
+    #     eval_metric = test_metrics[eval_metric]
+    #     params.update({'eval_metric': eval_metric})
     print(eval_metric)
-
+    print(test_metrics)
+    print(params['eval_metric'])
 
     if model_type == 'xgboost':
         model = config_xgboost(device, task_type, params)

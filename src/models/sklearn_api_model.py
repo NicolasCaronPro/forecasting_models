@@ -57,7 +57,7 @@ from sklearn.metrics import make_scorer, PredictionErrorDisplay
 
 
 from tools import *
-from src.models.loss import metrics, metric_params
+from src.models.loss import metric_params
 
 # from scripts.probability_distribution import weight
 
@@ -113,6 +113,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             assert grid_params is not None
             grid_search = GridSearchCV(
                 self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False, error_score='raise')
+            print("Fitting the model...")
             grid_search.fit(X, y, **fit_params)
             best_params = grid_search.best_params_
             # self.best_estimator_ = grid_search.best_estimator_
@@ -387,39 +388,61 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         y_pred = self.predict(X)
         if single_score:
             # print("Scoring with single score")
-            if isinstance(self.loss, List):
-                loss = self.loss[0]
-            else:
-                loss = self.loss
-            for metric_name, func in metrics.items():
-                if loss == func:
-                    return func(y, y_pred)
-            raise ValueError(f"Unknown loss function: {loss}")
-        scores = {}
+            loss = next(iter(self.loss))
+            return self.loss[loss](y, y_pred)
 
-        for metric_name, func in metrics.items():
-            if func in self.loss:
-                print(f'Scoring with {metric_name}')
-                scores[metric_name.replace("@", "_")] = func(y, y_pred)
+        scores = {}
+        for metric_name, func in self.loss.items():
+            # if func in self.loss:
+            print(f'Scoring with {metric_name}')
+            scores[metric_name.replace("@", "_")] = func(y, y_pred)
         return scores
 
-    def score_with_prediction(self, y_pred, y, sample_weight=None, single_score=True):
+    def score_from_preds(self, y_pred, y, sample_weight=None, single_score=True):
+        """
+        Evaluate the model's performance.
+
+        Parameters:
+        - X: Input data.
+        - y: True labels.
+        - sample_weight: Sample weights.
+
+        Returns:
+        - The model's score on the provided data.
+        """
+
         if single_score:
             # print("Scoring with single score")
-            if isinstance(self.loss, List):
-                loss = self.loss[0]
-            else:
-                loss = self.loss
-            for metric_name, func in metrics.items():
-                if loss == metric_name:
-                    return func(y, y_pred)
-            raise ValueError(f"Unknown loss function: {loss}")
-        scores = {}
-        for metric_name, func in metrics.items():
-            if metric_name in self.loss:
-                scores[metric_name] = func(y, y_pred)
+            loss = next(iter(self.loss))
+            return self.loss[loss](y, y_pred)
 
+        scores = {}
+        for metric_name, func in self.loss.items():
+            # if func in self.loss:
+            print(f'Scoring with {metric_name}')
+            print(metric_name.replace("@", "_"))
+            print(func(y, y_pred))
+            scores[metric_name.replace("@", "_")] = func(y, y_pred)
         return scores
+
+    # Old function used when self.loss was a list of name
+    # def score_with_prediction(self, y_pred, y, sample_weight=None, single_score=True):
+    #     if single_score:
+    #         # print("Scoring with single score")
+    #         if isinstance(self.loss, List):
+    #             loss = self.loss[0]
+    #         else:
+    #             loss = self.loss
+    #         for metric_name, func in metrics.items():
+    #             if loss == metric_name:
+    #                 return func(y, y_pred)
+    #         raise ValueError(f"Unknown loss function: {loss}")
+    #     scores = {}
+    #     for metric_name, func in metrics.items():
+    #         if metric_name in self.loss:
+    #             scores[metric_name] = func(y, y_pred)
+
+    #     return scores
     
     def get_prediction_error_display(self, y, y_pred):
         fig, axs = plt.subplots(nrows=1 , ncols = 2, sharex=False, sharey=False)
@@ -504,15 +527,20 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         # def scoring_func(y_true, y_pred, func, **kwargs):
         #     y_pred = y_pred.mean(axis=1) # Do this only if using ensembling or quantile regression
         #     return func(y_true, y_pred, **kwargs)
-        for metric_name, func in metrics.items():
-            if func in self.loss:
-                kwargs = metric_params[metric_name]
-                scorers[metric_name] = make_scorer(func, greater_is_better=True if metric_name in ['r2', 'explained_variance'] else False, **kwargs)
+        for metric_name, func in self.loss.items():
+            # if func in self.loss:
+            kwargs = metric_params[metric_name]
+            if metric_name in ['r2', 'explained_variance']:
+                gib = True 
+            else:
+                gib = False
+            
+            scorers[metric_name] = make_scorer(func, greater_is_better=gib, **kwargs)
 
-                if single:
-                    if func == self.loss[0]:
-                        return scorers[metric_name]
+            if single:
+                return scorers[metric_name]
 
+        return scorers
 
         # Not used
         # if self.loss == 'log_loss':
@@ -538,10 +566,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         # elif self.loss == 'exponential_loss':
         #     return 'neg_mean_squared_error'
         # else:
-        if scorers == {}:
-            raise ValueError(f"Unknown loss function: {self.loss}")
-        else:
-            return scorers
+        # if scorers == {}:
+        #     raise ValueError(f"Unknown loss function: {self.loss}")
+        # else:
 
     def plot_features_importance(self, X_set, y_set, outname, dir_output, mode='bar', figsize=(50, 25), limit=10):
         """
