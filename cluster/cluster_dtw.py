@@ -120,13 +120,14 @@ def plot_pca(distance_matrix, n_clusters: int, names: List[str] = None) -> None:
 
 
 def plot_heatmap(distance_matrix, names, save_dir=None):
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(15, 15))
     sns.heatmap(distance_matrix, cmap='viridis', annot=False,
                 xticklabels=names, yticklabels=names)
     title = 'DTW Distance Heatmap'
     plt.title(title)
     plt.xlabel('Time Series Index')
     plt.ylabel('Time Series Index')
+    plt.tight_layout()
     if save_dir != None:
         plt.savefig(save_dir + f"{title}.png", format="png", dpi=300)
     plt.show()
@@ -141,16 +142,19 @@ class Printer():
             print(*args)
 
 
-def cluster_dtw(data: List[pd.DataFrame], n_clusters: int = 0, scale=True, verbose=False) -> np.ndarray:
+def cluster_dtw(data: List[pd.DataFrame], n_clusters: List[int] = None, scale=True, verbose=False) -> np.ndarray:
 
     pr = Printer(verbose)
+
+    if n_clusters == None:
+        n_clusters = []
 
     time_series_data = format_data(data)
     if scale:
         time_series_data = scale_data(time_series_data)
 
     # Range of clusters to try
-    range_n_clusters = range(2, len(data))
+    range_n_clusters = range(2, len(data)) if n_clusters == [] else n_clusters
 
     # Placeholder for silhouette scores
     silhouette_scores = []
@@ -159,36 +163,29 @@ def cluster_dtw(data: List[pd.DataFrame], n_clusters: int = 0, scale=True, verbo
     labels = []
     cluster = []
 
-    if not n_clusters:
-        # Loop over cluster sizes to find the optimal number
-        for n_clusters in range_n_clusters:
-            # Apply DTW KMeans clustering
-            km_dtw = TimeSeriesKMeans(
-                n_clusters=n_clusters, metric="dtw", random_state=0)
-            labels.append(km_dtw.fit_predict(time_series_data))
-
-            # Calculate the pairwise DTW distance matrix
-            distance_matrix = cdist_dtw(time_series_data)
-
-            # Calculate silhouette score
-            silhouette_avg = silhouette_score(
-                distance_matrix, labels[-1], metric="precomputed")
-            silhouette_scores.append((n_clusters, silhouette_avg))
-
-            pr.print(
-                f"Number of clusters: {n_clusters}, Silhouette Score: {silhouette_avg:.3f}")
-
-        # Select the number of clusters with the highest silhouette score
-        best_n_clusters = max(silhouette_scores, key=lambda x: x[1])[0]
-        cluster = labels[best_n_clusters-2]
-        pr.print(
-            f"\nOptimal number of clusters: {best_n_clusters} -> {cluster}")
-        n_clusters = best_n_clusters
-    else:
+    # Loop over cluster sizes to find the optimal number
+    for n_clusters in range_n_clusters:
         # Apply DTW KMeans clustering
         km_dtw = TimeSeriesKMeans(
             n_clusters=n_clusters, metric="dtw", random_state=0)
-        cluster = km_dtw.fit_predict(time_series_data)
+        labels.append(km_dtw.fit_predict(time_series_data))
+
+        # Calculate the pairwise DTW distance matrix
         distance_matrix = cdist_dtw(time_series_data)
+
+        # Calculate silhouette score
+        silhouette_avg = silhouette_score(
+            distance_matrix, labels[-1], metric="precomputed")
+        silhouette_scores.append((n_clusters, silhouette_avg))
+
+        pr.print(
+            f"Number of clusters: {n_clusters}, Silhouette Score: {silhouette_avg:.3f}")
+
+    # Select the number of clusters with the highest silhouette score
+    best_n_clusters = max(silhouette_scores, key=lambda x: x[1])[0]
+    cluster = labels[best_n_clusters-2]
+    pr.print(
+        f"\nOptimal number of clusters: {best_n_clusters} -> {cluster}")
+    n_clusters = best_n_clusters
 
     return cluster, distance_matrix, n_clusters

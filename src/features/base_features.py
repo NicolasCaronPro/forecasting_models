@@ -36,7 +36,7 @@ class BaseFeature(object):
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def __init__(self, name: str = None, logger=None) -> None:
+    def __init__(self, name: str = None, logger=None, date_max_fetchable: dt.datetime = None) -> None:
 
         # On initialise name
         if name is None:
@@ -144,6 +144,8 @@ class BaseFeature(object):
 
         # self.columns_types = {}
 
+        self.__date_max_fetchable = date_max_fetchable
+
         self.date_min = None
         self.date_max = None
         self.freq = None
@@ -187,7 +189,7 @@ class BaseFeature(object):
             for dec in shift:
                 # self.logger.info(f"  - Ajout de la feature {feature_name}_J-{dec}")
                 data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}"].shift(
-dec)
+                    dec)
                 data[f"{feature_name}%%J{-1*dec}"] = data[f"{feature_name}%%J{-1*dec}"].bfill(
                     limit_area='outside')
 
@@ -199,8 +201,12 @@ dec)
                         window=rw, closed="left").mean()
                     data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
                         limit_area='outside')
+                    data[f"{feature_name}%%mean_{rw}J"] = data[f"{feature_name}%%mean_{rw}J"].bfill(
+                        limit_area='outside')
                     data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}"].rolling(
                         window=rw, closed="left").std()
+                    data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
+                        limit_area='outside')
                     data[f"{feature_name}%%std_{rw}J"] = data[f"{feature_name}%%std_{rw}J"].bfill(
                         limit_area='outside')
 
@@ -241,6 +247,9 @@ dec)
 
             data_has_changed = False
 
+            if stop_date > self.get_date_max_fetchable():
+                stop_date = self.get_date_max_fetchable()
+
             if os.path.isfile(feature_dir / filename):
                 self.logger.info(
                     f"{self.name}'s data already fetched for {location.name}")
@@ -255,17 +264,18 @@ dec)
                         f"No data found: empty dataframe in {self.name}'s data file")
 
                 # Check if update is needed
-                if start_date < data_min or data_max < stop_date:
+                if start_date < data_min or stop_date > data_max:
                     self.logger.warning("Updating data")
                     self.logger.setLevel(logging.WARNING)
                     if start_date < data_min:
-                        new_future_data = func(
-                            self, start_date=data_max, stop_date=stop_date, location=location, *args, **kwargs)
-                        data = pd.concat(data, new_future_data)
-                    if data_max < stop_date:
                         new_past_data = func(
-                            self, start_date=data_min, stop_date=start_date, location=location, *args, **kwargs)
-                        data = pd.concat(new_past_data, data)
+                            self, start_date=start_date, stop_date=(data_min - dt.timedelta(days=1)), location=location, *args, **kwargs)
+                        data = pd.concat([new_past_data, data])
+                    if stop_date > data_max:
+                        new_future_data = func(
+                            self, start_date=(data_max + dt.timedelta(days=1)), stop_date=stop_date, location=location, *args, **kwargs)
+                        data = pd.concat([data, new_future_data])
+                        # print(data)
                     self.logger.setLevel(logging.INFO)
                     data_has_changed = True
 
@@ -279,6 +289,7 @@ dec)
                     self, start_date=start_date, stop_date=stop_date, location=location, *args, **kwargs)
                 self.logger.setLevel(logging.INFO)
                 data_has_changed = True
+                # print(data)
 
             if data_has_changed:
                 self.save_dataframe(data, feature_dir, filename=filename)
@@ -292,7 +303,10 @@ dec)
                 include=['number']).columns
 
             # Définir les dates min et max (Période ou toutes les données sont disponibles)
+            # print(data)
             self.set_availability(data)
+
+            # print(data)
 
             # self.is_fetched = True
 
@@ -306,9 +320,17 @@ dec)
         self.date_min = data.dropna().index.min()
         self.date_max = data.dropna().index.max()
         self.freq = pd.infer_freq(data.index)
+        if self.freq == None:
+            self.freq = 'D'
 
     def get_availability(self):
         return self.date_min, self.date_max, self.freq
+
+    def get_date_max_fetchable(self):
+        if self.__date_max_fetchable == None:
+            return dt.datetime.now()
+        else:
+            return self.__date_max_fetchable
 
     def get_data(self,
                  from_date: Optional[Union[str, dt.datetime]] = None,
@@ -323,6 +345,7 @@ dec)
                  filename: Optional[str] = None) -> pd.DataFrame:
 
         date_min, date_max, initial_freq = self.get_availability()
+        # print(date_max, date_min, initial_freq)
         if date_min is None or date_max is None or initial_freq is None:
             self.logger.error(
                 'It looks like you didn\'t call self.fetch_data() before, you need to call self.fetch_data() even if the data has been fetched during a previous session.')
@@ -383,10 +406,30 @@ dec)
             # self.fetch_data(start_date=from_date, stop_date=to_date)
             # data = self.load(path=path, filename=filename)
 
+        # print(data)
+
+        # Add missing raws by copying last raw
+        if date_max < to_date:
+            # Get the last row and its index
+            last_row = data.iloc[-1]
+            last_date = data.index[-1]
+            # Generate new dates for the next year
+            days = (to_date - last_date).days
+            # print(last_date, to_date, days)
+            new_dates = pd.date_range(start=last_date + pd.Timedelta(days=1),
+                                      periods=days,
+                                      freq='D')  # Daily for one year
+            # Create a DataFrame with the new rows (copying the last row's values)
+            new_data = pd.DataFrame(
+                [last_row.values] * len(new_dates), index=new_dates, columns=data.columns)
+            # Append the new rows to the original DataFrame
+            data = pd.concat([data, new_data])
+
         # Check if the minimum date is after from_date and the maximum date is before to_date
         if date_min > from_date or date_max < to_date:
-            raise ValueError(
-                f"{self.name} data only available between {date_min} and {date_max} while you requested from {from_date} to {to_date}")
+            pass
+            # raise ValueError(
+            # f"{self.name} data only available between {date_min} and {date_max} while you requested from {from_date} to {to_date}")
 
         data = clean_dataframe(data=data, drop_constant_thr=drop_constant_thr,
                                exclude_categories=True, exclude_booleans=True)
@@ -422,6 +465,10 @@ dec)
         # print(from_date, data.index.min())
         # print(to_date, data.index.max())
         # print(data)
+        # print(from_date, to_date)
+        # print(data)
+        # print(data.index.is_unique)
+        data = data[~data.index.duplicated(keep='first')]
         data = data.loc[from_date:to_date]
         data = data[features_names]
         data.sort_index(axis=1, inplace=True)

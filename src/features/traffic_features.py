@@ -3,10 +3,13 @@ from typing import Optional, Dict
 import pandas as pd
 from pathlib import Path
 from src.location.location import Location
+import datetime as dt
+
 
 class TrafficFeatures(BaseFeature):
-    def __init__(self, name:str = None, logger=None) -> None:
-        super().__init__(name, logger)
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
 
     def include_trafic(self, feature_dir, date_range, departement):
         # Historique des accidents de la route
@@ -51,8 +54,11 @@ class TrafficFeatures(BaseFeature):
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
-        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
+        # TODO: do not hardcode freq
+        date_range = pd.date_range(
+            start=start_date, end=stop_date, freq='1D', name="date")
         data = pd.DataFrame(index=date_range)
 
-        data = data.join(self.include_trafic(feature_dir, date_range, departement))
+        data = data.join(self.include_trafic(
+            feature_dir, date_range, departement))
         return data

@@ -11,6 +11,8 @@ from pathlib import Path
 import os
 from src.location.location import Location
 from shapely.geometry import Polygon, Point
+import datetime as dt
+
 
 class AirQualityFeatures(BaseFeature):
     """
@@ -21,8 +23,9 @@ class AirQualityFeatures(BaseFeature):
         archived_data_dir (Path): The path to the archived data directory.
     """
 
-    def __init__(self, name:str = None, logger=None) -> None:
-        super().__init__(name, logger)
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
 
     # Old function, not used
     def __include_air_quality_old(self, location: Location, feature_dir: str) -> pd.DataFrame:
@@ -35,96 +38,92 @@ class AirQualityFeatures(BaseFeature):
         # On récupère les codes des stations de mesure de la qualité de l'air pour le département
         df = pd.read_csv(feature_dir / 'stations_geodair.csv',
                          sep=';', dtype={'departement': str})
-        
-        
+
         CODES = []
         for i in range(len(df)):
-            if df.iloc[i]['departement'] == location.code_departement: #location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or 
-                CODES.append(df.iloc[i]['station'])   
-        
+            # location.is_in_shape(Point(df.iloc[i]['longitude'], df.iloc[i]['latitude'])) or
+            if df.iloc[i]['departement'] == location.code_departement:
+                CODES.append(df.iloc[i]['station'])
 
-        #if len(CODES) == 0:
+        # if len(CODES) == 0:
         # CODES.append(list(df.loc[df['departement'] ==
         #             location.code_departement].station.values))
 
-
-
         self.logger.info(f"On s'intéresse aux codes : {', '.join(CODES)}")
-
 
         archived_data_dir = Path(feature_dir / 'archived')
         archived_data_dir.mkdir(exist_ok=True, parents=True)
-        # if not (archived_data_dir / f'pollution_historique.feather').is_file():
-        self.logger.info("On calcule le dataframe d'archive de l'air")
+        if not (archived_data_dir / f'pollution_historique.feather').is_file():
+            self.logger.info("On calcule le dataframe d'archive de l'air")
 
-        dico: Dict[str, pd.DataFrame] = {}
-        for fic in archived_data_dir.iterdir():
-            if fic.suffix == '.csv':
-                df = pd.read_csv(fic, sep=";")
+            dico: Dict[str, pd.DataFrame] = {}
+            for fic in archived_data_dir.iterdir():
+                if fic.suffix == '.csv':
+                    df = pd.read_csv(fic, sep=";")
 
-                # On vérifie qu'il n'y a qu'un seul polluant dans le fichier et on le récupère
-                assert len(df['Polluant'].unique()) == 1
-                polluant = df['Polluant'].unique()[0]
-                polluant = polluant.replace('.', '')
+                    # On vérifie qu'il n'y a qu'un seul polluant dans le fichier et on le récupère
+                    assert len(df['Polluant'].unique()) == 1
+                    polluant = df['Polluant'].unique()[0]
+                    polluant = polluant.replace('.', '')
 
-                if polluant not in dico:
-                    dico[polluant] = df.loc[df['code site'].isin(CODES)]
-                else:
-                    dico[polluant] = pd.concat([dico[polluant], pd.read_csv(
-                        fic, sep=";").loc[df['code site'].isin(CODES)]])
-
-        for polluant in dico:
-            dico[polluant].to_feather(
-                archived_data_dir / f"{polluant}.feather")
-
-        del dico
-        dg = None
-        for fic in archived_data_dir.iterdir():
-            if fic.suffix == '.feather' and fic.stem != 'pollution_historique':
-                df = pd.read_feather(fic)
-                polluant = fic.stem
-                df.rename({'Date de début': 'date'},
-                            axis=1, inplace=True)
-                groups = df.groupby('code site')
-                for name, group in groups:
-                    if dg is None:
-                        dg = group[['date', 'valeur']]
-                        dg = dg.rename(
-                            {'valeur': f'{polluant}_{name}'}, axis=1)
-                        dg.set_index('date', inplace=True)
+                    if polluant not in dico:
+                        dico[polluant] = df.loc[df['code site'].isin(CODES)]
                     else:
-                        dh = group[['date', 'valeur']]
-                        dh = dh.rename(
-                            {'valeur': f'{polluant}_{name}'}, axis=1)
-                        dh.set_index('date', inplace=True)
-                        dg = pd.merge(dg, dh, left_index=True,
-                                        right_index=True, how='outer')
+                        dico[polluant] = pd.concat([dico[polluant], pd.read_csv(
+                            fic, sep=";").loc[df['code site'].isin(CODES)]])
 
-        dg.index = pd.to_datetime(dg.index)
+            for polluant in dico:
+                dico[polluant].to_feather(
+                    archived_data_dir / f"{polluant}.feather")
 
-        data = dg.copy(deep=True)
+            del dico
+            dg = None
+            for fic in archived_data_dir.iterdir():
+                if fic.suffix == '.feather' and fic.stem != 'pollution_historique':
+                    df = pd.read_feather(fic)
+                    polluant = fic.stem
+                    df.rename({'Date de début': 'date'},
+                                axis=1, inplace=True)
+                    groups = df.groupby('code site')
+                    for name, group in groups:
+                        if dg is None:
+                            dg = group[['date', 'valeur']]
+                            dg = dg.rename(
+                                {'valeur': f'{polluant}_{name}'}, axis=1)
+                            dg.set_index('date', inplace=True)
+                        else:
+                            dh = group[['date', 'valeur']]
+                            dh = dh.rename(
+                                {'valeur': f'{polluant}_{name}'}, axis=1)
+                            dh.set_index('date', inplace=True)
+                            dg = pd.merge(dg, dh, left_index=True,
+                                            right_index=True, how='outer')
 
-        del df
-        del dg
-        del dh
+            dg.index = pd.to_datetime(dg.index)
 
-        data.interpolate(method='linear', inplace=True)
-        data.ffill(inplace=True)
-        data.bfill(inplace=True)
+            data = dg.copy(deep=True)
+
+            del df
+            del dg
+            del dh
+
+            data.interpolate(method='linear', inplace=True)
+            data.ffill(inplace=True)
+            data.bfill(inplace=True)
 
             # for k in sorted(data.columns):
             #     if data[k].isna().sum() > self.max_nan:
             #         self.logger.error(
             #             f"{k} possède trop de NaN ({data[k].isna().sum()})")
 
-                # data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
+            # data.rename({k: f"{self.name}_{k}"}, axis=1, inplace=True)
 
-            # data.to_feather(archived_data_dir /
-            #                      'pollution_historique.feather')
-        # else:
-        #     self.logger.info("On relit le dataframe d'archive de l'air")
-        #     data = pd.read_feather(
-        #         archived_data_dir / 'pollution_historique.feather')
+            data.to_feather(archived_data_dir /
+                                 'pollution_historique.feather')
+        else:
+            self.logger.info("On relit le dataframe d'archive de l'air")
+            data = pd.read_feather(
+                archived_data_dir / 'pollution_historique.feather')
 
         self.logger.info(
             f"Fin de la gestion de la qualité de l'air en {time.time()-t:.2f} s.")

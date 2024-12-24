@@ -11,13 +11,12 @@ from typing import List, Optional, Dict
 from src.location.location import Location
 
 
-
 class EpidemiologicalFeatures(BaseFeature):
 
-    def __init__(self, name:str = None, logger=None) -> None:
-        super().__init__(name, logger)
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
         # self.predictors_dir = pathlib.Path(self.config.get("predictors_dir"))
-
 
     def include_sentinelles(self, region, feature_dir, date_range):
         self.logger.info(
@@ -55,7 +54,6 @@ class EpidemiologicalFeatures(BaseFeature):
             # additional_df = pd.DataFrame(index=additional_dates)
             # self.data = pd.concat([self.data, additional_df])
 
-
             ##################### TODO: Faire une méthode dans BaseFeature pour ralonger les données, ou faire un Imputer #####################
             # self.logger.info(f"Chargement du modèle de prédiction pour {nom}")
             # models[nom] = SARIMAXResults.load(
@@ -73,7 +71,7 @@ class EpidemiologicalFeatures(BaseFeature):
                 year, week, _ = last_date.isocalendar()
                 sunday = dt.datetime.strptime(f'{year}{week:02d}7', '%G%V%u')
                 # pred = models[nom].predict(sunday)
-                pred = 0 #max(0, pred[0])
+                pred = 0  # max(0, pred[0])
                 dico[f"{year}{week:02d}"] = int(pred)
                 self.logger.info(
                     f"    On complète la semaine {year}{week:02d} ({last_date:'%d/%m/%Y'}) par {str(int(pred))}")
@@ -101,7 +99,8 @@ class EpidemiologicalFeatures(BaseFeature):
 
             data[f"inc_{nom}"] = data.index.map(
                 lambda x: dico[f"{x.isocalendar().year}{x.isocalendar().week:02d}"])
-            data[f'inc_{nom}'].to_csv(feature_dir / f"{nom}_incidence_{region}.csv")
+            data[f'inc_{nom}'].to_csv(
+                feature_dir / f"{nom}_incidence_{region}.csv")
 
         self.logger.info("Données sentinelles intégralement récupérées")
         return data
@@ -111,11 +110,13 @@ class EpidemiologicalFeatures(BaseFeature):
         assert 'feature_dir' in kwargs, f"Le paramètre'feature_dir' est obligatoire pour fetch la feature {self.name}"
         assert 'start_date' in kwargs, f"Le paramètre'start_date' est obligatoire pour fetch la feature {self.name}"
         assert 'stop_date' in kwargs, f"Le paramètre'stop_date' est obligatoire pour fetch la feature {self.name}"
-        
+
         location = kwargs.get('location')
         region = location.region_old
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
-        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
+        # TODO: do not hardcode freq
+        date_range = pd.date_range(
+            start=start_date, end=stop_date, freq='1D', name="date")
         return self.include_sentinelles(region, feature_dir, date_range)

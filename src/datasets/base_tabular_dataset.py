@@ -523,12 +523,12 @@ class BaseTabularDataset():
                     if target_name not in self.targets_names:
                         self.targets_names.append(target_name)
 
-                if bins:
-                    data = data.dropna(subset=[target_name])
-                    self.logger.info(
-                        "Categorizing the target columns...")
-                    data = categorize(data, target_name,
-                                      bins=bins, drop=replace_target)
+                # if bins:
+                #     data = data.dropna(subset=[target_name])
+                #     self.logger.info(
+                #         "Categorizing the target columns...")
+                #     data = categorize(data, target_name,
+                #                       bins=bins, drop=replace_target)
 
                 if targets_history_shifts != [] or targets_history_rolling_windows != []:
                     self.logger.info("Creating target history columns...")
@@ -550,7 +550,8 @@ class BaseTabularDataset():
                             limit_area='outside')
 
                     if targets_history_rolling_windows != []:
-                        targets_history_rolling_windows_str = [str(r) for r in targets_history_rolling_windows]
+                        targets_history_rolling_windows_str = [
+                            str(r) for r in targets_history_rolling_windows]
                         s = ', '.join(targets_history_rolling_windows_str)
                         self.logger.info(
                             f"Rolling windows will start from {min_shift} samples before to {s} days before this starting sample")

@@ -6,9 +6,11 @@ from serpapi import GoogleSearch
 from pathlib import Path
 from src.location.location import Location
 
+
 class GoogleTrendFeatures(BaseFeature):
-    def __init__(self, name:str = None, logger=None) -> None:
-        super().__init__(name, logger)
+    def __init__(self, name: str = None, logger=None) -> None:
+        super().__init__(name, logger, date_max_fetchable=dt.datetime.strptime(
+            '31-12-2023', '%d-%m-%Y'))
 
     def include_google_trends(self, location: Location, date_range: pd.DatetimeIndex, feature_dir: Path) -> pd.DataFrame:
         self.logger.info("On récupère les données de Google Trends")
@@ -22,15 +24,15 @@ class GoogleTrendFeatures(BaseFeature):
             "17c26a6b6e4f020d1c607063cdb3ac30cf329060339e5ff34c71778e98574742"
         ]
 
-        bow = ["diarrhée", "vomissements", "toux", "éruption cutanée", "infection urinaire", "hopital", "médecin", 
-            "pharmacie", "médicament", "vaccin", "maladie", "fièvre", "grippe", "rhume", "angine", "otite", 
-            "allergie", "asthme", "stress", "dépression", "mal de tête", "douleur thoracique", "palpitations", 
-            "essoufflement", "vertiges", "crampes abdominales", "saignements", "douleur abdominale", 
-            "hypothermie", "hyperthermie", "appendicite", "méningite", "pneumonie", "AVC", "infection respiratoire", 
-            "gastro-entérite", "infection cutanée", "insuffisance cardiaque", "épilepsie", "migraines", 
-            "accident de voiture", "fracture", "entorse", "brûlure", "empoisonnement", "chute", "noyade", 
-            "asphyxie", "crise de panique", "schizophrénie", "trouble bipolaire", "démence", "tentative de suicide", 
-            "urgences", "urgence médicale", "SAMU", "douleur", "SOS médecin", "étourdissements", "paralysie"]
+        bow = ["diarrhée", "vomissements", "toux", "éruption cutanée", "infection urinaire", "hopital", "médecin",
+               "pharmacie", "médicament", "vaccin", "maladie", "fièvre", "grippe", "rhume", "angine", "otite",
+               "allergie", "asthme", "stress", "dépression", "mal de tête", "douleur thoracique", "palpitations",
+               "essoufflement", "vertiges", "crampes abdominales", "saignements", "douleur abdominale",
+               "hypothermie", "hyperthermie", "appendicite", "méningite", "pneumonie", "AVC", "infection respiratoire",
+               "gastro-entérite", "infection cutanée", "insuffisance cardiaque", "épilepsie", "migraines",
+               "accident de voiture", "fracture", "entorse", "brûlure", "empoisonnement", "chute", "noyade",
+               "asphyxie", "crise de panique", "schizophrénie", "trouble bipolaire", "démence", "tentative de suicide",
+               "urgences", "urgence médicale", "SAMU", "douleur", "SOS médecin", "étourdissements", "paralysie"]
 
         # Génère des sous-intervalles de dates en fonction du batch size
         def generate_date_batches(start_date, end_date, batch_size):
@@ -49,7 +51,8 @@ class GoogleTrendFeatures(BaseFeature):
 
                 while api_key_index < len(api_keys) and batch_size >= MIN_BATCH_SIZE:
                     api_key = api_keys[api_key_index]
-                    self.logger.info(f"Récupération de {group} pour {date_start} - {date_end} avec un batch de {batch_size} jours")
+                    self.logger.info(
+                        f"Récupération de {group} pour {date_start} - {date_end} avec un batch de {batch_size} jours")
 
                     params = {
                         "engine": "google_trends",
@@ -68,10 +71,12 @@ class GoogleTrendFeatures(BaseFeature):
                         for query in df.iloc[0]["values"]:
                             query = query["query"]
                             df[f"trend_{query}"] = df["values"].apply(
-                                lambda x: int(x[0]["value"].replace('<', '').replace('>', '')) if "value" in x[0] else 0
+                                lambda x: int(x[0]["value"].replace('<', '').replace(
+                                    '>', '')) if "value" in x[0] else 0
                             )
                         df.drop(columns=["values", "timestamp"], inplace=True)
-                        df["date"] = pd.to_datetime(df["date"], format="%b %d, %Y")
+                        df["date"] = pd.to_datetime(
+                            df["date"], format="%b %d, %Y")
                         df.set_index("date", inplace=True)
                         filepath = feature_dir / f"temp/{group}.csv"
                         df.to_csv(filepath, mode='a')
@@ -80,7 +85,8 @@ class GoogleTrendFeatures(BaseFeature):
                         break
 
                     except Exception as e:
-                        self.logger.error("Erreur de récupération pour %s : %s", group, str(e))
+                        self.logger.error(
+                            "Erreur de récupération pour %s : %s", group, str(e))
                         api_key_index += 1  # Essayer la clé API suivante
                         if api_key_index == len(api_keys):
                             batch_size //= 2  # Réduire la taille du batch en cas d'échec avec toutes les clés API
@@ -88,9 +94,11 @@ class GoogleTrendFeatures(BaseFeature):
 
                 # Si l'appel a échoué avec toutes les clés API et que batch_size est inférieur à MIN_BATCH_SIZE, remplir avec des 0
                 if not success and batch_size < MIN_BATCH_SIZE:
-                    self.logger.warning(f"Remplissage des données de {group} avec des zéros pour la période {date_start} - {date_end}")
+                    self.logger.warning(
+                        f"Remplissage des données de {group} avec des zéros pour la période {date_start} - {date_end}")
                     date_index = pd.date_range(date_start, date_end)
-                    zero_df = pd.DataFrame(0, index=date_index, columns=[f"trend_{keyword}" for keyword in keywords])
+                    zero_df = pd.DataFrame(0, index=date_index, columns=[
+                                           f"trend_{keyword}" for keyword in keywords])
                     all_dates_df = pd.concat([all_dates_df, zero_df], axis=0)
 
             return all_dates_df
@@ -100,8 +108,10 @@ class GoogleTrendFeatures(BaseFeature):
         data_has_changed = False
 
         if feature_file.is_file():
-            self.logger.info("Chargement des données de Google Trends depuis le fichier existant")
-            data = pd.read_csv(feature_file, parse_dates=["date"], index_col="date")
+            self.logger.info(
+                "Chargement des données de Google Trends depuis le fichier existant")
+            data = pd.read_csv(feature_file, parse_dates=[
+                               "date"], index_col="date")
             missing_start = date_range.min() < data.index.min()
             missing_end = date_range.max() > data.index.max()
 
@@ -112,10 +122,12 @@ class GoogleTrendFeatures(BaseFeature):
                 for i in range(0, len(bow), 5):
                     keywords = bow[i:i + 5]
                     if missing_start:
-                        batch = fetch_google_trends_batch(location, keywords, date_range.min(), data.index.min() - dt.timedelta(days=1), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
+                        batch = fetch_google_trends_batch(location, keywords, date_range.min(), data.index.min(
+                        ) - dt.timedelta(days=1), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
                         all_words_start_dfs.append(batch)
                     if missing_end:
-                        batch = fetch_google_trends_batch(location, keywords, data.index.max() + dt.timedelta(days=1), date_range.max(), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
+                        batch = fetch_google_trends_batch(location, keywords, data.index.max(
+                        ) + dt.timedelta(days=1), date_range.max(), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
                         all_words_end_dfs.append(batch)
 
                 start_df = pd.concat(all_words_start_dfs, axis=1)
@@ -123,12 +135,14 @@ class GoogleTrendFeatures(BaseFeature):
                 data = pd.concat([start_df, data, end_df], axis=0)
                 data_has_changed = True
         else:
-            self.logger.info("Création des données de Google Trends depuis l'API")
+            self.logger.info(
+                "Création des données de Google Trends depuis l'API")
             data = pd.DataFrame(index=date_range)
             all_words_dfs = []
             for i in range(0, len(bow), 5):
                 keywords = bow[i:i + 5]
-                batch = fetch_google_trends_batch(location, keywords, date_range.min(), date_range.max(), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
+                batch = fetch_google_trends_batch(location, keywords, date_range.min(
+                ), date_range.max(), api_keys=keys, batch_size=INITIAL_BATCH_SIZE)
                 all_words_dfs.append(batch)
                 data_has_changed = True
             data = pd.concat([data] + all_words_dfs, axis=1)
@@ -243,7 +257,7 @@ class GoogleTrendFeatures(BaseFeature):
     #             all_dates_df.set_index('date', inplace=True)
     #             all_words_df = pd.concat([all_words_df, all_dates_df], axis=1)
     #         all_words_df.reset_index(inplace=True)
-            
+
     #         # On sauvegarde le dataframe
     #         all_words_df.to_csv(feature_dir / file, index=False)
     #     else:
@@ -282,17 +296,14 @@ class GoogleTrendFeatures(BaseFeature):
     #                 # all_dates_df.bfill(inplace=True)
     #                 all_dates_df.set_index('date', inplace=True)
     #                 all_words_df = pd.concat([all_words_df, all_dates_df], axis=0)
-            
+
     #         all_words_df.reset_index(inplace=True)
-            
+
     #         # On sauvegarde le dataframe
     #         all_words_df.to_csv(feature_dir / file, index=False)
-            
-
-
 
     #     data = all_words_df.set_index('date')
-        
+
     #     del all_words_df
 
     #     # On ajoute la moyenne glissante sur FENETRE_GLISSANTE joursn et les valeurs shiftées jusqu'à DECALAGE_TREND jours
@@ -319,7 +330,9 @@ class GoogleTrendFeatures(BaseFeature):
         feature_dir = kwargs.get("feature_dir")
         start_date = kwargs.get("start_date")
         stop_date = kwargs.get("stop_date")
-        date_range = pd.date_range(start=start_date, end=stop_date, freq='1D', name="date") # TODO: do not hardcode freq
-        #data = pd.DataFrame(index=date_range)
-        #data.join(self.include_google_trends(date_range, feature_dir))
+        # TODO: do not hardcode freq
+        date_range = pd.date_range(
+            start=start_date, end=stop_date, freq='1D', name="date")
+        # data = pd.DataFrame(index=date_range)
+        # data.join(self.include_google_trends(date_range, feature_dir))
         return self.include_google_trends(location, date_range, feature_dir)

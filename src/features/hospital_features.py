@@ -39,7 +39,8 @@ class HospitalFeatures(BaseFeature):
                  include_hnfc_moving=True,
                  include_nb_hospit_np_from_ED_children=True,
                  include_nb_hospit_np_from_ED_adults=True) -> None:
-        super().__init__(name, logger)
+        super().__init__(name, logger,
+                         date_max_fetchable=dt.datetime.strptime('31-12-2023', '%d-%m-%Y'))
         self.include_emergency_arrivals = include_emergency_arrivals
         self.include_hnfc_moving = include_hnfc_moving
         self.include_nb_hospit_np_from_ED_children = include_nb_hospit_np_from_ED_children
@@ -54,13 +55,13 @@ class HospitalFeatures(BaseFeature):
         # file_name = f"Export complet {etablissement}.xlsx"
         file_name = f"export_{etablissement}.csv"
 
-
         self.logger.info(
             f"  - Chargement des données de {etablissement} depuis le fichier Excel")
         # data = pd.read_excel(
         #     feature_dir / f"urgences/{file_name}", sheet_name=1)
 
-        data = pd.read_csv(feature_dir / f"urgences/exports/{file_name}", sep=";")
+        data = pd.read_csv(
+            feature_dir / f"urgences/exports/{file_name}", sep=";")
 
         if "annee" in data:
             data.drop(axis=1, columns="annee", inplace=True)
@@ -89,9 +90,11 @@ class HospitalFeatures(BaseFeature):
         #     hospitalized['date_entree'], unit='D', origin='1899-12-30')
 
         file_name = f'rpu_hospit_adultes_{etablissement}.csv'
-        data = pd.read_csv(feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name}", sep=";")
+        data = pd.read_csv(
+            feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name}", sep=";")
 
-        data.rename(columns={"Total": "nb_hospit_np_from_ED_adults", "date_entree": "date"}, inplace=True)
+        data.rename(columns={
+                    "Total": "nb_hospit_np_from_ED_adults", "date_entree": "date"}, inplace=True)
         if data["date"].dtype != "datetime64[ns]":
             data["date"] = pd.to_datetime(data["date"], format="%Y-%m-%d")
         data.sort_values(by="date", inplace=True)
@@ -101,22 +104,26 @@ class HospitalFeatures(BaseFeature):
 
     def include_nb_hospitalized_np_from_emergencies_children(self, from_date, to_date, etablissement, feature_dir):
         file_name_all = f'rpu_hospit_total_{etablissement}.csv'
-        hospitalized_all = pd.read_csv(feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_all}", sep=";")
+        hospitalized_all = pd.read_csv(
+            feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_all}", sep=";")
         hospitalized_all.rename(columns={"date_entree": "date"}, inplace=True)
         if hospitalized_all["date"].dtype != "datetime64[ns]":
             hospitalized_all["date"] = pd.to_datetime(hospitalized_all["date"], format="%Y-%m-%d")
         hospitalized_all.set_index('date', inplace=True)
 
         file_name_adults = f'rpu_hospit_adultes_{etablissement}.csv'
-        hospitalized_adultes = pd.read_csv(feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_adults}", sep=";")
-        hospitalized_adultes.rename(columns={"date_entree": "date"}, inplace=True)
+        hospitalized_adultes = pd.read_csv(
+            feature_dir / f"hospitalisations/non-programé/urgences/exports/{file_name_adults}", sep=";")
+        hospitalized_adultes.rename(
+            columns={"date_entree": "date"}, inplace=True)
         if hospitalized_adultes["date"].dtype != "datetime64[ns]":
             hospitalized_adultes["date"] = pd.to_datetime(hospitalized_adultes["date"], format="%Y-%m-%d")
         hospitalized_adultes.set_index('date', inplace=True)
 
         hospitalized_children = pd.DataFrame(hospitalized_all['Total'] - hospitalized_adultes['Total'], columns=[
                                              'Total'], index=hospitalized_adultes.index)
-        hospitalized_children.rename(columns={"Total": "nb_hospit_np_from_ED_children"}, inplace=True)
+        hospitalized_children.rename(
+            columns={"Total": "nb_hospit_np_from_ED_children"}, inplace=True)
 
         return hospitalized_children
 
@@ -204,7 +211,7 @@ class HospitalFeatures(BaseFeature):
         include_nb_hospit_np_from_ED_children = kwargs.get('include_nb_hospit_np_from_ED_children', self.include_nb_hospit_np_from_ED_children)
         include_nb_hospit_np_from_ED_adults = kwargs.get('include_nb_hospit_np_from_ED_adults', self.include_nb_hospit_np_from_ED_adults)
         include_emergency_arrivals = kwargs.get('include_emergency_arrivals', self.include_emergency_arrivals)
-        # pd.set_option('display.max_rows', None)
+
         if include_emergency_arrivals:
             data = data.join(self.include_nb_emergencies(
                 start_date, stop_date, etablissement=etablissement, feature_dir=feature_dir))

@@ -1,8 +1,11 @@
+import os
+import re
 import pandas as pd
 from typing import List
 import numpy as np
 import pandas as pd
 import numpy as np
+
 
 def list_constant_columns(data: pd.DataFrame, threshold: float = 1.0, exclude_categories: bool = True, exclude_booleans: bool = True) -> List:
 
@@ -21,7 +24,7 @@ def list_constant_columns(data: pd.DataFrame, threshold: float = 1.0, exclude_ca
         # Calculer la proportion de la valeur la plus fréquente dans la colonne
         value_frequencies = data[col].value_counts(normalize=True)
 
-        most_frequent_value = value_frequencies.idxmax()
+        # most_frequent_value = value_frequencies.idxmax()
         most_frequent_value_ratio = value_frequencies.max()
 
         # Vérifier si cette proportion dépasse le seuil (threshold)
@@ -32,7 +35,8 @@ def list_constant_columns(data: pd.DataFrame, threshold: float = 1.0, exclude_ca
 
     return const_cols
 
-def clean_dataframe(data:pd.DataFrame, drop_constant_thr=1.0, exclude_categories=True, exclude_booleans=True):
+
+def clean_dataframe(data: pd.DataFrame, drop_constant_thr=1.0, exclude_categories=True, exclude_booleans=True):
     """
     Clean the DataFrame by:
     1. Dropping columns with zero variance (constant columns).
@@ -40,28 +44,30 @@ def clean_dataframe(data:pd.DataFrame, drop_constant_thr=1.0, exclude_categories
     3. Replacing +inf with the column max value and -inf with the column min value.
     """
     # Step 1: Drop columns with zero variance
-    constant_columns = list_constant_columns(data=data, threshold=drop_constant_thr, exclude_categories=exclude_categories, exclude_booleans=exclude_booleans)
+    constant_columns = list_constant_columns(
+        data=data, threshold=drop_constant_thr, exclude_categories=exclude_categories, exclude_booleans=exclude_booleans)
     df_clean = data.drop(columns=constant_columns)
     if constant_columns != []:
         print(f"Dropped columns with zero variance: {constant_columns}")
-    
+
     # Step 2: Replace NaN values with column mean
-    df_clean = df_clean.apply(lambda x: x.fillna(x.mean()) if x.dtype in [np.float64, np.float32, np.int64] else x)
-    
+    df_clean = df_clean.apply(lambda x: x.fillna(x.mean()) if x.dtype in [
+                              np.float64, np.float32, np.int64] else x)
+
     # Step 3: Replace +inf with max and -inf with min
-    df_clean = df_clean.apply(lambda x: x.replace([np.inf], x[np.isfinite(x)].max()) if x.dtype in [np.float64, np.float32, np.int64] and np.isinf(x).any() else x)
-    df_clean = df_clean.apply(lambda x: x.replace([-np.inf], x[np.isfinite(x)].min()) if x.dtype in [np.float64, np.float32, np.int64] and np.isinf(x).any() else x)
-    
+    df_clean = df_clean.apply(lambda x: x.replace([np.inf], x[np.isfinite(x)].max(
+    )) if x.dtype in [np.float64, np.float32, np.int64] and np.isinf(x).any() else x)
+    df_clean = df_clean.apply(lambda x: x.replace([-np.inf], x[np.isfinite(x)].min(
+    )) if x.dtype in [np.float64, np.float32, np.int64] and np.isinf(x).any() else x)
+
     return df_clean
 
-import os
-import re
 
 def supprimer_fichier_feather_recursif(dossiers, filename_base="data", extension=".feather"):
     """
     Parcourt les dossiers et leurs sous-dossiers récursivement et supprime
     tous les fichiers 'data.feather' s'ils existent.
-    
+
     :param dossiers: Liste de chemins de dossiers à parcourir.
     """
 
@@ -82,4 +88,5 @@ def supprimer_fichier_feather_recursif(dossiers, filename_base="data", extension
                         os.remove(chemin_fichier)
                         print(f"Fichier supprimé: {chemin_fichier}")
                     except Exception as e:
-                        print(f"Erreur lors de la suppression de {chemin_fichier}: {e}")
+                        print(
+                            f"Erreur lors de la suppression de {chemin_fichier}: {e}")
