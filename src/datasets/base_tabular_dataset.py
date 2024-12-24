@@ -193,6 +193,7 @@ class BaseTabularDataset():
             not_to_encode = []
             # Do not encode data that are the same unit as the target
             for target in self.targets_names:
+                print(target)
                 not_to_encode.append(target.split(
                     '%%')[0].split('target_')[1].split('_')[0])
             not_to_encode.append('target_')
@@ -266,7 +267,6 @@ class BaseTabularDataset():
             else:
                 raise ValueError(
                     "Validation set is not available, you need to split the data first")
-
         if test:
             if not self.test_set.empty:
                 self.X_test = self.test_set.drop(columns=self.targets_names)
@@ -274,15 +274,17 @@ class BaseTabularDataset():
             else:
                 raise ValueError(
                     "Test set is not available, you need to split the data first")
+        
 
-    def remove_constant_columns_from_splits(self):
+
+    def remove_constant_columns_from_splits(self, drop_constant_thr):
         """
         Remove columns that are constant in either the train or test set.
         Ensures that the same columns are dropped from both sets.
         """
         # Identify constant columns in the train set
         train_constant_cols = list_constant_columns(
-            self.train_set, threshold=1.0, exclude_booleans=True, exclude_categories=True)
+            self.train_set, threshold=drop_constant_thr, exclude_booleans=True, exclude_categories=True)
         # test_constant_cols = []
         # val_constant_cols = []
 
@@ -318,7 +320,8 @@ class BaseTabularDataset():
               val_size: Optional[Union[float, int]] = None,
               random_state: Optional[int] = None,
               shuffle: bool = True,
-              stratify: Optional[Union[pd.Series, np.ndarray]] = None) -> tuple:
+              stratify: Optional[Union[pd.Series, np.ndarray]] = None,
+              drop_constant_thr=1.0) -> tuple:
         """Split arrays or matrices into random train, test and val subsets.
 
         Quick utility that wraps input validation,
@@ -403,12 +406,12 @@ class BaseTabularDataset():
         >>> train_test_split(y, shuffle=False)
         [[0, 1, 2], [3, 4]]
         """
-        dataset = self.data
+
         self.val_set = pd.DataFrame()
 
         # On ne shuffle pas pour que test soit toujours situé à la fin de notre dataset
         train_val_set, test_set = train_test_split(
-            dataset, test_size=test_size, train_size=train_size, random_state=random_state, shuffle=False, stratify=stratify)
+            self.data, test_size=test_size, train_size=train_size, random_state=random_state, shuffle=False, stratify=stratify)
         self.train_set = train_val_set
         self.test_set = test_set
 
@@ -419,7 +422,7 @@ class BaseTabularDataset():
             self.train_set = train_set
             self.val_set = val_set
 
-        self.remove_constant_columns_from_splits()
+        self.remove_constant_columns_from_splits(drop_constant_thr=drop_constant_thr)
 
         return self.train_set, self.val_set, self.test_set
 
@@ -428,7 +431,7 @@ class BaseTabularDataset():
 
     def create_target(self,
                       targets: Union[str, List[str]],
-                      targets_locations: List[Location],
+                      targets_locations: List[Location] = None,
                       bins: Optional[int] = None,
                       replace_target: Optional[bool] = True,
                       targets_shift: Optional[int] = None,
@@ -445,33 +448,35 @@ class BaseTabularDataset():
 
         if isinstance(targets, str):
             targets = [targets]
-
-        for location in targets_locations:
+        
+        #  Check if targets are in data, and suffix them with location name if not already specified
+        # NOTE: no matter if the dataset is concatenated on rows or columns, we always specify targets locations
+        # Build a dataframe that contains only the rows of the dataset that are for the location or the columns for that location
+        for i, target in enumerate(targets):
             assert isinstance(
-                location, Location), "targets_locations must be a list of Location"
-            data = self.data.copy(deep=True)
-            fully_named_targets = []
-
-            #  Check if targets are in data, and suffix them with location name if not already specified
-            # NOTE: no matter if the dataset is concatenated on rows or columns, we always specify targets locations
-            for i, target in enumerate(targets):
+                target, str), "targets must be a list of strings or a string"
+            all_loc_target = []
+            for location in targets_locations:
+                data = self.data.copy(deep=True)
                 assert isinstance(
-                    target, str), "targets must be a list of strings or a string"
+                    location, Location), "targets_locations must be a list of Location"
 
                 if axis is not None:
-                    if not target.endswith(f'{location.name}'):
-                        target += f'_{location.name}'
+                    if axis == 'columns':
+                        # Columns should end with location name in the data, so if the target is not already suffixed with the location name, we suffix it
+                        if not target.endswith(f'{location.name}'):
+                            target += f'_{location.name}'
+                    elif axis == 'rows':
+                        # Columns should all be named the same in the data and a location column should be present
+                        # We need to filter the data to only keep the rows for the current location
+                        # display(data)
+                        # data = data.loc[data['location'] == location.name]
+                        data = data.xs(location.name, level='location', drop_level=False)
+                        # display(data)
+                        # data.rename(columns={targets[i]: target}, inplace=True)
+                assert target in data.columns.to_list(), f"Target {target} not in data"
 
-                    if axis == 'rows':
-                        data = data[data['location'] == location.name]
-                        data.rename(columns={targets[i]: target}, inplace=True)
-
-                assert target in data.columns.to_list(
-                ), f"Target {target} not in data"
-                fully_named_targets.append(target)
-
-            # Create a shift/rolling_mean of the colums and fill the self.targets_names attribute
-            for target in fully_named_targets:
+                # Create a shift/rolling_mean of the colums and fill the self.targets_names attribute
                 if not target.startswith("target_"):
                     target_name = f"target_{target}"
                 else:
@@ -486,15 +491,15 @@ class BaseTabularDataset():
                                             \nWill use a default shift of -1 if targets_shift == 0 or of -targets_shift if targets_shift < 0")
                         targets_shift = -1 if targets_shift == 0 or targets_shift is None else -targets_shift
 
-                # df = pd.DataFrame()
-                # df['brut'] = self.data[target]
                 if targets_rolling_window is None or targets_rolling_window == 0:
                     if targets_shift != 0:
                         self.logger.info(
                             f"Creating the target columns as {target} shifted by {targets_shift}")
                         target_name = f"{target_name}%J{'+' if targets_shift < 0 else '-'}{str(abs(targets_shift))}"
-                        data[target_name] = data[target].shift(targets_shift)
-                        self.targets_names.append(target_name)
+                        data.insert(0, target_name, data[target].shift(targets_shift).values)
+                        # data[target_name] = data[target].shift(targets_shift)
+                        if target_name not in self.targets_names:
+                            self.targets_names.append(target_name)
                         # df['shift_final'] = self.data[target_name]
                     targets_rolling_window = 0
 
@@ -506,63 +511,94 @@ class BaseTabularDataset():
                     # and might produce a target leak if history of the variable is used,
                     # Will use a initial shift of the size of the rolling window
                     target_name = f"{target_name}{'%J+' if targets_shift < 0 else '%J-' if targets_shift > 0 else ''}{str(abs(targets_shift))}%mean_{str(targets_rolling_window)}J"
-
                     if targets_shift != 0:
-                        data[target_name] = data[target].shift(
-                            targets_shift-targets_rolling_window)
+                        data.insert(0, target_name, data[target].shift(targets_shift-targets_rolling_window).values)
+                        # data[target_name] = data[target].shift(targets_shift-targets_rolling_window)
                     else:
-                        data[target_name] = data[target]
-                    # df['shift'] = self.data[target_name]
-                    # self.logger.info("Aggregating the target columns...")
+                        # data[target_name] = data[target]
+                        data.insert(0, target_name, data[target].values)
+
                     data[target_name] = data[target_name].rolling(
                         targets_rolling_window).mean()
-                    # df['rolling'] = self.data[target_name]
-                    self.targets_names.append(target_name)
-
-                self.logger.info("Creating target history columns...")
-                min_shift = abs(targets_shift) + targets_rolling_window
-                # min_shift = 0  # Use this if you want to use unavailable history
-                for shift in targets_history_shifts:
-                    if shift and shift<0:
-                        shift = -shift
-                    if shift < min_shift:
-                        self.logger.warning(f"{shift} as target history shift is not high enough considering that the target is shifted and/or is a rolling mean,\
-                                            \ntarget_history_shift value will be set to {shift} + abs(targets_shift) + targets_rolling_window")
-                        shift = shift + min_shift
-                    # shift = shift -1
-                    data[f"{target_name}%%J-{shift}"] = data[target_name].shift(
-                        shift)
-                    data[f"{target_name}%%J-{shift}"] = data[f"{target_name}%%J-{shift}"].bfill(
-                        limit_area='outside')
-
-                if targets_history_rolling_windows is not []:
-                    targets_history_rolling_windows_str = [str(r) for r in targets_history_rolling_windows]
-                    s = ', '.join(targets_history_rolling_windows_str)
-                    self.logger.info(
-                        f"Rolling windows will start from {min_shift} samples before to {s} days before this starting sample")
-
-                for rw in targets_history_rolling_windows:
-                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
-                        min_shift).rolling(rw, closed="left").mean()
-                    data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'].bfill(
-                        limit_area='outside')
-                    data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
-                        min_shift).rolling(rw, closed="left").std()
-                    data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'].bfill(
-                        limit_area='outside')
+                    if target_name not in self.targets_names:
+                        self.targets_names.append(target_name)
 
                 if bins:
-                    # print(data[target_name])
                     data = data.dropna(subset=[target_name])
                     self.logger.info(
                         "Categorizing the target columns...")
                     data = categorize(data, target_name,
                                       bins=bins, drop=replace_target)
 
-            data = data.loc[:, data.columns.str.startswith(target_name)]
-            self.data = self.data.merge(
-                data, how="left", left_index=True, right_index=True)
+                if targets_history_shifts != [] or targets_history_rolling_windows != []:
+                    self.logger.info("Creating target history columns...")
+                    min_shift = abs(targets_shift) + targets_rolling_window
+                    # min_shift = 0  # Use this if you want to use unavailable history
+
+                    for shift in targets_history_shifts:
+                        if shift and shift<0:
+                            shift = -shift
+                        if shift < min_shift:
+                            self.logger.warning(f"{shift} as target history shift is not high enough considering\
+                                                that the target is shifted and/or is a rolling mean,\
+                                                \ntarget_history_shift value will be set to {shift} + abs(targets_shift) + targets_rolling_window")
+                            shift = shift + min_shift
+                        # shift = shift -1
+                        data[f"{target_name}%%J-{shift}"] = data[target_name].shift(
+                            shift)
+                        data[f"{target_name}%%J-{shift}"] = data[f"{target_name}%%J-{shift}"].bfill(
+                            limit_area='outside')
+
+                    if targets_history_rolling_windows != []:
+                        targets_history_rolling_windows_str = [str(r) for r in targets_history_rolling_windows]
+                        s = ', '.join(targets_history_rolling_windows_str)
+                        self.logger.info(
+                            f"Rolling windows will start from {min_shift} samples before to {s} days before this starting sample")
+
+                    for rw in targets_history_rolling_windows:
+                        data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
+                            min_shift).rolling(rw, closed="left").mean()
+                        data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%mean_{rw}J%%J-{min_shift+1}'].bfill(
+                            limit_area='outside')
+                        data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[target_name].shift(
+                            min_shift).rolling(rw, closed="left").std()
+                        data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'] = data[f'{target_name}%%std{rw}J%%J-{min_shift+1}'].bfill(
+                            limit_area='outside')
+
+                colums_to_keep = list(data.columns[data.columns.str.startswith(target_name)])
+                target_data = data.loc[:, colums_to_keep]
+                
+                # target_data.reset_index(inplace=True)
+                # display(target_data.head(30))
+                all_loc_target.append(target_data)
+            
+            if axis == 'rows':
+                all_loc_for_target = pd.concat(all_loc_target)
+            elif axis == 'columns' or axis is None:
+                all_loc_for_target = pd.concat(all_loc_target, axis=1)
+            else:
+                if len(targets_locations) > 1:
+                    raise ValueError("If multiple locations are passed, axis must be 'rows' or 'columns'")
+                all_loc_for_target = all_loc_target[0]
+            # all_loc_for_target.set_index(index_name, inplace=True)
+            # display(all_loc_for_target.head(30))
+            
+            # right_on = [self.data.index]
+            # left_on = [all_loc_for_target.index]
+            # merge_on = [index_name]
+            # if axis == 'rows':
+            #     merge_on.append('location')
+            self.data = pd.merge(
+                all_loc_for_target,
+                self.data,
+                how="right",
+                right_index=True,
+                left_index=True
+            )#.set_index(self.data.index)
+        
+        # print(self.data.columns.to_list())
         self.data = self.data.dropna(subset=self.targets_names)
+
 
     def get_data(self,
                  from_date: Optional[Union[str, dt.datetime]] = None,
@@ -615,15 +651,12 @@ class BaseTabularDataset():
 
         data = pd.concat(features_data, axis='columns')
 
-        # print(data)
-
         return data
 
     # TODO : renommer shift en lags et rolling window en trend_windows
     def get_dataset(self, from_date: Optional[Union[str, dt.datetime]] = None,
                     to_date: Optional[Union[str, dt.datetime]] = None,
-                    locations: Optional[Union[List[str],
-                                              str, List[Location], Location]] = None,
+                    locations: Optional[Union[List[str], str, List[Location], Location]] = None,
                     axis: Optional[str] = None,
                     features_names: Optional[List[str]] = None,
                     freq: Optional[str] = None,
@@ -639,14 +672,11 @@ class BaseTabularDataset():
                     encoding_pipeline: Pipeline = None,
                     targets_names: Optional[List[str]] = None,
                     targets_shift: Optional[int] = None,
-                    targets_rolling_window: Optional[Union[int,
-                                                           List[int]]] = None,
+                    targets_rolling_window: Optional[Union[int, List[int]]] = None,
                     targets_history_shifts: Optional[int] = [],
-                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = [
-    ],
-            targets_locations: Optional[Union[List[str],
-                                              str, List[Location], Location]] = None,
-            inplace: bool = False) -> None:
+                    targets_history_rolling_windows: Optional[Union[int, List[int]]] = [],
+                    targets_locations: Optional[Union[List[str], str, List[Location], Location]] = None,
+                    inplace: bool = False) -> None:
         """
         Get the dataset
 
@@ -701,7 +731,11 @@ class BaseTabularDataset():
         if axis is None and len(locations) > 1:
             raise ValueError(
                 "axis can't be None if you're getting the dataset for multiple locations")
-        # Filtrage des données en fonction des dates et des colonnes demandées
+
+        if axis is not None and len(locations) == 1:
+            self.logger.warning("With a single location, argument 'axis' is unused")
+            axis = None
+        # On récupère les dataframes pour chaques locations et on les stocke dans un tableau
         for location in locations:
             df = self.get_data(from_date=from_date,
                                to_date=to_date,
@@ -716,27 +750,27 @@ class BaseTabularDataset():
             if axis == 'columns':
                 df = df.add_suffix(f"_{location.name}")
             elif axis == 'rows':
-                df['location'] = location.name
-
+                # df['location'] = location.name
+                # df.insert(0, 'location', location.name)
+                df_index = pd.MultiIndex.from_arrays([df.index.values, [location.name]*len(df)], names=(df.index.name, 'location'))
+                df = df.set_index(df_index)
             data.append(df)
+
         if axis is not None:
             if axis == 'columns':
                 self.data = pd.concat(data, axis='columns')
             elif axis == 'rows':
                 self.data = pd.concat(data, axis='rows')
-                self.data = self.data.sort_index()
-                self.data['location'] = self.data['location'].astype(
-                    'category')
+                # self.data['location'] = self.data['location'].astype(
+                #     'category')
             else:
                 raise ValueError("axis must be 'columns' or 'rows'")
         else:
-            self.data = data[0]
+            if len(locations)>1:
+                raise ValueError("When creating a dataset for multiple location, an axis must be given")
+            else:
+                self.data = data[0]
 
-        # extraire l'index de la nouvelle data si il n'est pas déjà présent
-        if self.data.index.name not in self.data.columns:
-            new_column = {str(self.data.index.name): self.data.index}
-            self.data = self.data.assign(**new_column)
-            # self.data.index.rename('index', inplace=True)
         # Créer les targets
         self.create_target(targets=targets_names,
                            targets_locations=targets_locations,
@@ -746,27 +780,46 @@ class BaseTabularDataset():
                            targets_history_rolling_windows=targets_history_rolling_windows, bins=target_bins, replace_target=replace_target,
                            axis=axis)
 
+        self.data = self.data.sort_index()
+
+        def add_index_as_column(df):
+            if isinstance(df.index, pd.MultiIndex):
+                for level in df.index.names:
+                    if level not in df.columns:
+                        print(f"Index level '{level}' not found in the data, creating it")
+                        df.insert(0, level, df.index.get_level_values(level))
+                    if level == 'date':
+                        if df['date'].dtype != 'datetime64[ns]':
+                            df['date'] = pd.to_datetime(df['date'])
+                    if level == 'location':
+                        if df['location'].dtype != 'category':
+                            df['location'] = df['location'].astype('category')
+            else:
+                if df.index.name not in df.columns:
+                    print(f"Index '{df.index.name}' not found in the data, creating it")
+                    df.insert(0, df.index.name, df.index)
+
+        # extraire l'index de la nouvelle data si il n'est pas déjà présent
+        add_index_as_column(self.data)
+
         # Si features_names est fourni, on retire les suffixes spécifiant l'encodage si présent dans le nom des colonnes
         if features_names is not None:
             features_names = [extract_column_base(ft) for ft in features_names]
             # features_names_base = find_matching_columns(self.data, features_names_base, to_print=True)
-            # Si les targets ne sont pas dans les features, on les ajoute
 
+            # Si les targets ne sont pas dans les features, on les ajoute
             for target in self.targets_names:
                 if target not in features_names:
                     self.logger.warning(
                         "Target %s not in features_names, adding it to continue", target)
                     features_names.append(target)
 
-        else:
-            features_names = self.data.columns.to_list()
+            features_names = list(set(features_names))
+            self.data = self.data[features_names]
+        # else:
+        #     features_names = self.data.columns.to_list()
 
-        features_names = list(set(features_names))
-
-        # print(self.data.columns.to_list())
-        # print(features_names)
-        self.data = self.data[features_names]
-        self.data.sort_index(axis=1, inplace=True)
+        # display(self.data)
 
         # print(self.data.columns.to_list())
         # # Update des noms des targets si il y a eu aggregation
@@ -809,15 +862,14 @@ class BaseTabularDataset():
         # # TODO: Attention, il faut recalculer si les targets ont changé, la pipeline d'encodage, les dates, la fréquence, le shift, le rolling_window, les features, les splits, les encodings, etc.
         # # Vérifier si un recalcul est nécessaire
         # if needs_recalculation(self, features_names_base, (from_date, to_date), freq, shift, rolling_window):
-        self.logger.info(
-            "Calculating train/val/test sets and encodings...")
 
         self.name += f"_{'_'.join(self.targets_names)}"
 
         # Splitting the dataset
         if split_config:
-            self.split(**split_config)
-
+            self.logger.info(
+                "Calculating train/val/test sets...")
+            self.split(**split_config, drop_constant_thr=drop_constant_thr)
         # Création des X et y
         if create_X_y:
             self.create_X_y()
