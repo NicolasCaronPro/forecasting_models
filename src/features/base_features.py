@@ -8,6 +8,7 @@ from src.tools.utils import clean_dataframe
 from typing import List, Optional, Union, Tuple
 from copy import deepcopy
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import abc
 import numpy as np
 import logging
@@ -29,7 +30,6 @@ def majority_rule(x):
     if len(mode_val) > 1:  # Si plusieurs valeurs sont à égalité, on choisit la première alphabétiquement
         return sorted(mode_val)[0]
     return mode_val[0]
-
 
 class BaseFeature(object):
 
@@ -218,11 +218,7 @@ dec)
             assert start_date <= stop_date, "start date must be before stop date"
 
             location: Location = kwargs.pop('location', None)
-            assert isinstance(location, Location) or isinstance(
-                location, str), f"location must be of type Location, str, not {type(location)}"
-
-            if isinstance(location, str):
-                location = Location(name=location)
+            assert isinstance(location, Location), f"location must be of type Location, not {type(location)}"
 
             filename: str = kwargs.pop(
                 'filename', f'data_{location.name}.feather')
@@ -363,15 +359,18 @@ dec)
         self.logger.info(
             f"Getting data for {self.name} from {from_date} to {to_date}, at a {freq} frequency")
         if path is None:
-            path = './data/features/' + self.name
+            path = '../data/features/' + self.name
 
         if filename is None:
-            filename = 'data.feather'
+            if location:
+                filename = f'data_{location.name}.feather'
+            else:
+                filename = 'data.feather'
 
         if not filename.endswith('.feather'):
             filename = filename + '.feather'
 
-        if not filename.endswith(f'_{location.name}.feather'):
+        if location and not filename.endswith(f'_{location.name}.feather'):
             filename = filename[:-len('.feather')] + \
                 f'_{location.name}.feather'
 
@@ -425,6 +424,7 @@ dec)
         # print(data)
         data = data.loc[from_date:to_date]
         data = data[features_names]
+        data.sort_index(axis=1, inplace=True)
         # print(data)
         nan_rows = data[data.isna().any(axis=1)].index
         if len(nan_rows):
@@ -559,11 +559,41 @@ dec)
              features_names: Optional[List[str]] = None,
              freq: str = '1D',
              max_subplots: int = 4,
-             data: pd.DataFrame = None) -> pd.DataFrame:
+             data: Optional[pd.DataFrame] = None,
+             location: Optional[Location] = None) -> pd.DataFrame:
+        def custom_flatten(array, n):
+            """
+            Applati un tableau numpy selon un ordre particulier.
+            
+            Arguments:
+                array (np.ndarray): Un tableau 2D numpy de dimensions (M, N).
+                n (int): Nombre d'éléments consécutifs à prendre par colonne avant de passer au bloc suivant.
+
+            Retourne:
+                list: Une liste d'indices ordonnés pour le tableau aplati.
+            """
+            # Vérifier que n est positif
+            if n <= 0:
+                raise ValueError("Le paramètre 'n' doit être un entier positif.")
+
+            # Extraire les dimensions
+            n_rows, n_cols = array.shape
+
+            # Préparer une liste pour les indices ordonnés
+            ordered_indices = []
+
+            # Parcourir les éléments par blocs de taille n
+            for start in range(0, n_rows, n):
+                # Ajouter les indices par colonnes, n éléments à la fois
+                for col in range(n_cols):
+                    for row in range(start, min(start + n, n_rows)):
+                        ordered_indices.append((row, col))
+
+            return ordered_indices
 
         if data is None:
             data = self.get_data(
-                from_date=from_date, to_date=to_date, features_names=features_names, freq=freq)
+                from_date=from_date, to_date=to_date, location=location, features_names=features_names, freq=freq)
 
         # # Identifier les colonnes catégorielles
         # categorical_columns = data.select_dtypes(include=['object', 'category']).columns
@@ -580,8 +610,8 @@ dec)
         # for i in range(0, len(data.columns), min(4, len(data.columns))):
         #     data.iloc[:, i:i+5].plot()
         #     plt.show()
-
-        num_rows = np.ceil(np.sqrt(max_subplots)).astype(int)
+        years = data.index.year.unique()
+        num_rows = np.ceil(np.sqrt(max_subplots)).astype(int) #*len(years)
         num_cols = np.ceil(max_subplots / num_rows).astype(int)
 
         # Calcul du nombre total de figures nécessaires
@@ -595,6 +625,8 @@ dec)
         #     agg_data = data
 
         for fig_num in range(num_figures):
+            fig: plt.Figure
+            axes: np.ndarray[plt.Axes]
             fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 10))
             axes = axes.flatten()
 
@@ -605,22 +637,23 @@ dec)
 
                 for column in data.columns.to_list():
 
-                    if '~~' in column:
-                        column_name, agg_func = column.split('~~', 1)
-                    else:
-                        column_name = column
-                        agg_func = column
+                    # if '~~' in column:
+                    #     column_name, agg_func = column.split('~~', 1)
+                    # else:
+                    #     column_name = column
+                    #     agg_func = column
 
-                    if variable_name == column_name:
-                        col = data[column]
-                        # col = data.loc[:, [col for col in data.columns if col.startswith(f'{column}__')]]
-                        axes[i].plot(col.index, col, label=agg_func)
-                        # col.plot(kind='line', ax=axes[i])
-                        axes[i].set_title(
-                            f'{variable_name} over time ({freq})')
-                        axes[i].set_xlabel('Date')
-                        axes[i].set_ylabel('Value')
-                        axes[i].legend()
+                    if variable_name == column:
+                        for year in data.index.year.unique():
+                            col = data[column][data.index.year == year]
+
+                            index: pd.DatetimeIndex = col.index
+                            axes[i].plot(index.day_of_year, col, label=f'{year}',linestyle='-', marker='+', alpha=0.7)
+                            # col.plot(kind='line', ax=axes[i])
+                            axes[i].set_title(f'{variable_name} over time ({freq})')
+                            axes[i].set_xlabel('Date')
+                            axes[i].set_ylabel('Value')
+                            axes[i].legend()
 
             # Supprimer les axes inutilisés
             for j in range(end_idx - start_idx, len(axes)):
