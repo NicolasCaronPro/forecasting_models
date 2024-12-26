@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/GNN/models')
 sys.path.insert(0, '/home/caron/Bureau/pytorch_geometric_temporal')
 
+from matplotlib import axis
 import torch
 from torch.nn import ELU, ReLU, Sigmoid, Softmax, Tanh, GELU, SiLU, Conv1d, Conv2d, MaxPool2d, Identity, Dropout
 from torch_geometric.nn.dense.linear import Linear
@@ -27,18 +28,18 @@ from torch_geometric.utils import (
 ############################### Output ########################################
 
 class OutputLayer(torch.nn.Module):
-    def __init__(self, in_channels, end_channels, n_steps, device, act_func, binary):
+    def __init__(self, in_channels, end_channels, n_steps, device, act_func, task_type, out_channels=1):
         super(OutputLayer, self).__init__()
         if act_func == 'relu':
             self.activation = ReLU()
         if act_func == 'gelu':
             self.activation = GELU()
 
-        self.binary = binary
+        self.task_type = task_type
 
-        if binary:
-            self.out_channels = 2
-            self.softmax = Softmax()
+        if task_type == 'classification':
+            self.out_channels = out_channels
+            self.softmax = Softmax(dim=1)
         else:
             self.out_channels = 1
 
@@ -56,7 +57,7 @@ class OutputLayer(torch.nn.Module):
         x = self.fc2(x)
         x = x.view(x.shape[0], self.out_channels)
         x = torch.clamp(x, min=0)
-        if self.binary:
+        if self.task_type == 'classification':
             x = self.softmax(x)
         return x
     

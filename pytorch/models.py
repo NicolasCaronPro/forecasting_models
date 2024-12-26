@@ -26,7 +26,8 @@ class GAT(torch.nn.Module):
                  bias,
                  device,
                  act_func,
-                 binary,
+                 task_type,
+                 out_channels,
                  graph_or_node='node',
                  return_hidden=False):
         
@@ -38,6 +39,7 @@ class GAT(torch.nn.Module):
         self.activation_layers = torch.nn.ModuleList()
         self.dropout_layers = torch.nn.ModuleList()
         self.return_hidden = return_hidden
+        self.out_channels = out_channels
 
         # Couche d'entrée linéaire pour projeter les dimensions d'entrée
         self.input = torch.nn.Linear(in_features=in_dim, out_features=hidden_channels[0] * heads[0]).to(device)
@@ -56,7 +58,6 @@ class GAT(torch.nn.Module):
             self.gat_layers.append(gat_layer)
 
             # Normalization layer
-            #norm_layer = GraphNorm(hidden_channels[i + 1] * heads[i + 1] if concat else hidden_channels[i + 1]).to(device)
             norm_layer = nn.BatchNorm(hidden_channels[i + 1] * heads[i + 1] if concat else hidden_channels[i + 1]).to(device)
             self.norm_layers.append(norm_layer)
 
@@ -85,7 +86,8 @@ class GAT(torch.nn.Module):
             n_steps=n_sequences,
             device=device,
             act_func=act_func,
-            binary=binary
+            task_type=task_type,
+            out_channels=self.out_channels
         )
 
     def forward(self, X, edge_index, graphs=None):
@@ -119,6 +121,7 @@ class GAT(torch.nn.Module):
         else:
             return output
 
+
 ################################ GCN ################################################
 
 class GCN(torch.nn.Module):
@@ -129,7 +132,8 @@ class GCN(torch.nn.Module):
                  bias,
                  device,
                  act_func,
-                 binary,
+                 task_type,
+                 out_channels,
                  graph_or_node='node',
                  return_hidden=False):
         
@@ -141,6 +145,7 @@ class GCN(torch.nn.Module):
         self.activation_layers = torch.nn.ModuleList()
         self.dropout_layers = torch.nn.ModuleList()
         self.return_hidden = return_hidden
+        self.out_channels = out_channels
 
         self.input = torch.nn.Linear(in_features=in_dim, out_features=hidden_channels[0]).to(device)
 
@@ -154,7 +159,6 @@ class GCN(torch.nn.Module):
             self.gcn_layers.append(gcn_layer)
 
             # Normalization layer
-            #norm_layer = nn.GraphNorm(hidden_channels[i + 1]).to(device)
             norm_layer = nn.BatchNorm(hidden_channels[i + 1]).to(device)
             self.norm_layers.append(norm_layer)
 
@@ -184,7 +188,8 @@ class GCN(torch.nn.Module):
             n_steps=n_sequences,
             device=device,
             act_func=act_func,
-            binary=binary
+            task_type=task_type,
+            out_channels=self.out_channels
         )
 
     def forward(self, X, edge_index, graphs=None):
@@ -279,13 +284,14 @@ class SpatioTemporalLayer(torch.nn.Module):
         return x
 
 class DSTGCN(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, binary, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
         super(DSTGCN, self).__init__()
         
         self.return_hidden = return_hidden
         self.device = device
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
+        self.out_channels = out_channels
         
         # Initial layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
@@ -308,7 +314,8 @@ class DSTGCN(torch.nn.Module):
                                   n_steps=self.n_sequences,
                                   device=device,
                                   act_func=act_func,
-                                  binary=binary)
+                                  task_type=task_type,
+                                  out_channels=self.out_channels)
         
     def forward(self, X, edge_index, graphs=None):
         # Initial projection
@@ -389,13 +396,14 @@ class SpatioTemporalLayerGAT(torch.nn.Module):
         return x
     
 class DSTGAT(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, binary, heads, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, heads, out_channels, graph_or_node='node', return_hidden=False):
         super(DSTGAT, self).__init__()
         
         self.return_hidden = return_hidden
         self.device = device
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
+        self.out_channels = out_channels
         
         # Initial layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
@@ -417,6 +425,7 @@ class DSTGAT(torch.nn.Module):
                                                    last = i == num_of_layers - 1).to(device))
             if concat:
                 input_channels = dilation_channels[i + 1] * factor
+                
         # Output layer, adapted for graph pooling with concatenation (mean + max + sum pooling)
         pooled_output_dim = dilation_channels[-1] * 3 if self.is_graph_or_node else dilation_channels[-1]
         self.output = OutputLayer(in_channels=pooled_output_dim,
@@ -424,7 +433,8 @@ class DSTGAT(torch.nn.Module):
                                   n_steps=self.n_sequences,
                                   device=device,
                                   act_func=act_func,
-                                  binary=binary)
+                                  task_type=task_type,
+                                  out_channels=self.out_channels)
         
     def forward(self, X, edge_index, graphs=None):
         # Initial projection
@@ -492,7 +502,7 @@ class Temporal_Gated_Conv(torch.nn.Module):
         return H
 
 class SandwichLayer(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, out_channels, dropout, heads, concat, last):
+    def __init__(self, n_sequences, in_channels, out_channels, dropout, heads, concat):
         super(SandwichLayer, self).__init__()
 
         self.concat = concat
@@ -545,7 +555,7 @@ class SandwichLayer(torch.nn.Module):
         return x
 
 class STGAT(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, heads, act_func, device, binary, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, heads, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
         super(STGAT, self).__init__()
 
         self.return_hidden = return_hidden
@@ -574,7 +584,8 @@ class STGAT(torch.nn.Module):
                                   end_channels=end_channels,
                                   n_steps=1,
                                   device=device, act_func=act_func,
-                                  binary=binary)
+                                  task_type=task_type,
+                                  out_channels=out_channels)
         
     def forward(self, X, edge_index, graphs=None):
         
@@ -659,7 +670,7 @@ class SandwichLayerGCN(torch.nn.Module):
         return x
 
 class STGCN(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, act_func, device, binary, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
         super(STGCN, self).__init__()
         
         self.return_hidden = return_hidden
@@ -688,7 +699,8 @@ class STGCN(torch.nn.Module):
                                   end_channels=end_channels,
                                   n_steps=1,
                                   device=device, act_func=act_func,
-                                  binary=binary)
+                                  task_type=task_type,
+                                  out_channels=out_channels)
 
     def forward(self, X, edge_index, graphs=None):
 
@@ -717,9 +729,8 @@ class STGCN(torch.nn.Module):
 ################################### ST_LSTM ######################################
 
 class ST_GATLSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels_list,
-                 end_channels, n_sequences, device, act_func, heads,
-                 dropout, num_layers, binary, concat, graph_or_node='node', return_hidden=False):
+    def __init__(self, in_channels, hidden_channels_list, end_channels, n_sequences, device, act_func, heads,
+                 dropout, num_layers, task_type, concat, graph_or_node='node', return_hidden=False, out_channels=None):
         super(ST_GATLSTM, self).__init__()
 
         self.return_hidden = return_hidden
@@ -747,7 +758,8 @@ class ST_GATLSTM(torch.nn.Module):
         pooled_output_dim = hidden_channels_list[-1] * 3 if self.is_graph_or_node else hidden_channels_list[-1]
         pooled_output_dim = pooled_output_dim * heads if concat else pooled_output_dim
         self.output = OutputLayer(in_channels=pooled_output_dim, end_channels=end_channels,
-                                  n_steps=n_sequences, device=device, act_func=act_func, binary=binary)
+                                  n_steps=n_sequences, device=device, act_func=act_func, 
+                                  task_type=task_type, out_channels=out_channels)
 
     def forward(self, X, edge_index, graphs=None):
         batch_size = X.size(0)
@@ -755,7 +767,7 @@ class ST_GATLSTM(torch.nn.Module):
         # Rearrange dimensions for LSTM input
         x = X.permute(0, 2, 1)
 
-       # Initialisation des états cachés et des cellules pour chaque couche
+        # Initialisation des états cachés et des cellules pour chaque couche
         h0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
         c0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
 
@@ -765,7 +777,7 @@ class ST_GATLSTM(torch.nn.Module):
             x, (h0, c0) = self.lstm_layers[i](x, (h0, c0))
 
         # Apply Batch Normalization
-        x = self.batch_norm(x)
+        x = self.graph_norm(x)
 
         # Extract the last output of LSTM
         x = x[:, :, -1]  # Shape: (batch_size, hidden_channels)
@@ -785,11 +797,10 @@ class ST_GATLSTM(torch.nn.Module):
         
         return (output, xg) if self.return_hidden else output
     
-################################################### LSTM #######################################################""
 
 class LSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels_list,
-                 end_channels, n_sequences, device, act_func, binary, dropout, num_layers, return_hidden=False):
+    def __init__(self, in_channels, hidden_channels_list, end_channels, n_sequences, device, act_func, task_type, dropout, 
+                 num_layers, return_hidden=False, out_channels=None):
         super(LSTM, self).__init__()
 
         self.return_hidden = return_hidden
@@ -809,7 +820,7 @@ class LSTM(torch.nn.Module):
         # Output layer
         self.output = OutputLayer(in_channels=hidden_channels_list[-1], end_channels=end_channels,
                                   n_steps=n_sequences, device=device, act_func=act_func,
-                                  binary=binary)
+                                  task_type=task_type, out_channels=out_channels)
 
         self.batch_norm = torch.nn.BatchNorm1d(hidden_channels_list[-1]).to(device)
 
@@ -821,7 +832,7 @@ class LSTM(torch.nn.Module):
         # Rearrange dimensions for LSTM input
         x = X.permute(0, 2, 1)  # Shape: (batch_size, sequence_length, residual_channels)
 
-       # Initialisation des états cachés et des cellules pour chaque couche
+        # Initialisation des états cachés et des cellules pour chaque couche
         h0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
         c0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
 

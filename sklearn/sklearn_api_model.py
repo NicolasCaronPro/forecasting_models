@@ -9,7 +9,6 @@ from typing import Union, final
 
 import matplotlib.pyplot as plt
 import numpy as np
-from responses import target
 import shap
 from sympy import false
 from torch import poisson_nll_loss
@@ -162,6 +161,34 @@ class MyXGBRegressor(BaseEstimator, RegressorMixin):
         """
         return self.model_
 
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode='bar', figsize=(50, 25), samples=None, samples_name=None):
+        dtrain = xgb.DMatrix(df_set)
+        shap_values = self.model_.predict(dtrain, pred_contribs=True)
+
+        # Save global visualization
+        os.makedirs(dir_output, exist_ok=True)
+        plt.figure(figsize=figsize)
+        if mode == 'bar':
+            shap.summary_plot(shap_values, df_set, plot_type='bar', show=False)
+        elif mode == 'beeswarm':
+            shap.summary_plot(shap_values, df_set, show=False)
+        plt.savefig(os.path.join(dir_output, f"{outname}_shapley_additive_explanation.png"))
+        plt.close()
+
+        # Save specific samples if provided
+        if samples is not None and samples_name is not None:
+            sample_dir = os.path.join(dir_output, 'sample')
+            os.makedirs(sample_dir, exist_ok=True)
+            for i, sample in enumerate(samples):
+                plt.figure(figsize=figsize)
+                shap.force_plot(
+                    shap_values[sample], df_set.iloc[sample],
+                    matplotlib=True,
+                ).savefig(
+                    os.path.join(sample_dir, f"{outname}_{samples_name[i]}_shapley_additive_explanation.png")
+                )
+                plt.close()
+
 class MyXGBClassifier(BaseEstimator, ClassifierMixin):
     def __init__(self, alpha=1.0, **kwargs):
         self.alpha = alpha
@@ -266,6 +293,34 @@ class MyXGBClassifier(BaseEstimator, ClassifierMixin):
         """
         return self.model_
 
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode='bar', figsize=(50, 25), samples=None, samples_name=None):
+        dtrain = xgb.DMatrix(df_set)
+        shap_values = self.model_.predict(dtrain, pred_contribs=True)
+
+        # Save global visualization
+        os.makedirs(dir_output, exist_ok=True)
+        plt.figure(figsize=figsize)
+        if mode == 'bar':
+            shap.summary_plot(shap_values, df_set, plot_type='bar', show=False)
+        elif mode == 'beeswarm':
+            shap.summary_plot(shap_values, df_set, show=False)
+        plt.savefig(os.path.join(dir_output, f"{outname}_shapley_additive_explanation.png"))
+        plt.close()
+
+        # Save specific samples if provided
+        if samples is not None and samples_name is not None:
+            sample_dir = os.path.join(dir_output, 'sample')
+            os.makedirs(sample_dir, exist_ok=True)
+            for i, sample in enumerate(samples):
+                plt.figure(figsize=figsize)
+                shap.force_plot(
+                    shap_values[sample], df_set.iloc[sample],
+                    matplotlib=True,
+                ).savefig(
+                    os.path.join(sample_dir, f"{outname}_{samples_name[i]}_shapley_additive_explanation.png")
+                )
+                plt.close()
+
 ##########################################################################################
 #                                                                                        #
 #                                   Base class                                           #
@@ -297,9 +352,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.task_type = task_type
         self.post_process = post_process
 
-    def fit(self, X, y, X_test=None, y_test=None, features_search=False, optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
+    def fit(self, X, y, X_val, y_val, X_test=None, y_test=None, features_search=False, optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
         """
-        Train the model on the data using GridSearchCV or BayesSearchCV.
+        Train the model.
 
         Parameters:
         - X: Training data.
@@ -308,12 +363,120 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - optimization: Optimization method to use ('grid' or 'bayes').
         - fit_params: Additional parameters for the fit function.
         """
-                
-        self.X_train = X
+
+        if self.non_fire_number != 'full':
+            if 'binary' in self.non_fire_number:
+                vec = self.non_fire_number.split('-')
+                try:
+                    nb = int(vec[-1]) * len(y[y > 0])
+                except ValueError:
+                    print(f'{self.non_fire_number} with undefined factor, set to 1 -> {len(y[y > 0])}')
+                    nb = len(y[y > 0])
+
+                # Separate the positive and zero classes based on y
+                positive_mask = y > 0
+                non_fire_mask = y == 0
+
+                X_positive = X[positive_mask]
+                y_positive = y[positive_mask]
+
+                X_non_fire = X[non_fire_mask]
+                y_non_fire = y[non_fire_mask]
+
+                # Sample non-fire data
+                nb = min(len(X_non_fire), nb)
+                sampled_indices = np.random.RandomState(42).choice(len(X_non_fire), nb, replace=False)
+
+                X_non_fire_sampled = X_non_fire.iloc[sampled_indices] if isinstance(X, pd.DataFrame) else X_non_fire[sampled_indices]
+                y_non_fire_sampled = y_non_fire.iloc[sampled_indices] if isinstance(y, pd.Series) else y_non_fire[sampled_indices]
+
+                # Combine positive and sampled non-fire data
+                X_combined = pd.concat([X_positive, X_non_fire_sampled]) if isinstance(X, pd.DataFrame) else np.concatenate([X_positive, X_non_fire_sampled])
+                y_combined = pd.concat([y_positive, y_non_fire_sampled]) if isinstance(y, pd.Series) else np.concatenate([y_positive, y_non_fire_sampled])
+
+                # Update X and y for training
+                X_combined.reset_index(drop=True, inplace=True)
+                y_combined.reset_index(drop=True, inplace=True)
+                X = X_combined
+                y = y_combined
+                print(f'Train mask X shape: {X.shape}, y shape: {y.shape}')
+
+        features = list(X.columns)
+        if 'weight' in features:
+            features.remove('weight')
+
+        self.X_train = X[features]
         self.y_train = y
 
+        if self.model_type == 'xgboost':
+            dval = xgb.DMatrix(X_val[features], label=y_val, weight=X_val['weight'])
+            dtrain = xgb.DMatrix(X[features], label=y, weight=X['weight'])
+            fit_params = {
+                'eval_set': [(dtrain, 'train'), (dval, 'validation')],
+                'sample_weight': X['weight'],
+                'verbose': False,
+                'early_stopping_rounds' : 15
+            }
+
+        elif self.model_type == 'catboost':
+            cat_features = [col for col in X.columns if str(X[col].dtype) == 'category']  # Identify categorical features
+            fit_params = {
+                'eval_set': [(X_val[features], y_val)],
+                'sample_weight': X['weight'],
+                'cat_features': cat_features,
+                'verbose': False,
+                'early_stopping_rounds': 15,
+            }
+
+        elif self.model_type == 'ngboost':
+            fit_params = {
+                'X_val': X_val[features],
+                'Y_val': y_val,
+                'sample_weight': X['weight'],
+                'early_stopping_rounds': 15,
+            }
+
+        elif self.model_type == 'rf':
+            fit_params = {
+                'sample_weight': X['weight']
+            }
+
+        elif self.model_type == 'dt':
+            fit_params = {
+                'sample_weight': X['weight']
+            }
+
+        elif self.model_type == 'lightgbm':
+            fit_params = {
+                'eval_set': [(X_val[features], y_val)],
+                'eval_sample_weight': [X_val['weight']],
+                'early_stopping_rounds': 15,
+                'verbose': False
+            }
+
+        elif self.model_type == 'svm':
+            fit_params = {
+                'sample_weight': X['weight']
+            }
+
+        elif self.model_type == 'poisson':
+            fit_params = {
+                'sample_weight': X['weight']
+            }
+
+        elif self.model_type == 'gam':
+            fit_params = {
+            'weights': X['weight']
+            } 
+
+        elif self.model_type ==  'linear':
+            fit_params = {}
+
+        else:
+            raise ValueError(f"Unsupported model model_type: {self.model_type}")
+        
         if features_search:
-            features_selected, selected_features_index, final_score = self.fit_by_features(X, y, X_test, y_test, fit_params)
+            features_selected, selected_features_index, final_score = self.fit_by_features(self.X_train, self.y_train, X_test, y_test, fit_params)
             self.features_selected, self.final_score = features_selected, final_score
             X = X[features_selected]
             fit_params = self.update_fit_params(self.model_type, fit_params, features_selected, selected_features_index)
@@ -323,7 +486,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             df_features['r2_score'] = final_score
             df_features.to_csv(self.dir_log / f'{self.name}_features.csv')
         else:
-            self.features_selected = list(X.columns)
+            self.features_selected = features
             df_features = pd.DataFrame(index=np.arange(0, len(self.features_selected)))
             df_features['features'] = self.features_selected
             df_features['r2_score'] = np.nan
@@ -333,7 +496,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if optimization == 'grid':
             assert grid_params is not None
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
-            grid_search.fit(X, y, **fit_params)
+            grid_search.fit(self.X_train, self.y_train, **fit_params)
             best_params = grid_search.best_params_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
@@ -359,12 +522,12 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, Refit=False)
-            bayes_search.fit(X, y, **fit_params)
+            bayes_search.fit(self.X_train, self.y_train, **fit_params)
             best_params = bayes_search.best_estimator_.get_params()
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
             best_params = self.best_estimator_.get_params()
-            self.best_estimator_.fit(X, y, **fit_params)
+            self.best_estimator_.fit(self.X_train, self.y_train, **fit_params)
         else:
             raise ValueError("Unsupported optimization method")
         
@@ -376,7 +539,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         
         # Fit the model on the entire dataset
         if optimization != 'skip':
-            self.best_estimator_.fit(X, y, **fit_params)
+            self.best_estimator_.fit(self.X_train, self.y_train, **fit_params)
         
         # Save the best estimator as the one that had the highest cross-validation score
         """self.cv_results_['mean_cv_score'] = np.mean(cv_scores)
@@ -707,23 +870,23 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #return self.best_estimator_.predict(dtest)
         return self.best_estimator_.predict(X[self.features_selected])
     
-    def predict_nbsinister(self, X):
+    def predict_nbsinister(self, X, ids=None):
         
         if self.target_name == 'nbsinister':
             return self.predict(X)
         else:
             assert self.post_process is not None
             predict = self.predict(X)
-            return self.post_process.predict_nbsinister(predict)
+            return self.post_process.predict_nbsinister(predict, ids)
     
-    def predict_risk(self, X):
+    def predict_risk(self, X, ids=None):
 
         if self.task_type == 'classification':
             return self.predict(X)
         else:
             assert self.post_process is not None
             predict = self.predict(X)
-            return self.post_process.predict_risk(predict)
+            return self.post_process.predict_risk(predict, ids)
         
     def predict_proba(self, X):
         """
@@ -925,7 +1088,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         check_and_create_path(dir_output / 'sample')
         try:
             if isinstance(self.best_estimator_, MyXGBClassifier) or isinstance(self.best_estimator_, MyXGBRegressor):
-                explainer = shap.Explainer(self.best_estimator_.get_booster())
+                self.best_estimator_.shapley_additive_explanation(df_set, outname, dir_output, mode, figsize, samples, samples_name)
+                return
             else:
                 explainer = shap.Explainer(self.best_estimator_)
             shap_values = explainer(df_set, check_additivity=False)
@@ -1093,6 +1257,298 @@ class ModelTree(Model):
 #                                   Voting                                              #
 #                                                                                        #
 ##########################################################################################
+        
+class DualModel(RegressorMixin, ClassifierMixin):
+    def __init__(self, models, features, loss='mse', name='DualModel', dir_log=Path('../'), target_name='nbsinister', post_process=None):
+        """
+        Initialize the DualModel class.
+
+        Parameters:
+        - models: A list of two models. The first is trained on all samples, the second on samples with target > 0.
+        - features: List of features to use for training.
+        - loss: Loss function to use ('mse', 'rmse', etc.).
+        - name: The name of the model.
+        - dir_log: Directory to save logs and outputs.
+        - target_name: Name of the target column.
+        """
+        if len(models) != 2:
+            raise ValueError("DualModel requires exactly two models.")
+        self.model_all = models[0]  # Model trained on all samples
+        self.model_positive = models[1]  # Model trained only on samples with target > 0
+        self.features = features
+        self.name = name
+        self.loss = loss
+        self.dir_log = dir_log
+        self.target_name = target_name
+        self.is_fitted_ = [False, False]  # Track the fitting status of both models
+        self.post_process = post_process
+
+    def fit(self, X, y, X_val=None, y_val=None, X_test=None, y_test=None, features_search=False, optimization='skip', grid_params=[None, None], fit_params=[{}, {}], cv_folds=10):
+        """
+        Train the DualModel.
+
+        Parameters:
+        - X: Training features (DataFrame).
+        - y: Training target (Series).
+        - X_val: Validation features (optional).
+        - y_val: Validation target (optional).
+        - optimization: Optimization method to use ('grid' or 'bayes').
+        - grid_params_list: List of parameters for grid search (optional).
+        - fit_params_list: Additional parameters for fitting (optional).
+        - cv_folds: Number of cross-validation folds (default: 10).
+        """
+        self.is_fitted_ = [True, True]  # Mark both models as fitted after training
+
+        y_binary = (y > 0).astype(int)
+        if y_val is not None:
+            y_val_binary = (y_val > 0).astype(int)
+        else:
+            y_val_binary = None
+
+        if y_test is not None:
+            y_test_binary = (y_test > 0).astype(int)
+        else:
+            y_test_binary = y_test
+
+        # Model 1: Train on all data
+        fit_params_1 = fit_params[0]
+        self.model_positive.fit(X, y_binary, X_val=X_val, y_val=y_val_binary, X_test=X_test, y_test=y_test_binary,
+                                features_search=features_search, optimization=optimization,
+                                grid_params=grid_params[0],
+                                cv_folds=cv_folds, fit_params=fit_params_1)
+
+        # Model 2: Train only on samples where target > 0
+        X_train_positive = X[y > 0]
+        y_train_positive = y[y > 0]
+        X_val_positve = X_val[y_val > 0]
+        y_val_positve = y_val[y_val > 0]
+        fit_params_2 = fit_params[1]
+        self.model_all.fit(X_train_positive, y_train_positive, X_val=X_val_positve, y_val=y_val_positve, X_test=X_test, y_test=y_test,
+                           features_search=features_search, optimization=optimization,
+                            grid_params=grid_params[1],
+                            cv_folds=cv_folds, fit_params=fit_params_2)
+
+    def predict(self, X):
+        """
+        Predict using the DualModel.
+
+        Parameters:
+        - X: Input data for prediction.
+
+        Returns:
+        - Predictions from the DualModel.
+        """
+        if not all(self.is_fitted_):
+            raise ValueError("Both models must be fitted before calling predict.")
+
+        # Predict using the first model
+        X_test = X[self.features]
+        predictions = self.model_positive.predict(X_test)
+
+        # Adjust predictions for positive samples
+        mask_positive = predictions > 0
+        if mask_positive.any():
+            X_positive = X_test[mask_positive]
+            predictions[mask_positive] = self.model_all.predict(X_positive)
+
+        return predictions
+
+    def predict_proba(self, X):
+        """
+        Predict probabilities using the DualModel (classification tasks).
+
+        Parameters:
+        - X: Input data for prediction.
+
+        Returns:
+        - Predicted probabilities.
+        """
+        if not hasattr(self.model_all, "predict_proba") or not hasattr(self.model_positive, "predict_proba"):
+            raise AttributeError("Both models must support predict_proba for this method.")
+
+        # Predict probabilities using the first model
+        X_test = X[self.features]
+        proba_all = self.model_positive.predict_proba(X_test)
+
+        # Adjust probabilities for positive samples
+        mask_positive = proba_all[:, 1] > 0.5
+        if mask_positive.any():
+            X_positive = X_test[mask_positive]
+            proba_positive = self.model_all.predict_proba(X_positive)
+            proba_all[mask_positive] = proba_positive
+
+        return proba_all
+    
+    def predict_nbsinister(self, X, ids=None):
+        """
+        Predict the number of sinister cases using the model.
+
+        Parameters:
+        - X: Input data for prediction.
+        - ids: Optional identifiers for the data.
+
+        Returns:
+        - Predicted number of sinister cases.
+        """
+        if self.target_name == 'nbsinister':
+            return self.predict(X)
+        else:
+            assert self.post_process is not None, "Post-process module is required for non-nbsinister predictions."
+            predictions = self.predict(X)
+            return self.post_process.predict_nbsinister(predictions, ids)
+
+    def predict_risk(self, X, ids=None):
+        """
+        Predict the risk using the model.
+
+        Parameters:
+        - X: Input data for prediction.
+        - ids: Optional identifiers for the data.
+
+        Returns:
+        - Predicted risk.
+        """
+        if self.loss == 'classification':
+            return self.predict(X)
+        else:
+            assert self.post_process is not None, "Post-process module is required for non-classification predictions."
+            predictions = self.predict(X)
+            return self.post_process.predict_risk(predictions, ids)
+
+    def score(self, X, y, sample_weight=None):
+        """
+        Evaluate the model's performance for each ID.
+
+        Parameters:
+        - X_val: Validation data.
+        - y_val: True labels.
+        - id_val: List of IDs corresponding to validation data.
+
+        Returns:
+        - Mean score across all IDs.
+        """
+        predictions = self.predict(X)
+        return self.score_with_prediction(predictions, y, sample_weight)
+
+    def score_with_prediction(self, y_pred, y, sample_weight=None):
+        #return calculate_signal_scores(y, y_pred)
+        if self.loss == 'quantile':
+            return my_r2_score(y, y_pred[:, 2])
+        return my_r2_score(y, y_pred)
+        if self.loss == 'area':
+            return calculate_signal_scores(y, y_pred)
+        if self.loss == 'logloss':
+            return -log_loss(y, y_pred)
+        elif self.loss == 'hinge_loss':
+            return -hinge_loss(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'accuracy':
+            return accuracy_score(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'mse':
+            return -mean_squared_error(y, y_pred, sample_weight=sample_weight)
+        elif self.loss == 'rmse':
+            return -math.sqrt(mean_squared_error(y, y_pred, sample_weight=sample_weight))
+        elif self.loss == 'rmsle':
+            pass
+        elif self.loss == 'poisson':
+            pass
+        elif self.loss == 'huber_loss':
+            pass
+        elif self.loss == 'log_cosh_loss':
+            pass
+        elif self.loss == 'tukey_biweight_loss':
+            pass
+        elif self.loss == 'exponential_loss':
+            pass
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss}")
+
+    def save(self, filepath):
+        """
+        Save the DualModel to a file.
+
+        Parameters:
+        - filepath: Path to save the model.
+        """
+        import joblib
+        joblib.dump(self, filepath)
+
+    @classmethod
+    def load(cls, filepath):
+        """
+        Load a DualModel from a file.
+
+        Parameters:
+        - filepath: Path to load the model from.
+
+        Returns:
+        - Loaded DualModel.
+        """
+        import joblib
+        return joblib.load(filepath)
+    
+    def get_params(self, deep=True):
+        """
+        Get the parameters of both models.
+
+        Parameters:
+        - deep: If True, include nested model parameters.
+
+        Returns:
+        - A dictionary of parameters.
+        """
+        params = {
+            'model_all': self.model_all,
+            'model_positive': self.model_positive,
+            'features': self.features,
+            'loss': self.loss,
+            'name': self.name
+        }
+        if deep:
+            params.update({'model_all_params': self.model_all.get_params(deep=True)})
+            params.update({'model_positive_params': self.model_positive.get_params(deep=True)})
+        return params
+
+    def set_params(self, **params):
+        """
+        Set the parameters of both models.
+
+        Parameters:
+        - params: Dictionary of parameters to set.
+
+        Returns:
+        - Self.
+        """
+        if 'model_all' in params:
+            self.model_all = params['model_all']
+        if 'model_positive' in params:
+            self.model_positive = params['model_positive']
+        if 'features' in params:
+            self.features = params['features']
+        if 'loss' in params:
+            self.loss = params['loss']
+        if 'name' in params:
+            self.name = params['name']
+        return self
+
+    def log(self, dir_output):
+        """
+        Save logs or visualizations related to the models.
+
+        Parameters:
+        - dir_output: Directory to save logs.
+
+        Returns:
+        - None
+        """
+        print(f"Logging model information to {dir_output}")
+        # Add any specific logging logic if needed
+
+        
+##########################################################################################
+#                                                                                        #
+#                                   Voting                                              #
+#                                                                                        #
+##########################################################################################
 
 class ModelVoting(RegressorMixin, ClassifierMixin):
     def __init__(self, models, features, loss='mse', name='ModelVoting', dir_log=Path('../'), non_fire_number='full', target_name='nbsinister'):
@@ -1118,7 +1574,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         self.non_fire_number = non_fire_number
         self.target_name = target_name
 
-    def fit(self, X, y, X_test, y_test, optimization='skip', grid_params_list=None, fit_params_list=None, cv_folds=10):
+    def fit(self, X, y, X_val, y_val, X_test, y_test, optimization='skip', grid_params_list=None, fit_params_list=None, cv_folds=10):
         """
         Train each model on the corresponding data.
 
@@ -1130,35 +1586,14 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         - fit_params_list: List of additional parameters for the fit function for each model.
         - cv_folds: Number of cross-validation folds.
         """
-        if self.non_fire_number != 'full':
-            if self.non_fire_number.find('binary') != -1:
-                vec = self.non_fire_number.split('-')
-                try:
-                    nb = int(vec[-1]) * len(y[y[self.target_name] > 0])
-                except:
-                    print(f'{self.non_fire_number} with undefined factor, set to 1 -> {len(y[y[self.target_name] > 0])}')
-                    nb = len(X[X[self.target_name] > 0])
-                
-                new_train_dataset = y[y[self.target_name] > 0]
-                non_fire_dataset = y[y[self.target_name] == 0]
-                nb = min(len(non_fire_dataset), nb)
-                non_fire_dataset = non_fire_dataset.sample(nb)
-                X = pd.concat((new_train_dataset, non_fire_dataset)).sort_values(by=['date', 'graph_id'])
-
-                filtered_indexes = X.index
-                y = y.loc[filtered_indexes]
-                X.reset_index(drop=True, inplace=True)
-
-                print(f'Train mask {X.shape}')
-                print(f'Train mask with weight > 0 {X[X["weight"] > 0].shape}')
 
         self.cv_results_ = []
         self.is_fitted_ = [True] * len(self.best_estimator_)
 
         self.features_per_model, self.best_estimator_, self.final_scores = \
-                    self.fit_by_features(X, y, X_test, y_test, self.best_estimator_, optimization, grid_params_list, fit_params_list, cv_folds)
+                    self.fit_by_features(X, y, X_val, y_val, X_test, y_test, self.best_estimator_, optimization, grid_params_list, fit_params_list, cv_folds)
 
-    def fit_by_features(self, X, y, X_test, y_test, models, optimization, grid_params_list, fit_params_list, cv_folds):
+    def fit_by_features(self, X, y, X_val, y_val, X_test, y_test, models, optimization, grid_params_list, fit_params_list, cv_folds):
         final_selected_features = []
         final_models = []
         final_scores = []
@@ -1209,7 +1644,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                     fit_params = self.update_fit_params(model.model_type, fit_params_list[model_index].copy(), selected_features_, selected_features_index)
 
                     # Entraîner le modèle avec les features sélectionnées
-                    current_model.fit(X=X_train_selected, y=y, optimization='skip', fit_params=fit_params)
+                    current_model.fit(X=X_train_selected, y=y, X_val=X_val, y_val=y_val, optimization='skip', fit_params=fit_params)
 
                     # Calculer le score avec la combinaison actuelle de features
                     current_score = current_model.score(X_test[selected_features_], y_test)
