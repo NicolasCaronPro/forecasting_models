@@ -149,6 +149,7 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
 
     def forward(self, y_pred, y_true, sample_weights=None):
         # Calculer la cross-entropy standard (non pondérée)
+        y_true = y_true.long()
         log_prob = F.log_softmax(y_pred, dim=-1)
         loss = F.nll_loss(log_prob, y_true, reduction='none')  # Pas de réduction pour pouvoir appliquer les sample weights
         
