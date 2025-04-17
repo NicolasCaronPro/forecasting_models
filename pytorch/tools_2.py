@@ -9,7 +9,9 @@ import numpy as np
 from forecasting_models.pytorch.models import *
 from forecasting_models.pytorch.models_2D import *
 from forecasting_models.pytorch.kan import *
-import copy
+
+torch.manual_seed(42)
+np.random.seed(42)
 
 def save_object(obj, filename: str, path: Path):
     """
@@ -173,8 +175,21 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     Returns:
     - Tuple (modèle, paramètres) où 'modèle' est le modèle spécifié et 'paramètres' est un dictionnaire des paramètres utilisés.
     """
-    scale = graph.scale
-    graph_or_node = graph.graph_method
+    if graph is not None:
+        scale = graph.scale
+        graph_or_node = graph.graph_method
+    else:
+        scale = 'departement'
+        graph_or_node = 'node'
+
+    shape2D = {10: (24, 24),
+           30 : (30, 30),
+          4  : (16,16, 2**0),
+          5  : (32,32, 2**0),
+          6  : (32,32, 2**0),
+          7  : (64,64, 2**0),
+          8 : (30,30),
+            'departement' : (32,32, 2**0)}
 
     model_params = {
         'model_name': model_name,
@@ -218,7 +233,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             act_func=default_params['act_func'],
             n_sequences=default_params['n_sequences'],
             task_type=default_params['task_type'],
-            out_channels=default_params['out_channels']
+            out_channels=default_params['out_channels'],
+            graph_or_node=graph_or_node,
         )
         model_params.update(default_params)
 
@@ -252,13 +268,13 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         )
         model_params.update(default_params)
 
-    elif model_name == 'DST-GCN':
+    elif model_name == 'DSTGCN':
         default_params = {
             'in_channels': in_dim,
-            'dilation_channels': [64, 128, 256, 512],
-            'dilations': [1, 1, 3],
+            'dilation_channels': [in_dim * 2, in_dim * 4],
+            'dilations': [1, 2, 3],
            'out_channels' : out_channels,
-            'end_channels': 64,
+            'end_channels': in_dim,
             'dropout': dropout,
             'act_func': act_func,
             'device': device,
@@ -287,9 +303,9 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'in_channels': in_dim,
             'hidden_channels': [in_dim, in_dim, in_dim],
            'out_channels' : out_channels,
-            'end_channels': 64,
+            'end_channels': in_dim,
             'n_sequences': k_days + 1,
-            'num_layers': 3,
+            'num_layers': num_lstm_layers,
             'device': device,
             'act_func': act_func,
             'task_type': task_type,
@@ -311,12 +327,71 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         )
         model_params.update(default_params)
 
-    elif model_name == 'DST-GAT':
+    elif model_name == 'GRU':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': [in_dim, in_dim, in_dim],
+           'out_channels' : out_channels,
+            'end_channels': in_dim,
+            'n_sequences': k_days + 1,
+            'num_layers': num_lstm_layers,
+            'device': device,
+            'act_func': act_func,
+            'task_type': task_type,
+            'dropout': dropout
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = GRU(
+            in_channels=default_params['in_channels'],
+            hidden_channels_list=default_params['hidden_channels'],
+            end_channels=default_params['end_channels'],
+            n_sequences=default_params['n_sequences'],
+            num_layers=default_params['num_layers'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            task_type=default_params['task_type'],
+            dropout=default_params['dropout'],
+            out_channels=default_params['out_channels']
+        )
+        model_params.update(default_params)
+        
+    elif model_name == 'DilatedCNN':
+        default_params = {
+            'in_channels': in_dim,
+            'channels': [in_dim, in_dim * 2, in_dim * 4],  # Exemple : tripler les canaux à chaque couche
+            'dilations': [1, 2, 4],  # Exemple de dilations croissantes
+            'end_channels': in_dim,
+            'n_sequences': k_days + 1,
+            'device': device,
+            'act_func': act_func,
+            'dropout': dropout,
+            'out_channels': out_channels,
+            'task_type': task_type,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = DilatedCNN(
+            in_channels=default_params['in_channels'],
+            channels=default_params['channels'],
+            dilations=default_params['dilations'],
+            end_channels=default_params['end_channels'],
+            n_sequences=default_params['n_sequences'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            dropout=default_params['dropout'],
+            out_channels=default_params['out_channels'],
+            task_type=default_params['task_type'],
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'DSTGAT':
         default_params = {
             'in_dim': in_dim,
-            'hidden_channels': [128, 256, 512],
+            'dilation_channels': [in_dim, in_dim, in_dim],
+            'dilations': [1, 2, 3],
             'out_channels' : out_channels,
-            'end_channels': 64,
+            'end_channels': in_dim,
             'heads': [6, 4, 2],
             'dropout': dropout,
             'device': device,
@@ -328,7 +403,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         model = DSTGAT(
             n_sequences=default_params['n_sequences'],
-            in_channels=default_params['in_channels'],
+            in_channels=default_params['in_dim'],
             end_channels=default_params['end_channels'],
             dilation_channels=default_params['dilation_channels'],
             dilations=default_params['dilations'],
@@ -342,12 +417,81 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         )
         model_params.update(default_params)
 
-    elif model_name == 'ST-GAT':
+    elif model_name == 'SepLSTMGNN':
+        default_params = {
+            'lstm_hidden': in_dim,
+            'gnn_hidden_list': [in_dim, in_dim * 2],
+            'out_channels': out_channels,
+            'end_channels': 64,
+            'act_func': act_func,
+            'dropout': dropout,
+            'device': device,
+            'task_type': task_type,
+            'n_sequences': k_days + 1,
+            'static_idx': custom_model_params['static_idx'],
+            'temporal_idx': custom_model_params['temporal_idx'],
+            'num_lstm_layers': num_lstm_layers
+            #'num_layers': num_lstm_layers,
+        }
+        
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        model = Sep_LSTM_GNN(
+            lstm_hidden=default_params['lstm_hidden'],
+            gnn_hidden_list=default_params['gnn_hidden_list'],
+            out_channels=default_params['out_channels'],
+            act_func=default_params['act_func'],
+            task_type=default_params['task_type'],
+            n_sequences=default_params['n_sequences'],
+            end_channels=default_params['end_channels'],
+            static_idx=default_params['static_idx'],
+            temporal_idx=default_params['temporal_idx'],
+            num_lstm_layers=default_params['num_lstm_layers']
+        )
+
+        model_params.update(default_params)
+
+    elif model_name == 'STGATLSTM':
         default_params = {
             'in_dim': in_dim,
-            'hidden_channels': [128, 256, 512],
+            'hidden_channels_list': [in_dim, in_dim, in_dim],
             'out_channels' : out_channels,
-            'end_channels': 64,
+            'end_channels': in_dim,
+            'heads': 6,
+            'dropout': dropout,
+            'device': device,
+            'act_func': act_func,
+            'n_sequences': k_days + 1,
+            'task_type': task_type,
+            'num_layers' : num_lstm_layers,
+            'concat':False
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = ST_GATLSTM(
+            n_sequences=default_params['n_sequences'],
+            in_channels=default_params['in_dim'],
+            end_channels=default_params['end_channels'],
+            hidden_channels_list=default_params['hidden_channels_list'],
+            dropout=default_params['dropout'],
+            act_func=default_params['act_func'],
+            device=default_params['device'],
+            task_type=default_params['task_type'],
+            heads=default_params['heads'],
+            graph_or_node = graph_or_node,
+            out_channels=default_params['out_channels'],
+            num_layers=default_params['num_layers'],
+            concat=default_params['concat']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'STGAT':
+        default_params = {
+            'in_dim': in_dim,
+            'hidden_channels': [in_dim, in_dim, in_dim],
+            'out_channels' : out_channels,
+            'end_channels': in_dim,
             'heads': [6, 4, 2],
             'dropout': dropout,
             'device': device,
@@ -371,28 +515,131 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         )
         model_params.update(default_params)
 
-    elif model_name == 'Zhang':
+    elif model_name == 'STGCN':
         default_params = {
             'in_channels': in_dim,
-            'hidden_channels': [64, 128],
-            'end_channels': out_channels,  # Use out_channels for end_channels
-            'num_layers': 2,
+            'hidden_channels': [in_dim, in_dim, in_dim],
+            'out_channels' : out_channels,
+            'end_channels': in_dim,
+            'dropout': dropout,
             'device': device,
             'act_func': act_func,
+            'n_sequences': k_days + 1,
             'task_type': task_type,
-            'dropout': dropout
+            'graph_or_node': graph_or_node
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
-        model = Zhang(
+        model = STGCN(
             in_channels=default_params['in_channels'],
             hidden_channels=default_params['hidden_channels'],
             end_channels=default_params['end_channels'],
-            num_layers=default_params['num_layers'],
+            dropout=default_params['dropout'],
             device=default_params['device'],
             act_func=default_params['act_func'],
+            n_sequences=default_params['n_sequences'],
             task_type=default_params['task_type'],
-            dropout=default_params['dropout']
+            out_channels=default_params['out_channels'],
+            graph_or_node=default_params['graph_or_node']
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'Zhang':
+        default_params = {
+                'in_channels': in_dim,
+                'conv_channels': [in_dim * 2, in_dim * 4, in_dim * 4],  # Correspond aux couches convolutives
+                'fc_channels': [in_dim * shape2D[scale][2] * shape2D[scale][0] * shape2D[scale][1], 128],  # Correspond aux couches entièrement connectées
+                'out_channels' : out_channels,
+                'dropout': 0.3,  # Taux de dropout
+                'binary': False,  # Type de tâche (classification binaire)
+                'device': device,  # Appareil utilisé (CPU ou GPU)
+                'n_sequences': k_days + 1,  # Nombre de séquences (peut être ignoré si non pertinent)
+                'return_hidden': False,  # Retourner ou non les représentations cachées
+                'task_type': task_type
+        }
+
+        # Mettre à jour avec des paramètres personnalisés si nécessaire
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        # Instanciation du modèle
+        model = Zhang(
+            in_channels=default_params['in_channels'],
+            conv_channels=default_params['conv_channels'],
+            fc_channels=default_params['fc_channels'],
+            dropout=default_params['dropout'],
+            device=default_params['device'],
+            n_sequences=default_params['n_sequences'],
+            return_hidden=default_params['return_hidden'],
+            out_channels=default_params['out_channels'],
+            task_type=default_params['task_type'],
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'ResNet':
+        default_params = {
+                'in_channels': in_dim,
+                'conv_channels': [in_dim * 2, in_dim * 4, in_dim * 4],  # Correspond aux couches convolutives
+                'fc_channels': [in_dim * 4 * 1 * 1, 128],  # Correspond aux couches entièrement connectées
+                'out_channels' : out_channels,
+                'dropout': 0.3,  # Taux de dropout
+                'binary': False,  # Type de tâche (classification binaire)
+                'device': device,  # Appareil utilisé (CPU ou GPU)
+                'n_sequences': k_days + 1,  # Nombre de séquences (peut être ignoré si non pertinent)
+                'return_hidden': False,  # Retourner ou non les représentations cachées
+                'avgpooling':1,
+                'task_type': task_type
+        }
+
+        # Mettre à jour avec des paramètres personnalisés si nécessaire
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        # Instanciation du modèle
+        model = ResNet(
+            in_channels=default_params['in_channels'],
+            conv_channels=default_params['conv_channels'],
+            fc_channels=default_params['fc_channels'],
+            avgpooling=default_params['avgpooling'],
+            dropout=default_params['dropout'],
+            device=default_params['device'],
+            n_sequences=default_params['n_sequences'],
+            return_hidden=default_params['return_hidden'],
+            out_channels=default_params['out_channels'],
+            task_type=default_params['task_type'],
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'ConvLSTM':
+        default_params = {
+            'in_channels': in_dim,                 # Nombre de canaux en entrée (par ex., 3 pour des images RGB)
+            'hidden_dim': [in_dim, in_dim * 2],     # Dimensions des états cachés pour chaque couche ConvLSTM
+            'end_channels': 128,              # Dimension finale des couches entièrement connectées
+            'size': (shape2D[scale][0], shape2D[scale][1]),                 # Taille spatiale des images d'entrée (Hauteur, Largeur)
+            'n_sequences': k_days + 1,                # Nombre de séquences temporelles
+            'device': device, # Utilisation de GPU ou CPU
+            'act_func': 'relu',      # Fonction d'activation utilisée dans les couches entièrement connectées
+            'dropout': 0.3,                   # Taux de dropout (ex. : 30%)
+            'out_channels': out_channels,                # Nombre de classes en sortie
+            'task_type': task_type,     # Type de tâche ('classification' ou 'régression')
+        }
+
+        # Mettre à jour avec des paramètres personnalisés si nécessaire
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        # Instanciation du modèle
+        model = CONVLSTM(
+            in_channels=default_params['in_channels'],
+            hidden_dim=default_params['hidden_dim'],
+            end_channels=default_params['end_channels'],
+            size=default_params['size'],
+            n_sequences=default_params['n_sequences'],
+            device=default_params['device'],
+            act_func=default_params['act_func'],
+            dropout=default_params['dropout'],
+            out_channels=default_params['out_channels'],
+            task_type=default_params['task_type']
         )
         model_params.update(default_params)
 
@@ -400,6 +647,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         default_params = {
             'in_channels': in_dim,
             'out_channels': out_channels,  # Use out_channels for the final layer
+            'conv_channels' : [in_dim * 2, in_dim * 4],
             'dropout': dropout,
             'device': device,
             'act_func': act_func,
@@ -408,15 +656,153 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         if custom_model_params is not None:
             default_params.update(custom_model_params)
         model = UNet(
-            in_channels=default_params['in_channels'],
+            n_channels=default_params['in_channels'],
             out_channels=default_params['out_channels'],
-            dropout=default_params['dropout'],
-            device=default_params['device'],
-            act_func=default_params['act_func'],
-            task_type=default_params['task_type']
+            conv_channels = default_params['conv_channels'],
+            #dropout=default_params['dropout'],
+            #device=default_params['device'],
+            #act_func=default_params['act_func'],
+            #task_type=default_params['task_type'],
         )
         model_params.update(default_params)
 
+
+    elif model_name == 'graphCast':
+        default_params = {
+            'input_dim_grid_nodes': in_dim,
+            'input_dim_mesh_nodes': 3,
+            'input_dim_edges':4,
+            'input_dim_edges':4,
+            'output_dim_grid_nodes' : out_channels,
+            'processor_layers' : 4,
+            'hidden_layers' : 1,
+            'hidden_dim' : 512,
+            'aggregation' : 'sum',
+            'norm_type' : 'LayerNorm',
+            'do_concat_trick' : False,
+            'has_time_dim' : True,
+            'graph_or_node':graph_or_node,
+            'n_sequences' : k_days + 1
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = GraphCast(
+            input_dim_grid_nodes = default_params['input_dim_grid_nodes'],
+            input_dim_mesh_nodes = default_params['input_dim_mesh_nodes'],
+            input_dim_edges = default_params['input_dim_edges'],
+            output_dim_grid_nodes = default_params['output_dim_grid_nodes'],
+            processor_layers = default_params['processor_layers'],
+            hidden_layers = default_params['hidden_layers'],
+            hidden_dim = default_params['hidden_dim'],
+            aggregation = default_params['aggregation'],
+            norm_type = default_params['norm_type'],
+            do_concat_trick = default_params['do_concat_trick'],
+            has_time_dim = default_params['has_time_dim'],
+            is_graph_or_node=default_params['graph_or_node'],
+            n_sequences=default_params['n_sequences'],
+           
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'MultiScaleGraph':
+        default_params = {
+            'input_channels' : in_dim,
+            'features_per_scale' : [in_dim * 2, in_dim * 4, in_dim * 6, in_dim * 8, in_dim * 10],
+            'num_output_scale' : custom_model_params['num_output_scale'],
+            'num_sequence' : k_days + 1, 
+            'out_channels' : 5, 
+            'graph_or_node' : graph_or_node,
+            'task_type':task_type,
+            'device':device,
+
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = MultiScaleGraph(
+            input_channels=default_params['input_channels'],
+            features_per_scale = default_params['features_per_scale'],
+            num_sequence=default_params['num_sequence'],
+            num_output_scale=default_params['num_output_scale'],
+            out_channels=default_params['out_channels'],
+            graph_or_node=default_params['graph_or_node'],
+            task_type=default_params['task_type'],
+            device=default_params['device'],
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'MultiScaleAttentionGraph':
+        default_params = {
+            'input_channels' : in_dim,
+            'features_per_scale' : [in_dim * 2, in_dim * 4, in_dim * 6, in_dim * 8, in_dim * 10],
+            'num_output_scale' : custom_model_params['num_output_scale'],
+            'num_sequence' : k_days + 1, 
+            'out_channels' : 5, 
+            'graph_or_node' : graph_or_node,
+            'task_type':task_type,
+            'device':device,
+
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        model = MultiScaleAttentionGraph(
+            input_channels=default_params['input_channels'],
+            features_per_scale = default_params['features_per_scale'],
+            num_sequence=default_params['num_sequence'],
+            num_output_scale=default_params['num_output_scale'],
+            out_channels=default_params['out_channels'],
+            graph_or_node=default_params['graph_or_node'],
+            task_type=default_params['task_type'],
+            device=default_params['device'],
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'NetGCN':
+        default_params = {
+          'in_dim':in_dim,
+          'hidden_dim' : in_dim * 2,
+          'hidden_dim_2' : in_dim * 4,
+          'end_channels' : 64,
+          'output_channels' : out_channels,
+            'graph_or_node': graph_or_node,
+            'n_sequences' : k_days + 1,
+            'device' : device
+          
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = NetGCN(
+            in_dim=default_params['in_dim'],
+            hidden_dim=default_params['hidden_dim'],
+            hidden_dim_2=default_params['hidden_dim_2'],
+            end_channels=default_params['end_channels'],
+            output_channels=default_params['output_channels'],
+            graph_or_node=default_params['graph_or_node'],
+            n_sequences=default_params['n_sequences'],
+            device=default_params['device'],
+            task_type=task_type
+        )
+        model_params.update(default_params)
+
+    elif model_name == 'NetMLP':
+        default_params = {
+          'in_dim':in_dim,
+          'hidden_dim' : 64,
+          'output_channels' : out_channels,          
+            'n_sequences' : k_days + 1,
+            'device' : device
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = NetMLP(
+            in_dim=default_params['in_dim'],
+            hidden_dim=default_params['hidden_dim'],
+            output_channels=default_params['output_channels'],
+            n_sequences=default_params['n_sequences'],
+            device=default_params['device'],
+            task_type=task_type
+        )
+        model_params.update(default_params)
     else:
         raise ValueError(f"Modèle '{model_name}' non reconnu.")
     
