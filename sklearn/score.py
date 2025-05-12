@@ -5,7 +5,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import sympy as sp
 from xgboost import DMatrix
-from sklearn.metrics import log_loss
+from sklearn.metrics import log_loss, precision_score, recall_score, f1_score, balanced_accuracy_score, confusion_matrix
+import seaborn as sns
+#from forecasting_models.sklearn.dico_departements import *
 
 def calculate_ks(data, score_col, event_col, thresholds, dir_output):
     """
@@ -1229,3 +1231,846 @@ def egpd_gradient_hessian(y_true, y_pred, alpha=1.0, xi=0.5):
     hessian = -alpha * xi ** 2 * (term1 * y_true ** 2 - term2 * (y_true + 1) ** 2) / sigma ** 2
     
     return grad, hessian
+
+def calculate_signal_scores(y_pred, y_true, y_fire, graph_id, saison):
+    """
+    Calcule les scores (aire commune, union, sous-prédiction, sur-prédiction) entre deux signaux.
+
+    Args:
+        t (np.array): Tableau de temps ou indices (axe x).
+        y_pred (np.array): Signal prédiction (rouge).
+        y_true (np.array): Signal vérité terrain (bleu).
+
+    Returns:
+        dict: Dictionnaire contenant les scores calculés.
+    """
+
+    y_true_fire = np.copy(y_true)
+
+    ###################################### I. For the all signal ####################################
+    # Calcul des différentes aires
+    intersection = np.trapz(np.minimum(y_pred, y_true))  # Aire commune
+    union = np.trapz(np.maximum(y_pred, y_true))         # Aire d'union
+
+    over_prediction_zeros = np.trapz(np.maximum(0, y_pred[y_true == 0]))
+    under_prediction_zeros = np.trapz(np.maximum(0, y_true[y_pred == 0]))
+
+    mask_fire = (y_pred > 0) | (y_true_fire > 0)
+    intersection_fire = np.trapz(np.minimum(y_pred[mask_fire], y_true_fire[mask_fire]))
+    union_fire = np.trapz(np.maximum(y_pred[mask_fire], y_true_fire[mask_fire]))
+    iou_wildfire_or_pred = intersection_fire / union_fire if union_fire > 0 else np.nan
+
+    mask_fire = (y_pred > 0) & (y_true_fire > 0)
+    intersection_fire = np.trapz(np.minimum(y_pred[mask_fire], y_true_fire[mask_fire]))
+    union_fire = np.trapz(np.maximum(y_pred[mask_fire], y_true_fire[mask_fire]))
+    iou_wildfire_and_pred = intersection_fire / union_fire if union_fire > 0 else np.nan
+
+    # Limitation des signaux à un maximum de 1
+    y_pred_clipped = np.clip(y_pred, 0, 1)  # Limiter y_pred à 1
+    y_true_fire_clipped = np.clip(y_true_fire, 0, 1)  # Limiter y_true_fire à 1
+    print(np.unique(y_true_fire_clipped))
+    print(np.unique(y_pred_clipped))
+    iou_wildfire_detected = recall_score(y_true_fire_clipped, y_pred_clipped)
+
+    y_pred_clipped_ytrue = np.copy(y_pred)
+    y_pred_clipped_ytrue[(y_pred > 0) & (y_true > 0)] = np.minimum(y_true[(y_pred > 0) & (y_true > 0)], y_pred[(y_pred > 0) & (y_true > 0)])
+    intersection_clipped = np.trapz(np.minimum(y_pred_clipped_ytrue, y_true))  # Aire commune
+    union_clipped = np.trapz(np.maximum(y_pred_clipped_ytrue, y_true))         # Aire d'union
+    iou_no_overestimation = intersection_clipped / union_clipped if union_clipped > 0 else np.nan
+
+    dice_coefficient = 2 * intersection / (union + intersection) if union + intersection > 0 else np.nan
+
+    # Enregistrement dans un dictionnaire
+    scores = {
+        "iou": intersection / union if union > 0 else np.nan,  # To avoid division by zero
+        "iou_wildfire_or_pred": iou_wildfire_or_pred,
+        "iou_wildfire_and_pred": iou_wildfire_and_pred,
+        "iou_wildfire_detected": iou_wildfire_detected,
+        "iou_no_overestimation" : iou_no_overestimation,
+        
+        "over_bad_prediction" : over_prediction_zeros / union if union > 0 else np.nan,
+        "under_bad_prediction" : under_prediction_zeros / union if union > 0 else np.nan,
+        "bad_prediction" : (over_prediction_zeros + under_prediction_zeros) / union if union > 0 else np.nan,
+        
+        # Ajout du Dice coefficient
+        "dice_coefficient": dice_coefficient
+    }
+
+    ###################################### I. For each graph_id ####################################
+    unique_graph_ids = np.unique(graph_id)
+
+    # Trier les graph_id en fonction de la somme de event_col
+    graph_sums = {g_id: y_true[graph_id == g_id].sum() for g_id in unique_graph_ids}
+    sorted_graph_ids = sorted(graph_sums, key=graph_sums.get, reverse=True)
+
+    # Parcourir les graph_id triés
+    for i, g_id in enumerate(sorted_graph_ids):
+        mask = graph_id == g_id
+
+        y_pred_graph = y_pred[mask]
+        y_true_graph = y_true[mask]
+        y_true_fire_graph = y_true_fire[mask]
+
+        mask_fire_graph = (y_pred_graph > 0) | (y_true_fire_graph > 0)
+        intersection_fire_graph = np.trapz(np.minimum(y_pred_graph[mask_fire_graph], y_true_fire_graph[mask_fire_graph]))
+        union_fire_graph = np.trapz(np.maximum(y_pred_graph[mask_fire_graph], y_true_fire_graph[mask_fire_graph]))
+        iou_wildfire_or_pred_graph = intersection_fire_graph / union_fire_graph if union_fire_graph > 0 else np.nan
+
+        mask_fire_graph = (y_pred_graph > 0) & (y_true_fire_graph > 0)
+        intersection_fire_graph = np.trapz(np.minimum(y_pred_graph[mask_fire_graph], y_true_fire_graph[mask_fire_graph]))
+        union_fire_graph = np.trapz(np.maximum(y_pred_graph[mask_fire_graph], y_true_fire_graph[mask_fire_graph]))
+        iou_wildfire_and_pred_graph = intersection_fire_graph / union_fire_graph if union_fire_graph > 0 else np.nan
+
+        # Limitation des signaux à un maximum de 1
+        y_pred_clipped = np.clip(y_pred[mask], 0, 1)  # Limiter y_pred à 1
+        y_true_fire_clipped = np.clip(y_true_fire[mask], 0, 1)  # Limiter y_true_fire à 1
+
+        iou_wildfire_detected = recall_score(y_true_fire_clipped, y_pred_clipped, zero_division=np.nan)
+
+        y_pred_clipped_ytrue = np.copy(y_pred_graph)
+        y_pred_clipped_ytrue[(y_pred_graph > 0) & (y_true_graph > 0)] = np.minimum(y_true_graph[(y_pred_graph > 0) & (y_true_graph > 0)], y_pred_graph[(y_pred_graph > 0) & (y_true_graph > 0)])
+        intersection_clipped = np.trapz(np.minimum(y_pred_clipped_ytrue, y_true_graph))  # Aire commune
+        union_clipped = np.trapz(np.maximum(y_pred_clipped_ytrue, y_true_graph))         # Aire d'union
+        iou_no_overestimation = intersection_clipped / union_clipped if union_clipped > 0 else np.nan
+
+        intersection_graph = np.trapz(np.minimum(y_pred_graph, y_true_graph))  # Aire commune
+        union_graph = np.trapz(np.maximum(y_pred_graph, y_true_graph))         # Aire d'union
+
+        under_prediction_graph = np.trapz(np.maximum(0, y_true_graph - y_pred_graph))
+        over_prediction_graph = np.trapz(np.maximum(0, y_pred_graph - y_true_graph))
+
+        over_prediction_zeros_graph = np.trapz(np.maximum(0, y_pred_graph[y_true_graph == 0]))
+        under_prediction_zeros_graph = np.trapz(np.maximum(0, y_true_graph[y_pred_graph == 0]))
+
+        under_prediction_fire_graph = np.trapz(np.maximum(0, y_true_graph[y_true_graph > 0] - y_pred_graph[y_true_graph > 0]))
+        over_prediction_fire_graph = np.trapz(np.maximum(0, y_pred_graph[y_true_graph > 0] - y_true_graph[y_true_graph > 0]))
+
+        only_true_value = np.trapz(y_true_graph)  # Aire sous la courbe des valeurs réelles
+        only_pred_value = np.trapz(y_pred_graph)  # Aire sous la courbe des prédictions
+
+        # Stocker les scores avec des clés utilisant uniquement l'indice
+        graph_scores = {
+            f"iou_wildfire_or_pred_{i}": iou_wildfire_or_pred_graph,
+            f"iou_wildfire_and_pred_{i}": iou_wildfire_and_pred_graph,
+            f"iou_no_overestimation_{i}": iou_no_overestimation,
+            f"iou_{i}": intersection_graph / union_graph if union_graph > 0 else np.nan,  # Pour éviter la division par zéro
+            f"iou_wildfire_detected_{i}": iou_wildfire_detected,
+
+            # Ajout du Dice coefficient pour chaque itération
+            f"dice_coefficient_{i}": 2 * intersection_graph / (union_graph + intersection_graph) if (union_graph + intersection_graph) > 0 else np.nan,
+
+            f"over_bad_prediction_local_{i}": over_prediction_zeros_graph / union_graph if union_graph > 0 else np.nan,
+            f"under_bad_prediction_local_{i}": under_prediction_zeros_graph / union_graph if union_graph > 0 else np.nan,
+            f"bad_prediction_local_{i}": (over_prediction_zeros_graph + under_prediction_zeros_graph) / union_graph if union_graph > 0 else np.nan,
+
+            f"over_bad_prediction_global_{i}": over_prediction_zeros_graph / union if union_graph > 0 else np.nan,
+            f"under_bad_prediction_global_{i}": under_prediction_zeros_graph / union if union_graph > 0 else np.nan,
+            f"bad_prediction_global_{i}": (over_prediction_zeros_graph + under_prediction_zeros_graph) / union if union_graph > 0 else np.nan,
+        }
+
+        scores.update(graph_scores)
+
+    unique_seasons = np.unique(saison)
+
+    # Trier les saisons en fonction de la somme de y_true
+    season_sums = {s: y_true[saison == s].sum() for s in unique_seasons}
+    sorted_seasons = sorted(season_sums, key=season_sums.get, reverse=True)
+
+    # Parcourir les saisons triées
+    for i, s in enumerate(sorted_seasons):
+        mask = saison == s
+
+        y_pred_season = y_pred[mask]
+        y_true_season = y_true[mask]
+        y_true_fire_season = y_true_fire[mask]
+
+        mask_fire_season = (y_pred_season > 0) | (y_true_fire_season > 0)
+        intersection_fire_season = np.trapz(np.minimum(y_pred_season[mask_fire_season], y_true_fire_season[mask_fire_season]))
+        union_fire_season = np.trapz(np.maximum(y_pred_season[mask_fire_season], y_true_fire_season[mask_fire_season]))
+        iou_wildfire_or_pred_season = intersection_fire_season / union_fire_season if union_fire_season > 0 else np.nan
+
+        mask_fire_season = (y_pred_season > 0) & (y_true_fire_season > 0)
+        intersection_fire_season = np.trapz(np.minimum(y_pred_season[mask_fire_season], y_true_fire_season[mask_fire_season]))
+        union_fire_season = np.trapz(np.maximum(y_pred_season[mask_fire_season], y_true_fire_season[mask_fire_season]))
+        iou_wildfire_and_pred_season = intersection_fire_season / union_fire_season if union_fire_season > 0 else np.nan
+
+        # Limitation des signaux à un maximum de 1
+        y_pred_clipped = np.clip(y_pred[mask], 0, 1)  # Limiter y_pred à 1
+        y_true_fire_clipped = np.clip(y_true_fire[mask], 0, 1)  # Limiter y_true_fire à 1
+
+        iou_wildfire_detected = recall_score(y_true_fire_clipped, y_pred_clipped, zero_division=np.nan)
+
+        y_pred_clipped_ytrue = np.copy(y_pred_season)
+        y_pred_clipped_ytrue[(y_pred_season > 0) & (y_true_season > 0)] = np.minimum(y_true_season[(y_pred_season > 0) & (y_true_season > 0)], y_pred_season[(y_pred_season > 0) & (y_true_season > 0)])
+        intersection_clipped = np.trapz(np.minimum(y_pred_clipped_ytrue, y_true_season))  # Aire commune
+        union_clipped = np.trapz(np.maximum(y_pred_clipped_ytrue, y_true_season))         # Aire d'union
+        iou_no_overestimation = intersection_clipped / union_clipped if union_clipped > 0 else np.nan
+
+        intersection_season = np.trapz(np.minimum(y_pred_season, y_true_season))  # Aire commune
+        union_season = np.trapz(np.maximum(y_pred_season, y_true_season))         # Aire d'union
+
+        over_prediction_zeros_season = np.trapz(np.maximum(0, y_pred_season[y_true_season == 0]))
+        under_prediction_zeros_season = np.trapz(np.maximum(0, y_true_season[y_pred_season == 0]))
+
+        # Stocker les scores avec des clés utilisant uniquement l'indice
+        season_scores = {
+            f"iou_wildfire_or_pred_{s}": iou_wildfire_or_pred_season,
+            f"iou_wildfire_and_pred_{s}": iou_wildfire_and_pred_season,
+            f"iou_no_overestimation_{s}": iou_no_overestimation,
+            f"iou_{s}": intersection_season / union_season if union_season > 0 else np.nan,  # Pour éviter la division par zéro
+            f"iou_wildfire_detected_{s}": iou_wildfire_detected,
+
+            f"over_bad_prediction_local_{s}": over_prediction_zeros_season / union_season if union_season > 0 else np.nan,
+            f"under_bad_prediction_local_{s}": under_prediction_zeros_season / union_season if union_season > 0 else np.nan,
+            f"bad_prediction_local_{s}": (over_prediction_zeros_season + under_prediction_zeros_season) / union_season if union_season > 0 else np.nan,
+            
+            f"dice_coefficient_{s}": 2 * intersection_season / (union_season + intersection_season) if (union_season + intersection_season) > 0 else np.nan,
+
+            f"over_bad_prediction_global_{s}": over_prediction_zeros_season / union if union_season > 0 else np.nan,
+            f"under_bad_prediction_global_{s}": under_prediction_zeros_season / union if union_season > 0 else np.nan,
+            f"bad_prediction_global_{s}": (over_prediction_zeros_season + under_prediction_zeros_season) / union if union_season > 0 else np.nan,
+        }
+        scores.update(season_scores)
+
+    ###################################### For each graph_id in each season ####################################
+    # Get unique seasons
+    unique_seasons = np.unique(saison)
+
+    # Iterate over seasons
+    for season in unique_seasons:
+        # Mask for the current season
+        season_mask = saison == season
+
+        # Iterate over graphs in this season
+        for i, g_id in enumerate(sorted_graph_ids):
+            # Mask for the current graph in the current season
+            mask = (graph_id == g_id) & season_mask
+
+            y_pred_graph_season = y_pred[mask]
+            y_true_graph_season = y_true[mask]
+            y_true_fire_graph_season = y_true_fire[mask]
+
+            mask_fire_graph_season = (y_pred_graph_season > 0) | (y_true_fire_graph_season > 0)
+            intersection_fire_graph_season = np.trapz(np.minimum(y_pred_graph_season[mask_fire_graph_season], y_true_fire_graph_season[mask_fire_graph_season]))
+            union_fire_graph_season = np.trapz(np.maximum(y_pred_graph_season[mask_fire_graph_season], y_true_fire_graph_season[mask_fire_graph_season]))
+            iou_wildfire_or_pred_graph_season = intersection_fire_graph_season / union_fire_graph_season if union_fire_graph_season > 0 else np.nan
+
+            mask_fire_graph_season = (y_pred_graph_season > 0) & (y_true_fire_graph_season > 0)
+            intersection_fire_graph_season = np.trapz(np.minimum(y_pred_graph_season[mask_fire_graph_season], y_true_fire_graph_season[mask_fire_graph_season]))
+            union_fire_graph_season = np.trapz(np.maximum(y_pred_graph_season[mask_fire_graph_season], y_true_fire_graph_season[mask_fire_graph_season]))
+            iou_wildfire_and_pred_graph_season = intersection_fire_graph_season / union_fire_graph_season if union_fire_graph_season > 0 else np.nan
+
+            # Limitation des signaux à un maximum de 1
+            y_pred_clipped = np.clip(y_pred[mask], 0, 1)  # Limiter y_pred à 1
+            y_true_fire_clipped = np.clip(y_true_fire[mask], 0, 1)  # Limiter y_true_fire à 1
+
+            iou_wildfire_detected = recall_score(y_true_fire_clipped, y_pred_clipped, zero_division=np.nan)
+
+            y_pred_clipped_ytrue = np.copy(y_pred_graph_season)
+            y_pred_clipped_ytrue[(y_pred_graph_season > 0) & (y_true_graph_season > 0)] = np.minimum(y_true_graph_season[(y_pred_graph_season > 0) & (y_true_graph_season > 0)], y_pred_graph_season[(y_pred_graph_season > 0) & (y_true_graph_season > 0)])
+            intersection_clipped = np.trapz(np.minimum(y_pred_clipped_ytrue, y_true_graph_season))  # Aire commune
+            union_clipped = np.trapz(np.maximum(y_pred_clipped_ytrue, y_true_graph_season))         # Aire d'union
+            iou_no_overestimation = intersection_clipped / union_clipped if union_clipped > 0 else np.nan
+
+            intersection_graph_season = np.trapz(np.minimum(y_pred_graph_season, y_true_graph_season))  # Common area
+            union_graph_season = np.trapz(np.maximum(y_pred_graph_season, y_true_graph_season))         # Union area
+
+            over_prediction_zeros_graph_season = np.trapz(np.maximum(0, y_pred_graph_season[y_true_graph_season == 0]))
+            under_prediction_zeros_graph_season = np.trapz(np.maximum(0, y_true_graph_season[y_pred_graph_season == 0]))
+
+            # Compute scores for the graph in this season
+            graph_season_scores = {
+                f"iou_wildfire_or_pred_graph_{i}_season_{season}": iou_wildfire_or_pred_graph_season,
+                f"iou_wildfire_and_pred_graph_{i}_season_{season}": iou_wildfire_and_pred_graph_season,
+                f"iou_no_overestimation_graph_{i}_season_{season}": iou_no_overestimation,
+                f"iou_graph_{i}_season_{season}": intersection_graph_season / union_graph_season if union_graph_season > 0 else np.nan,
+                f"iou_wildfire_detected_graph_{i}_season_{season}": iou_wildfire_detected,
+                
+                f"dice_coefficient_graph_{i}_season_{season}": 2 * intersection_graph_season / (union_graph_season + intersection_graph_season) if (union_graph_season + intersection_graph_season) > 0 else np.nan,
+
+                f"over_bad_prediction_local_graph_{i}_season_{season}": over_prediction_zeros_graph_season / union_graph_season if union_graph_season > 0 else np.nan,
+                f"under_bad_prediction_local_graph_{i}_season_{season}": under_prediction_zeros_graph_season / union_graph_season if union_graph_season > 0 else np.nan,
+                f"bad_prediction_local_graph_{i}_season_{season}": (over_prediction_zeros_graph_season + under_prediction_zeros_graph_season) / union_graph_season if union_graph_season > 0 else np.nan,
+            }
+
+            # Update global scores dictionary
+            scores.update(graph_season_scores)
+
+    # Parcourir les valeurs uniques de y_true
+    for unique_value in np.unique(y_true[y_true > 0]):
+        # Créer un masque pour sélectionner les éléments correspondant à la valeur unique
+        mask = (y_true == unique_value) | (y_pred == unique_value)
+
+        y_pred_sample = y_pred[mask]
+        y_true_sample = y_true[mask]
+        y_true_fire_sample = y_true_fire[mask]
+
+        if y_pred_sample.shape[0] == 0:
+            continue
+
+        if y_pred_sample.shape[0] == 1:
+            y_pred_sample = np.concatenate((y_pred_sample, y_pred_sample))
+            y_true_sample = np.concatenate((y_true_sample, y_true_sample))
+            y_true_fire_sample = np.concatenate((y_true_fire_sample, y_true_fire_sample))
+
+        mask_fire_sample = (y_pred_sample > 0) | (y_true_fire_sample > 0)
+        intersection_fire_sample = np.trapz(np.minimum(y_pred_sample[mask_fire_sample], y_true_fire_sample[mask_fire_sample]))
+        union_fire_sample = np.trapz(np.maximum(y_pred_sample[mask_fire_sample], y_true_fire_sample[mask_fire_sample]))
+        iou_wildfire_or_pred_sample = intersection_fire_sample / union_fire_sample if union_fire_sample > 0 else np.nan
+
+        mask_fire_sample = (y_pred_sample > 0) & (y_true_fire_sample > 0)
+        intersection_fire_sample = np.trapz(np.minimum(y_pred_sample[mask_fire_sample], y_true_fire_sample[mask_fire_sample]))
+        union_fire_sample = np.trapz(np.maximum(y_pred_sample[mask_fire_sample], y_true_fire_sample[mask_fire_sample]))
+        iou_wildfire_and_pred_sample = intersection_fire_sample / union_fire_sample if union_fire_sample > 0 else np.nan
+
+        # Limitation des signaux à un maximum de 1
+        y_pred_clipped = np.clip(y_pred_sample, 0, 1)  # Limiter y_pred à 1
+        y_true_fire_clipped = np.clip(y_true_fire_sample, 0, 1)  # Limiter y_true_fire à 1
+
+        # Calcul de la métrique IOU
+        #iou_wildfire_detected = intersection_fire_detected / union_fire_detected if union_fire_detected > 0 else np.nan
+        iou_wildfire_detected = recall_score(y_true_fire_clipped, y_pred_clipped, zero_division=np.nan)
+
+        y_pred_clipped_ytrue = np.copy(y_pred_sample)
+        y_pred_clipped_ytrue[(y_pred_sample > 0) & (y_true_sample > 0)] = np.minimum(y_true_sample[(y_pred_sample > 0) & (y_true_sample > 0)], y_pred_sample[(y_pred_sample > 0) & (y_true_sample > 0)])
+        intersection_clipped = np.trapz(np.minimum(y_pred_clipped_ytrue, y_true_sample))  # Aire commune
+        union_clipped = np.trapz(np.maximum(y_pred_clipped_ytrue, y_true_sample))         # Aire d'union
+        iou_no_overestimation = intersection_clipped / union_clipped if union_clipped > 0 else np.nan
+
+        # Calculer les aires
+        intersection = np.trapz(np.minimum(y_pred_sample, y_true_sample))  # Aire commune
+        union = np.trapz(np.maximum(y_pred_sample, y_true_sample))        # Aire d'union
+
+        under_prediction = np.trapz(np.maximum(0, y_true_sample - y_pred_sample))
+        over_prediction = np.trapz(np.maximum(0, y_pred_sample - y_true_sample))
+
+        over_prediction_zeros = np.trapz(np.maximum(0, y_pred_sample[y_true_sample == 0]))
+        under_prediction_zeros = np.trapz(np.maximum(0, y_true_sample[y_pred_sample == 0]))
+
+        under_prediction_fire = np.trapz(
+            np.maximum(0, y_true_sample[y_true_sample > 0] - y_pred_sample[y_true_sample > 0])
+        )
+        over_prediction_fire = np.trapz(
+            np.maximum(0, y_pred_sample[y_true_sample > 0] - y_true_sample[y_true_sample > 0])
+        )
+
+        # Enregistrement dans un dictionnaire
+        scores_elt = {            
+            f"iou_elt_{unique_value}": intersection / union if union > 0 else np.nan,  # Éviter la division par zéro
+            f"iou_wildfire_detected_elt_{unique_value}": iou_wildfire_detected,
+            f"iou_wildfire_or_pred_elt_{unique_value}": iou_wildfire_or_pred_sample,
+            f"iou_wildfire_and_pred_elt_{unique_value}": iou_wildfire_and_pred_sample,
+            f"iou_no_overestimation_elt_{unique_value}": iou_no_overestimation,
+
+            f"dice_coefficient_elt_{unique_value}": 2 * intersection / (union + intersection) if (union + intersection) > 0 else np.nan,
+
+            f"over_bad_prediction_elt_{unique_value}": over_prediction_zeros / union if union > 0 else np.nan,
+            f"under_bad_prediction_elt_{unique_value}": under_prediction_zeros / union if union > 0 else np.nan,
+            f"bad_prediction_elt_{unique_value}": (over_prediction_zeros + under_prediction_zeros) / union if union > 0 else np.nan,
+        }
+
+        # Ajouter les scores pour cette valeur unique à la collection globale
+        scores.update(scores_elt)
+
+    return scores
+
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+from sklearn.metrics import f1_score
+
+def plot_result(dff, metric, dataset, x_col, y_true_col='target', y_pred_col='y_pred', top='all', show_area=False, show_metric=False):
+    """
+    Affiche un graphique par Scale, avec une colonne spécifiée pour l'axe des X triée selon 'nbsinister'.
+    Chaque courbe représente un modèle et affiche l'IoU entre l'aire sous la courbe et l'aire maximale dans la légende.
+
+    :param dff: DataFrame contenant les colonnes ['Department', 'Scale', 'Model', 'nbsinister', metric, 'target', 'y_pred']
+    :param metric: Nom de la colonne contenant la métrique à afficher
+    :param dataset: Nom du dataset à filtrer
+    :param x_col: Colonne à utiliser pour les axes des X
+    :param y_true_col: Colonne représentant les cibles réelles
+    :param y_pred_col: Colonne représentant les prédictions
+    :param top: Nombre de valeurs à afficher (ou 'all' pour tout afficher)
+    :param show_area: Booléen pour afficher l'aire sous la courbe
+    :param show_metric: Booléen pour afficher la métrique de chaque modèle
+    """
+    # Filtrer le DataFrame par dataset
+    df = dff[dff['Dataset'] == dataset].copy(deep=True)
+    
+    # Trier les valeurs par 'nbsinister' décroissant
+    df_sorted = df.sort_values(by='nbsinister', ascending=False)
+    
+    # Sélectionner les "top" valeurs si nécessaire
+    if top != 'all':
+        top = int(top)
+        top_values = df_sorted[x_col].unique()[:top]
+        df_sorted = df_sorted[df_sorted[x_col].isin(top_values)]
+    
+    # Assurer que tous les modèles ont les mêmes valeurs en X
+    all_values = df_sorted[x_col].unique()
+    num_x_values = len(all_values)
+    
+    # Déterminer l'aire maximale en fonction de 'nbsinister'
+    max_area = np.trapz((df_sorted.groupby(x_col)['nbsinister'].sum() > 0).astype(int), dx=1)
+    
+    # Récupérer les échelles uniques
+    scales = df_sorted['Scale'].unique()
+    num_scales = len(scales)
+    
+    # Définir la disposition de la grille
+    if num_scales > 3:
+        cols = 3
+        rows = math.ceil(num_scales / cols)
+    else:
+        cols = 1
+        rows = num_scales
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 7 * rows), squeeze=False)
+    axes = axes.flatten()
+    
+    for i, scale in enumerate(scales):
+        ax = axes[i]
+        df_scale = df_sorted[df_sorted['Scale'] == scale].copy()
+        df_scale.drop_duplicates(subset=[x_col, 'Model'], inplace=True)
+        
+        # Créer un pivot pour assurer l'alignement des valeurs sur X
+        pivot_df = df_scale.pivot(index=x_col, columns='Model', values=metric)
+        pivot_df = pivot_df.reindex(all_values)  # Respecter l'ordre des valeurs
+        
+        # Calcul de l'IoU et du F1-score
+        IoU_values = {}
+        F1_values = {}
+        
+        for model in pivot_df.columns:
+            y_values = pivot_df[model].dropna()
+            if len(y_values) == 0:
+                continue
+            x_values = np.arange(len(y_values))
+            
+            # Calcul de l'IoU en utilisant la fonction iou_score
+            y_true = df_scale[df_scale['Model'] == model][y_true_col]
+            y_pred = df_scale[df_scale['Model'] == model][y_pred_col]
+            IoU = iou_score(y_true, y_pred)
+            IoU_values[model] = IoU
+            
+            # Calcul du F1-score
+            f1 = f1_score(y_true, y_pred)
+            F1_values[model] = f1
+            
+            # Tracer les courbes par modèle
+            model_area = np.trapz(y_values, x_values)
+            IoU = model_area / max_area if max_area > 0 else 0
+
+            ax.plot(x_values, y_values, label=f'{model} (IoU={IoU:.3f})')
+        
+        # Affichage de la métrique F1
+        if show_metric:
+            for model in F1_values:
+                ax.text(0.95, 0.95, f'{model}: F1={F1_values[model]:.3f}', transform=ax.transAxes, ha='right', va='top', fontsize=10)
+
+        # Affichage de l'aire sous la courbe
+        if show_area:
+            ax.fill_between(x_values, y_values, alpha=0.3)
+        
+        ax.set_title(f'Scale: {scale}')
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(metric)
+        ax.legend(loc='best')
+    
+    plt.tight_layout()
+    plt.show()            
+        
+def evaluate_pipeline(dir_train, df_test, pred, y, target_name, name,
+                      pred_min=None, pred_max=None):
+    
+    metrics = {}
+
+    dir_predictor = dir_train / 'influenceClustering'
+
+    print(f'WARNING : WE CONSIDER PRED[0] = PRED[1]')
+
+    ############################################## Get daily metrics #######################################################
+    if name.find('classification') != -1:
+        col_class = target_name
+        col_class_1 = 'nbsinister-kmeans-5-Class-Dept'
+        col_class_2 = 'nbsinister-kmeans-5-Class-Dept-cubic-Specialized'
+        col_nbsinister = 'nbsinister'
+
+    elif name.find('binary') != -1:
+        col_class = target_name
+        col_class_1 = 'nbsinister-binary'
+        col_class_2 = 'nbsinister-kmeans-5-Class-Dept-cubic-Specialized'
+        col_nbsinister = 'nbsinister'
+        
+    elif name.find('regression') != -1:
+        col_nbsinister = target_name
+        col_class = 'nbsinister-MinMax-5-Class-Dept'
+    
+    metrics = {}
+
+    print(f'###################### Analysis {target_name} #########################')
+ 
+    #plot_and_save_roc_curve(df_test['nbsinister'].values > 0, pred[:, 0], dir_output / name, target_name, departement_scale)
+    #plot_and_save_pr_curve(df_test['nbsinister'].values > 0, pred[:, 0], dir_output / name, target_name, departement_scale)
+    
+    #calibrated_curve(pred[:, 0], y, dir_output / name, 'calibration')
+    #calibrated_curve(pred[:, 1], y, dir_output / name, 'class_calibration')
+
+    #shapiro_wilk(pred[:,0], y[:,-1], dir_output / name, f'shapiro_wilk_{scale}')
+    
+    df_test['saison'] = df_test['date'].apply(get_saison)
+
+    res_temp = pd.DataFrame(index=np.arange(0, pred.shape[0]))
+    res_temp['graph_id'] = y[:, graph_id_index]
+    res_temp['date'] = y[:, date_index]
+    res_temp[f'prediction_{target_name}'] = pred[:, 0]
+
+    df_test = df_test.set_index(['graph_id', 'date']).join(res_temp.set_index(['graph_id', 'date'])[f'prediction_{target_name}'], on=['graph_id', 'date']).reset_index()
+    
+    res = df_test.copy(deep=True)
+
+    ####################################### Sinister Evaluation ########################################
+
+    print(f'###################### Analysis {col_nbsinister} #########################')
+
+    y_pred = pred[:, 0]
+    if pred_max is not None:
+        y_pred_max = pred_max[:, 0]
+        y_pred_min = pred_min[:, 0]
+
+    y_true = df_test[col_nbsinister].values
+    y_pred = df_test[f'prediction_{target_name}'].values
+    
+    #apr = round(average_precision_score(y_true > 0, y_pred > 0), 2)
+
+    """ks, _ = calculate_ks_continous(df_test, 'prediction', col_nbsinister, dir_output / name)
+
+    r2 = r2_score(y_true, y_pred)
+
+    metrics[f'nbsinister'] = df_test['nbsinister'].sum()
+    print(f'Number of sinister = {df_test["nbsinister"].sum()}')
+
+    metrics[f'nb'] = df_test[col_nbsinister].sum()
+    print(f'Number of {col_nbsinister} = {df_test[col_nbsinister].sum()}')
+
+    metrics[f'r2'] = r2
+    print(f'r2 = {r2}')
+
+    metrics[f'KS'] = ks
+    print(f'KS = {ks}')"""
+
+    #metrics[f'apr'] = apr
+    #print(f'apr = {apr}')
+
+    f1 = round(f1_score(y_true > 0, y_pred > 0), 3)
+    metrics[f'f1'] = f1
+    print(f'f1 = {f1}')
+
+    prec = round(precision_score(y_true > 0, y_pred > 0), 3)
+    metrics[f'prec'] = prec
+    print(f'prec = {prec}')
+
+    rec = round(recall_score(y_true > 0, y_pred > 0), 3)
+    metrics[f'rec'] = rec
+    print(f'rec = {rec}')
+
+    bca = round(balanced_accuracy_score(y_true, y_pred), 3)
+    metrics[f'bca'] = bca
+    print(f'bca = {bca}')
+
+    # Calcul des scores pour les signaux
+    #iou_dict = calculate_signal_scores(y_pred, y_true, df_test['nbsinister'].values, df_test['graph_id'].values, df_test['saison'].values)
+
+    """# Sauvegarder toutes les métriques calculées dans le dictionnaire metrics
+    for key, value in iou_dict.items():
+        metric_key = f'{key}_sinister'  # Ajouter un suffixe basé sur col_for_dict
+        metrics[metric_key] = value  # Ajouter au dictionnaire des métriques
+        print(f'{metric_key} = {value}')  # Afficher la métrique enregistrée"""
+
+    y_true_temp = np.ones((y_pred.shape[0], y.shape[1]))
+    y_true_temp[:, graph_id_index] = df_test['graph_id']
+    y_true_temp[:, id_index] = df_test['graph_id']
+    y_true_temp[:, departement_index] = df_test['departement']
+    y_true_temp[:, date_index] = df_test['date']
+    y_true_temp[:, -1] = y_true
+    y_true_temp[:, -2] = df_test['nbsinister']
+    y_true_temp[:, -3] = df_test[col_nbsinister]
+
+    #realVspredict(y_pred, y_true_temp, -1,
+    #    dir_output / name, col_nbsinister,
+    #    pred_min, pred_max)
+    
+    print(f'###################### Analysis {col_class} #########################')
+
+    #_, iv = calculate_woe_iv(res, f'prediction_{target_name}', 'nbsinister')
+    #metrics['IV'] = round(iv, 2)  # Ajouter au dictionnaire des métriques
+    #print(f'IV = {iv}')
+
+    """y_pred = pred[:, 1]
+    silhouette_score = round(silhouette_score_with_plot(y_pred.reshape(-1,1), df_test['nbsinister'].values.reshape(-1,1), 'all', dir_output / name), 2)
+    metrics['SS'] = silhouette_score
+    print(f'SS = {silhouette_score}')
+
+    mask_fire_pred = (y_pred > 0) | (df_test['nbsinister'].values > 0)
+
+    silhouette_score_no_zeros = round(silhouette_score_with_plot(y_pred[mask_fire_pred].reshape(-1,1), df_test['nbsinister'][mask_fire_pred].values.reshape(-1,1), 'fire_or_pred', dir_output / name), 2)
+    metrics['SS_no_zeros'] = silhouette_score_no_zeros
+    print(f'SS_no_zeros = {silhouette_score_no_zeros}')
+
+    silhouette_score = round(silhouette_score_with_plot(df_test[col_class].values.reshape(-1,1), df_test['nbsinister'].values.reshape(-1,1), 'all_gt', dir_output / name), 2)
+    metrics['SS_gt'] = silhouette_score
+    print(f'SS_gt = {silhouette_score}')
+
+    mask_fire_pred = (df_test[col_class].values > 0) | (df_test['nbsinister'].values > 0)
+
+    silhouette_score_no_zeros = round(silhouette_score_with_plot(df_test[col_class][mask_fire_pred].values.reshape(-1,1), df_test['nbsinister'][mask_fire_pred].values.reshape(-1,1), 'fire_or_pred_gt', dir_output / name), 2)
+    metrics['SS_no_zeros_gt'] = silhouette_score_no_zeros
+    print(f'SS_no_zero_gts = {silhouette_score_no_zeros}')"""
+
+    y_true = df_test[target_name].values
+
+    if pred_max is not None:
+        y_pred_max = pred_max[:, 1]
+        y_pred_min = pred_min[:, 1]
+    else:
+        y_pred_max = None
+        y_pred_min = None
+
+    all_class = np.unique(np.concatenate((df_test[col_class].values, y_pred)))
+    all_class = all_class[~np.isnan(all_class)]
+    all_class_label = [int(c) for c in all_class]
+
+    #plot_custom_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, dir_output=dir_output / name, figsize=(15,8), normalize='true', filename=f'{scale}_confusion_matrix')
+    #plot_custom_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, dir_output=dir_output / name, figsize=(15,8), normalize='all', filename=f'{scale}_confusion_matrix')
+    #plot_custom_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, dir_output=dir_output / name, figsize=(15,8), normalize='pred', filename=f'{scale}_confusion_matrix')
+    #plot_custom_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, dir_output=dir_output / name, figsize=(15,8), normalize=None, filename=f'{scale}_confusion_matrix')
+    #if name.find('classification') != -1:
+
+        #plot_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, name, dir_output / name, normalize='true')
+        #plot_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, name, dir_output / name, normalize='all')
+        #plot_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, name, dir_output / name, normalize='pred')
+        #plot_confusion_matrix(df_test[col_class].values, y_pred, all_class_label, name, dir_output / name, normalize=None)
+
+        #accuracy = round(accuracy_score(y_true, y_pred), 2)
+        #metrics[f'accuracy'] = accuracy
+        #print(f'accuracy = {accuracy}')
+    
+    y_pred = np.round(y_pred).astype(int)
+    
+    mask_unknowed_sample = (df_test[col_class_1] == 0) & (df_test[col_class_2] > 0)
+    metrics['unknow_sample_proportion'] = y_true[mask_unknowed_sample].shape[0] / y_true.shape[0]
+
+    iou_dict = calculate_signal_scores(y_pred, y_true, df_test['nbsinister'].values, df_test['graph_id'].values, df_test['saison'].values)
+
+    # Sauvegarder toutes les métriques calculées dans le dictionnaire metrics
+    for key, value in iou_dict.items():
+        metric_key = f'{key}_class_hard' # Ajouter un suffixe basé sur col_for_dict
+        metrics[metric_key] = round(value, 3)  # Ajouter au dictionnaire des métriques
+        if key == 'iou' or key == 'bad_prediction' or key == 'iou_wildfire_detected':
+            print(f'{metric_key} = {round(value, 3)}')  # Afficher la métrique enregistrée
+
+    iou_dict = calculate_signal_scores(y_pred, df_test[col_class_2].values, df_test['nbsinister'].values, df_test['graph_id'].values, df_test['saison'].values)
+    for key, value in iou_dict.items():
+        metric_key = f'{key}_risk'  # Ajouter un suffixe basé sur col_for_dict
+        metrics[metric_key] = round(value, 3)  # Ajouter au dictionnaire des métriques        
+        if key == 'iou' or key == 'bad_prediction' or key == 'iou_wildfire_detected':
+            print(f'{metric_key} = {round(value, 3)}')  # Afficher la métrique enregistrée
+
+    y_pred_ez = np.copy(y_pred)
+    y_pred_ez = np.round(y_pred_ez).astype(int)
+    y_pred_ez[mask_unknowed_sample] = 0
+    iou_dict = calculate_signal_scores(y_pred_ez, y_true, df_test['nbsinister'].values, df_test['graph_id'].values, df_test['saison'].values)
+
+    # Sauvegarder toutes les métriques calculées dans le dictionnaire metrics
+    for key, value in iou_dict.items():
+        metric_key = f'{key}_class_ez'  # Ajouter un suffixe basé sur col_for_dict
+        metrics[metric_key] = round(value, 3)  # Ajouter au dictionnaire des métriques        
+        if key == 'iou' or key == 'bad_prediction' or key == 'iou_wildfire_detected':
+            print(f'{metric_key} = {round(value, 3)}')  # Afficher la métrique enregistrée
+
+    for cl in np.unique(y_true):
+        print(f'{cl} -> {y_true[y_true == cl].shape[0]}, {y_pred[y_pred == cl].shape[0]}')
+        metrics[f'{cl}_true'] = y_true[y_true == y_true].shape[0]
+        metrics[f'{cl}_pred'] = y_pred[y_pred == y_pred].shape[0]
+
+    """y_true_temp = np.ones((y_pred.shape[0], y.shape[1]))
+    y_true_temp[:, graph_id_index] = df_test['graph_id']
+    y_true_temp[:, id_index] = df_test['graph_id']
+    y_true_temp[:, departement_index] = df_test['departement']
+    y_true_temp[:, date_index] = df_test['date']
+    y_true_temp[:, -1] = y_true
+    y_true_temp[:, -2] = df_test['nbsinister']
+    y_true_temp[:, -3] = df_test[col_class]
+
+    realVspredict(y_pred, y_true_temp, -1,
+        dir_output / name, f'{col_class}_{scale}_hard',
+        y_pred_min, y_pred_max)
+
+    res[f'prediction_{col_class}'] = y_pred
+
+    iou_vis(y_pred, y_true_temp, -1, dir_output / name, f'{col_class}_{scale}_hard')
+
+    y_true_temp = np.ones((y_pred.shape[0], y.shape[1]))
+    y_true_temp[:, graph_id_index] = df_test['graph_id']
+    y_true_temp[:, id_index] = df_test['graph_id']
+    y_true_temp[:, departement_index] = df_test['departement']
+    y_true_temp[:, date_index] = df_test['date']
+    y_true_temp[:, -1] = y_true
+    y_true_temp[:, -2] = df_test['nbsinister']
+    y_true_temp[:, -3] = df_test[col_class]
+
+    iou_vis(y_pred_ez, y_true_temp, -1, dir_output / name, f'{col_class}_{scale}_ez')
+
+    y_true_temp = np.ones((y_pred.shape[0], y.shape[1]))
+    y_true_temp[:, graph_id_index] = df_test['graph_id']
+    y_true_temp[:, id_index] = df_test['graph_id']
+    y_true_temp[:, departement_index] = df_test['departement']
+    y_true_temp[:, date_index] = df_test['date']
+    y_true_temp[:, -1] = df_test[col_class_2]
+    y_true_temp[:, -2] = df_test['nbsinister']
+    y_true_temp[:, -3] = df_test[col_class]
+
+    iou_vis(y_pred, y_true_temp, -1, dir_output / name, f'{col_class}_{scale}_risk')
+
+    metrics['nbsinister'] = res['nbsinister'].sum()"""
+
+    return metrics, res
+
+def plot_confusion_matrix(y_test, y_pred, labels, model_name, dir_output, figsize=(10, 8), title='Confusion Matrix', filename='confusion_matrix', normalize=None):
+    """
+    Plots a confusion matrix with annotations and proper formatting.
+
+    Parameters:
+    y_test (array-like): True labels.
+    y_pred (array-like): Predicted labels.
+    labels (list): List of label names for the confusion matrix.
+    model_name (str): Name of the model for the plot title.
+
+    Returns:
+    None
+    """
+    # Compute confusion matrix with normalization
+    conf_matrix = confusion_matrix(y_test, y_pred, normalize=normalize)
+
+    # Convert confusion matrix to DataFrame for better visualization
+    cm_df = pd.DataFrame(conf_matrix, index=labels, columns=labels)
+
+    # Plotting the heatmap
+    fig = plt.figure(figsize=figsize)
+    sns.heatmap(cm_df, annot=True, cmap="Blues", fmt=".3f", xticklabels=labels, yticklabels=labels)
+    
+    # Adding titles and labels
+    plt.title("Confusion Matrix for: " + model_name)
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    
+    # Ensure the output directory exists
+    Path(dir_output).mkdir(parents=True, exist_ok=True)
+
+    # Save the image to the specified directory
+    output_path = Path(dir_output) / f'{filename}_{normalize}.png'
+    plt.savefig(output_path)
+    
+    # If mlflow is enabled, log the figure
+    #if MLFLOW:
+    #    mlflow.log_figure(fig, str(output_path))
+        
+    plt.close(fig)
+
+def calculate_ic95(data):
+    """
+    Function to calculate the 95% confidence interval (IC95) for a given dataset.
+    
+    Parameters:
+    data (array-like): Array of data points (e.g., model performance scores).
+
+    Returns:
+    tuple: lower bound and upper bound of the 95% confidence interval.
+    """
+    # Convert data to numpy array for convenience
+    data = np.array(data)
+    
+    # Calculate the mean and standard error
+    mean = np.mean(data)
+    std_err = np.std(data, ddof=1) / np.sqrt(len(data))
+    
+    # Calculate the 95% confidence interval using 1.96 for a 95% confidence level
+    ci_lower = mean - 1.96 * std_err
+    ci_upper = mean + 1.96 * std_err
+    
+    return ci_lower, ci_upper
+
+def calculate_area_under_curve(y_values):
+    """
+    Calcule l'aire sous la courbe pour une série de valeurs données (méthode de trapèze).
+
+    :param y_values: Valeurs sur l'axe des ordonnées pour calculer l'aire sous la courbe.
+    :return: Aire sous la courbe.
+    """
+    return np.trapz(y_values, dx=1)
+
+def evaluate_metrics(df, y_true_col='target', y_pred=None):
+    """
+    Calcule l'IoU et le F1-score sur chaque département, puis calcule l'aire sous la courbe normalisée (aire / aire maximale).
+    
+    :param dff: DataFrame contenant les colonnes ['Department', 'Scale', 'nbsinister', 'target']
+    :param dataset: Nom du dataset à filtrer
+    :param y_true_col: Colonne représentant les cibles réelles
+    :param y_pred: Liste ou tableau des prédictions
+    :param metric: Choix de la métrique ('IoU' ou 'F1')
+    :param top: Nombre de départements à afficher (ou 'all' pour tout afficher)
+    :return: Dictionnaire contenant l'aire normalisée pour chaque modèle.
+    """
+    
+    # Trier les valeurs par 'nbsinister' décroissant
+    #df_sorted = df.sort_values(by='nbsinister', ascending=False)
+    df_sorted = df
+
+    y_true = df[y_true_col]
+    
+    iou = iou_score(y_true, y_pred)
+    f1 = f1_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
+    prec = precision_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
+    rec = recall_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
+
+    under = under_prediction_score(y_true, y_pred)
+    over = over_prediction_score(y_true, y_pred)
+
+    # Initialiser un dictionnaire pour les résultats
+    results = {'iou' : iou, 'f1' : f1, 'under' : under, 'over' : over, 'prec' : prec, 'recall' : rec}
+
+    # Calculer l'IoU et F1 pour chaque département
+    IoU_scores = []
+    F1_scores = []
+    
+    for i, department in enumerate(df_sorted['departement'].unique()):
+        # Extraire les valeurs pour chaque département
+        y_true = df_sorted[df_sorted['departement'] == department][y_true_col].values
+        if np.all(y_true == 0):
+            continue
+        y_pred_department = y_pred[df_sorted['departement'] == department]  # Récupérer les prédictions associées au département
+        
+        # Calcul des scores IoU et F1
+        IoU = iou_score(y_true, y_pred_department)
+        F1 = f1_score(y_true > 0, y_pred_department > 0)
+        
+        IoU_scores.append(IoU)
+        F1_scores.append(F1)
+        
+    df_sorted_test_area = df_sorted[df_sorted[y_true_col] > 0]
+    # Calcul de l'aire maximale possible (cas parfait où toutes les prédictions sont correctes)
+    max_area = np.trapz(np.ones(len(df_sorted_test_area['departement'].unique())), dx=1)
+    
+    # Calcul de l'aire sous la courbe pour l'IoU et le F1
+    IoU_area = calculate_area_under_curve(IoU_scores)
+    F1_area = calculate_area_under_curve(F1_scores)
+    
+    # Normalisation par l'aire maximale
+    normalized_IoU = IoU_area / max_area if max_area > 0 else 0
+    normalized_F1 = F1_area / max_area if max_area > 0 else 0
+    
+    # Stocker les résultats dans le dictionnaire
+    results['normalized_iou'] = normalized_IoU
+    results['normalized_f1'] = normalized_F1
+    
+    return results

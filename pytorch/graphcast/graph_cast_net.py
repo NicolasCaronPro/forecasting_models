@@ -67,6 +67,7 @@ class GraphCastNet(torch.nn.Module):
         # icosahedron processor
         if processor_layers <= 2:
             raise ValueError("Expected at least 3 processor layers")
+        
         self.processor_encoder = GraphCastMeshProcessor(
             aggregation=aggregation,
             processor_layers=1,
@@ -78,6 +79,7 @@ class GraphCastNet(torch.nn.Module):
             norm_type=norm_type,
             has_time_dim=has_time_dim,
         )
+
         self.processor = GraphCastMeshProcessor(
             aggregation=aggregation,
             processor_layers=processor_layers - 2,
@@ -89,6 +91,7 @@ class GraphCastNet(torch.nn.Module):
             norm_type=norm_type,
             has_time_dim=has_time_dim,
         )
+
         self.processor_decoder = GraphCastMeshProcessor(
             aggregation=aggregation,
             processor_layers=1,
@@ -180,7 +183,7 @@ class GraphCastNet(torch.nn.Module):
             mesh_nfeat_encoded,
             mesh_graph,
         )
-
+        
         # process multimesh graph
         mesh_efeat_processed, mesh_nfeat_processed = self.processor(
             mesh_efeat_processed,

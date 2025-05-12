@@ -60,12 +60,12 @@ class MLPLayer(torch.nn.Module):
         return self.mlp(x)
     
 class NetMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, output_channels, n_sequences, device, task_type):
+    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type):
         super(NetMLP, self).__init__()
         self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim, device)
-        self.layer3 = MLPLayer(hidden_dim, hidden_dim * 2, device)
-        self.layer4 = MLPLayer(hidden_dim * 2, hidden_dim * 4, device)
-        self.layer2 = MLPLayer(hidden_dim * 4, output_channels, device)
+        self.layer3 = MLPLayer(hidden_dim, hidden_dim, device)
+        self.layer4 = MLPLayer(hidden_dim, end_channels, device)
+        self.layer2 = MLPLayer(end_channels, output_channels, device)
         self.task_type = task_type
         self.n_sequences = n_sequences
         self.soft = torch.nn.Softmax(dim=1)
@@ -867,7 +867,6 @@ class ST_GATLSTM(torch.nn.Module):
         else:
             x = torch.mean(x, dim=1)
 
-        
         # Apply pooling if working with graph-level predictions
         if self.is_graph_or_node:
             x_mean = global_mean_pool(xg, graphs_ids)
@@ -885,6 +884,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
         self,
         lstm_hidden=64,
         gnn_hidden_list=[32, 64],
+        lin_channels=64,
         end_channels=64,
         out_channels=1,
         n_sequences=1,
@@ -893,7 +893,9 @@ class Sep_LSTM_GNN(torch.nn.Module):
         act_func='relu',
         static_idx=None,
         temporal_idx=None,
-        num_lstm_layers=1
+        num_lstm_layers=1,
+        use_layernorm=False,
+        dropout=0.03,
     ):
         super(Sep_LSTM_GNN, self).__init__()
 
@@ -921,16 +923,33 @@ class Sep_LSTM_GNN(torch.nn.Module):
 
         self.gnn_output_dim = gnn_hidden_list[-1]
 
-        # Output layer
-        self.output_layer = OutputLayer(
-            in_channels=lstm_hidden + self.gnn_output_dim,
-            end_channels=end_channels,
-            n_steps=n_sequences,
-            device=device,
-            act_func=act_func,
-            task_type=task_type,
-            out_channels=out_channels
-        )
+        # Dropout after GRU
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # Output linear layer
+        print(f'Spatial {in_feats}')
+        print(f'Temporal {input_size}')
+        print(f'Sum {lstm_hidden} + {self.gnn_output_dim}')
+        self.linear1 = torch.nn.Linear(lstm_hidden + self.gnn_output_dim, lin_channels).to(device)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+
+        # Optional normalization layer
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(lstm_hidden + self.gnn_output_dim).to(device)
+        else:
+            self.norm = torch.nn.BatchNorm1d(lstm_hidden + self.gnn_output_dim).to(device)
+            
+        # Activation function
+        self.act_func = getattr(torch.nn, act_func)()
+
+        # Task-dependent activation
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)
 
     def separate_variables(self, x):
         # x: (B, X, T)
@@ -943,7 +962,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
         x_temporal = x[:, temporal_idx, :]            # (B, D, T)
 
         return x_static, x_temporal, static_idx, temporal_idx
-
+    
     def forward(self, x, graph):
         # x: (B, X, T)
         B, X, T = x.shape
@@ -963,7 +982,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
             x_lstm_input = x_temporal.permute(0, 2, 1)  # (B, T, D)
             lstm_out, _ = self.lstm(x_lstm_input)       # (B, T, H)
             lstm_out = lstm_out[:, -1, :]               # (B, H)
-
+            
         # --- GCN ---
         S = x_static.shape[1]
         if S == 0:
@@ -976,140 +995,447 @@ class Sep_LSTM_GNN(torch.nn.Module):
             gnn_out = h               # (B, out_dim)
 
         # --- Fusion ---
-        fused = torch.cat([lstm_out, gnn_out], dim=1)  # (B, total)
-        output = self.output_layer(fused)
+        x = torch.cat([lstm_out, gnn_out], dim=1)  # (B, total)
+        x = self.dropout(x)
+        x = self.norm(x)
+        
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
+        return output
+
+class Sep_GRU_GNN(torch.nn.Module):
+    def __init__(
+        self,
+        gru_hidden=64,
+        gnn_hidden_list=[32, 64],
+        lin_channels=64,
+        end_channels=64,
+        out_channels=1,
+        n_sequences=1,
+        task_type='classification',
+        device=None,
+        act_func='relu',
+        static_idx=None,
+        temporal_idx=None,
+        num_lstm_layers=1,
+        use_layernorm=False,
+        dropout=0.03,
+    ):
+        super(Sep_GRU_GNN, self).__init__()
+
+        self.gru_hidden = gru_hidden
+        self.static_idx = static_idx
+        self.temporal_idx = temporal_idx
+        self.is_graph_or_node = False
+        self.device = device
+
+        # LSTM
+        input_size = len(temporal_idx)
+        self.gru = torch.nn.GRU(
+            input_size=input_size,
+            hidden_size=gru_hidden,
+            num_layers=num_lstm_layers,
+            dropout=dropout if num_lstm_layers > 1 else 0.0,
+            batch_first=True
+        ).to(device)
+
+        # Multi-layer GCN
+        self.gnn_layers = torch.nn.ModuleList()
+        in_feats = len(static_idx)
+        for out_feats in gnn_hidden_list:
+            self.gnn_layers.append(GraphConv(in_feats, out_feats))
+            in_feats = out_feats  # pour la prochaine couche
+
+        self.gnn_output_dim = gnn_hidden_list[-1]
+
+        # Dropout after GRU
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+        
+        # Output linear layer
+        print(f'Spatial {in_feats}')
+        print(f'Temporal {input_size}')
+        print(f'Sum {gru_hidden} + {self.gnn_output_dim}')
+        self.linear1 = torch.nn.Linear(gru_hidden + self.gnn_output_dim, lin_channels).to(device)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+
+        # Optional normalization layer
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(gru_hidden + self.gnn_output_dim).to(device)
+        else:
+            self.norm = torch.nn.BatchNorm1d(gru_hidden + self.gnn_output_dim).to(device)
+            
+        # Activation function
+        self.act_func = getattr(torch.nn, act_func)()
+
+        # Task-dependent activation
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)
+
+    def separate_variables(self, x):
+        # x: (B, X, T)
+        is_static = (x == x[:, :, 0:1]).all(dim=2)
+        static_mask = is_static.all(dim=0)
+        static_idx = torch.where(static_mask)[0]
+        temporal_idx = torch.where(~static_mask)[0]
+
+        x_static = x[:, static_idx, 0].unsqueeze(-1)  # (B, S, 1)
+        x_temporal = x[:, temporal_idx, :]            # (B, D, T)
+
+        return x_static, x_temporal, static_idx, temporal_idx
+    
+    def forward(self, x, graph):
+        # x: (B, X, T)
+        B, X, T = x.shape
+
+        # Séparation statique/temporelle
+        if self.static_idx is None:
+            x_static, x_temporal, static_idx, temporal_idx = self.separate_variables(x)
+        else:
+            x_static = x[:, self.static_idx, 0].unsqueeze(-1)  # (B, S, 1)
+            x_temporal = x[:, self.temporal_idx, :]            # (B, D, T)
+
+        # --- LSTM ---
+        D = x_temporal.shape[1]
+        if D == 0:
+            lstm_out = torch.zeros(B, self.lstm_hidden, device=x.device)
+        else:
+            x_lstm_input = x_temporal.permute(0, 2, 1)  # (B, T, D)
+            lstm_out, _ = self.gru(x_lstm_input)       # (B, T, H)
+            lstm_out = lstm_out[:, -1, :]               # (B, H)
+            
+        # --- GCN ---
+        S = x_static.shape[1]
+        if S == 0:
+            gnn_out = torch.zeros(B, self.gnn_output_dim, device=x.device)
+        else:
+            h = x_static.squeeze(-1)  # (B, S)
+            for layer in self.gnn_layers:
+                h = layer(graph, h)
+                h = torch.relu(h)
+            gnn_out = h               # (B, out_dim)
+
+        # --- Fusion ---
+        x = torch.cat([lstm_out, gnn_out], dim=1)  # (B, total)
+        x = self.dropout(x)
+        x = self.norm(x)
+        
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
+        return output
+
+class LSTM_GNN_Feedback(torch.nn.Module):
+    def __init__(
+        self,
+        lstm_hidden=64,
+        gnn_hidden=64,
+        end_channels=64,
+        out_channels=1,
+        n_sequences=1,
+        act_func='relu',
+        task_type='classification',
+        device=None,
+        static_idx=None,
+        num_lstm_layers=1,
+        temporal_idx=None,
+        use_layernorm=False,
+        dropout=0.03,
+    ):
+        super(LSTM_GNN_Feedback, self).__init__()
+        
+        self.lstm_hidden = lstm_hidden
+        self.device = device
+        self.static_idx = static_idx
+        self.temporal_idx = temporal_idx
+        self.task_type = task_type
+
+        # LSTMCell: traite séquentiellement les pas de temps
+        self.lstm_cell = torch.nn.LSTMCell(
+            input_size=len(temporal_idx) + gnn_hidden,
+            hidden_size=lstm_hidden,
+        )
+
+        # Encodeur des données statiques
+        self.static_encoder = torch.nn.Linear(len(static_idx), gnn_hidden)
+
+        # GNN appliqué aux états LSTM
+        self.gnn = GraphConv(lstm_hidden, gnn_hidden)
+        
+        # Dropout after process
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # Output linear layer
+        self.output_layer = torch.nn.Linear(gnn_hidden + lstm_hidden, out_channels).to(device)
+
+        # Activation function
+        self.act_func = self.act_func = getattr(torch.nn, act_func)()
+
+        # Optional normalization layer
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(gnn_hidden + lstm_hidden).to(device)
+        else:
+            self.norm = torch.nn.BatchNorm1d(gnn_hidden + lstm_hidden).to(device)
+
+        # Task-dependent activation
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)
+
+    def separate_variables(self, x):
+        is_static = (x == x[:, :, 0:1]).all(dim=2)
+        static_mask = is_static.all(dim=0)
+        static_idx = torch.where(static_mask)[0]
+        temporal_idx = torch.where(~static_mask)[0]
+
+        x_static = x[:, static_idx, 0].unsqueeze(-1)  # (B, S, 1)
+        x_temporal = x[:, temporal_idx, :]            # (B, D, T)
+
+        return x_static, x_temporal, static_idx, temporal_idx
+
+    def forward(self, x, edge_index):
+        # x: (B, X, T)
+        B, X, T = x.shape
+
+        # Séparation des variables
+        if self.static_idx is None:
+            x_static, x_temporal, static_idx, temporal_idx = self.separate_variables(x)
+        else:
+            x_static = x[:, self.static_idx, 0].unsqueeze(-1)  # (B, S, 1)
+            x_temporal = x[:, self.temporal_idx, :]            # (B, D, T)
+
+        D_temporal = x_temporal.shape[1]
+        D_static = x_static.shape[1]
+
+        # --- Encodage statique ---
+        static_input = x_static.squeeze(-1)  # (B, S)
+        static_embed = self.static_encoder(static_input)  # (B, gnn_hidden)
+
+        # --- Init LSTM ---
+        h_t = torch.zeros(B, static_embed.size(1), device=x.device)
+        c_t = torch.zeros_like(h_t)
+
+        # --- Boucle temporelle avec feedback GNN ---
+        for t in range(T):
+            x_t = x_temporal[:, :, t]  # (B, D_temporal)
+
+            gnn_out = self.gnn(h_t, edge_index)  # (B, gnn_hidden)
+
+            lstm_input = torch.cat([x_t, gnn_out], dim=1)
+            h_t, c_t = self.lstm_cell(lstm_input, (h_t, c_t))
+
+        # --- Fusion finale et prédiction ---
+        fused = torch.cat([h_t, gnn_out], dim=1)
+        x = self.dropout(fused)
+        x = self.norm(x)
+
+       # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
         return output
 
 class GRU(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels_list, end_channels, n_sequences, device, act_func, task_type, dropout, 
-                 num_layers, return_hidden=False, out_channels=None):
+    def __init__(self, in_channels, gru_size, hidden_channels, end_channels, n_sequences, device,
+                 act_func='ReLU', task_type='regression', dropout=0.0, num_layers=1,
+                 return_hidden=False, out_channels=None, use_layernorm=False):
         super(GRU, self).__init__()
 
-        self.return_hidden = return_hidden
         self.device = device
-        self.hidden_channels_list = hidden_channels_list
-        self.num_layers = len(hidden_channels_list)
-
-        # GRU layers with different hidden channels per layer
-        self.gru_layers = torch.nn.ModuleList()
-        for i in range(self.num_layers - 1):
-            self.gru_layers.append(torch.nn.GRU(input_size=hidden_channels_list[i],
-                                                hidden_size=hidden_channels_list[i+1],
-                                                num_layers=1,
-                                                dropout=dropout,
-                                                batch_first=True).to(device))
-
-        # Output layer (same as in LSTM)
-        self.output = OutputLayer(in_channels=hidden_channels_list[-1], end_channels=end_channels,
-                                  n_steps=n_sequences, device=device, act_func=act_func,
-                                  task_type=task_type, out_channels=out_channels)
-
-        self.batch_norm = torch.nn.BatchNorm1d(hidden_channels_list[-1]).to(device)
-
+        self.return_hidden = return_hidden
+        self.num_layers = num_layers
+        self.hidden_size = hidden_channels
+        self.task_type = task_type
         self.is_graph_or_node = False
+        self.gru_size = gru_size
+        
+        # GRU layer
+        self.gru = torch.nn.GRU(
+            input_size=in_channels,
+            hidden_size=gru_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True
+        ).to(device)
+
+        # Optional normalization layer
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(gru_size).to(device)
+        else:
+            self.norm = torch.nn.BatchNorm1d(gru_size).to(device)
+
+        # Dropout after GRU
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # Output linear layer
+        self.linear1 = torch.nn.Linear(gru_size, hidden_channels).to(device)
+        self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+
+        # Activation function
+        self.act_func = getattr(torch.nn, act_func)()
+
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
     def forward(self, X, edge_index=None, graphs=None):
+        """
+        Parameters:
+            X: Tensor of shape (batch_size, features, sequence_length)
+
+        Returns:
+            output: Final prediction tensor
+            (optionally) hidden_repr: The hidden state before final layer
+        """
         batch_size = X.size(0)
 
-        # Rearrange dimensions for GRU input
-        x = X.permute(0, 2, 1)  # Shape: (batch_size, sequence_length, features)
+        # Reshape to (batch, seq_len, features)
+        x = X.permute(0, 2, 1)
 
         # Initial hidden state
-        h0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
+        h0 = torch.zeros(self.num_layers, batch_size, self.gru_size).to(self.device)
 
-        # Pass through each GRU layer
-        for i in range(self.num_layers - 1):
-            x, h0 = self.gru_layers[i](x, h0)
+        # GRU forward
+        x, _ = self.gru(x, h0)
 
-        x = x.permute(0, 2, 1)  # Back to (batch_size, features, sequence_length)
+        # Last time step output
+        x = x[:, -1, :]  # shape: (batch_size, hidden_size)
 
-        # Batch Normalization
-        x = self.batch_norm(x)
+        # Normalization and dropout
+        x = self.norm(x)
+        x = self.dropout(x)
 
-        # Take last time step output
-        x = x[:, :, -1]
-
-        # Output
-        output = self.output(x)
-
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
         if self.return_hidden:
             return output, x
         else:
             return output
-    
+
 class LSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels_list, end_channels, n_sequences, device, act_func, task_type, dropout, 
-                 num_layers, return_hidden=False, out_channels=None):
+    def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
+                 act_func='ReLU', task_type='regression', dropout=0.03, num_layers=1,
+                 return_hidden=False, out_channels=None, use_layernorm=False):
         super(LSTM, self).__init__()
 
-        self.return_hidden = return_hidden
         self.device = device
-        self.hidden_channels_list = hidden_channels_list
-        self.num_layers = len(hidden_channels_list)
+        self.return_hidden = return_hidden
+        self.num_layers = num_layers
+        self.hidden_size = hidden_channels
+        self.task_type = task_type
+        self.is_graph_or_node = False
+        self.lstm_size = lstm_size
 
-        # LSTM layers with different hidden channels per layer
-        self.lstm_layers = torch.nn.ModuleList()
-        for i in range(self.num_layers - 1):
-            self.lstm_layers.append(torch.nn.LSTM(input_size=hidden_channels_list[i],
-                                                   hidden_size=hidden_channels_list[i+1],
-                                                   num_layers=1,
-                                                   dropout=dropout,
-                                                   batch_first=True).to(device))
+        # LSTM block
+        self.lstm = torch.nn.LSTM(
+            input_size=in_channels,
+            hidden_size=self.lstm_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True
+        ).to(device)
 
-        """self.lstm = torch.nn.LSTM(input_size=hidden_channels_list,
-                                                   hidden_size=hidden_channels_list,
-                                                   num_layers=self.num_layers,
-                                                   dropout=dropout,
-                                                   batch_first=True)"""
+        # Optional normalization layer
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(self.lstm_size).to(device)
+        else:
+            self.norm = torch.nn.BatchNorm1d(self.lstm_size).to(device)
+
+        # Dropout after LSTM
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # Activation function
+        self.act_func = getattr(torch.nn, act_func)()
 
         # Output layer
-        self.output = OutputLayer(in_channels=hidden_channels_list[-1], end_channels=end_channels,
-                                  n_steps=n_sequences, device=device, act_func=act_func,
-                                  task_type=task_type, out_channels=out_channels)
-        
-        #self.output = torch.nn.Linear(hidden_channels_list[-1], out_channels)
-        #self.sofmax = torch.nn.Softmax(dim=-1)
+        self.linear1 = torch.nn.Linear(self.lstm_size, hidden_channels).to(device)
+        self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
 
-        self.batch_norm = torch.nn.BatchNorm1d(hidden_channels_list[-1]).to(device)
-
-        self.is_graph_or_node = False
+        # Task-dependent activation
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)
 
     def forward(self, X, edge_index=None, graphs=None):
+        """
+        Parameters:
+            X: Tensor of shape (batch_size, features, sequence_length)
+
+        Returns:
+            output: Final prediction tensor
+            (optionally) hidden_repr: The hidden state before final layer
+        """
         batch_size = X.size(0)
 
-        # Rearrange dimensions for LSTM input
-        x = X.permute(0, 2, 1)  # Shape: (batch_size, sequence_length, residual_channels)
+        # (batch_size, seq_len, features)
+        x = X.permute(0, 2, 1)
 
-        # Initialisation des états cachés et des cellules pour chaque couche
-        h0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
-        c0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
+        # Initial hidden and cell states
+        h0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
+        c0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
 
-        # Boucle sur les couches LSTM
-        for i in range(self.num_layers - 1):
-            # Passer l'entrée à travers la couche LSTM
-            x, (h0, c0) = self.lstm_layers[i](x, (h0, c0))
-        
-        #x, _ = self.lstm(x, (h0, c0))
+        # LSTM forward
+        x, _ = self.lstm(x, (h0, c0))
 
-        x = x.permute(0, 2, 1)  # Shape: (batch_size, residual_channels, sequence_length)
+        # Last time step output
+        x = x[:, -1, :]  # shape: (batch_size, hidden_size)
 
-        # Apply Batch Normalization
-        x = self.batch_norm(x)
+        # Normalization and dropout
+        x = self.norm(x)
+        x = self.dropout(x)
 
-        # Extract the last output of LSTM
-        x = x[:, :, -1]  # Shape: (batch_size, hidden_channels)
-
-        # Generate the final output
-        #output = self.sofmax(self.output(x))
-        output = self.output(x)
-
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
         if self.return_hidden:
             return output, x
         else:
             return output
         
 class DilatedCNN(torch.nn.Module):
-    def __init__(self, in_channels, channels, dilations, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type):
+    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False):
         super(DilatedCNN, self).__init__()
 
         # Initialisation des listes pour les convolutions et les BatchNorm
@@ -1117,78 +1443,190 @@ class DilatedCNN(torch.nn.Module):
         self.batch_norm_list = []
         self.num_layer = len(channels) - 1
         
-        # Couche d'entrée
-        self.input = torch.nn.Conv1d(in_channels, channels[0], kernel_size=1, padding='same', dilation=1, padding_mode='zeros').to(device)
-
         # Initialisation des couches convolutives et BatchNorm
         for i in range(self.num_layer):
             self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
-            self.batch_norm_list.append(torch.nn.BatchNorm1d(channels[i + 1]).to(device))
-        
-        # Fonction d'activation
-        if act_func == 'relu':
-            self.activation = torch.nn.ReLU()
-        elif act_func == 'gelu':
-            self.activation = torch.nn.GELU()
-        else:
-            print(f'WARNING : {act_func} not implemented. Use Identity')
-            self.activation = torch.nn.Identity()
-        
+            if use_layernorm:
+                self.batch_norm_list.append(torch.nn.LayerNorm(channels[i + 1]).to(device))
+            else:
+                self.batch_norm_list.append(torch.nn.BatchNorm1d(channels[i + 1]).to(device))
+
         self.dropout = torch.nn.Dropout(dropout)
         
         # Convertir les listes en ModuleList pour être compatible avec PyTorch
         self.cnn_layer_list = torch.nn.ModuleList(self.cnn_layer_list)
         self.batch_norm_list = torch.nn.ModuleList(self.batch_norm_list)
         
-        # Couche de sortie
-        self.output = OutputLayer(
-            in_channels=channels[-1],
-            end_channels=end_channels,
-            n_steps=n_sequences,
-            device=device,
-            act_func=act_func,
-            task_type=task_type,
-            out_channels=out_channels
-        )
+        # Dropout after GRU
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # Output layer
+        self.linear1 = torch.nn.Linear(channels[-1], lin_channels).to(device)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+
+        # Activation function
+        self.act_func = getattr(torch.nn, act_func)()
+        
+        self.return_hidden = False 
+
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid().to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
     def forward(self, x, edges=None):
         # Couche d'entrée
 
-        x = self.input(x)
-        x = self.activation(x)
-        
         # Couches convolutives dilatées avec BatchNorm, activation et dropout
         for cnn_layer, batch_norm in zip(self.cnn_layer_list, self.batch_norm_list):
             x = cnn_layer(x)
             x = batch_norm(x)  # Batch Normalization
-            x = self.activation(x)
+            x = self.act_func(x)
             x = self.dropout(x)
         
         # Garder uniquement le dernier élément des séquences
         x = x[:, :, -1]
+
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
         
-        # Couche de sortie
-        x = self.output(x)
-        
-        return x
-    
 class GraphCast(torch.nn.Module):
     def __init__(self,
         input_dim_grid_nodes: int = 10,
         input_dim_mesh_nodes: int = 3,
         input_dim_edges: int = 4,
+        end_channels = 64,
+        lin_channels = 64,
         output_dim_grid_nodes: int = 1,
         processor_layers: int = 4,
         hidden_layers: int = 1,
         hidden_dim: int = 512,
         aggregation: str = "sum",
         norm_type: str = "LayerNorm",
+        out_channels = 4,
+        task_type = 'classification',
         do_concat_trick: bool = False,
         has_time_dim: bool = False,
         n_sequences = 1,
+        act_func='ReLU',
         is_graph_or_node=False):
         super(GraphCast, self).__init__()
 
+        self.net = GraphCastNet(
+            input_dim_grid_nodes=input_dim_grid_nodes,
+            input_dim_mesh_nodes=input_dim_mesh_nodes,
+            input_dim_edges=input_dim_edges,
+            output_dim_grid_nodes=output_dim_grid_nodes,
+            processor_layers=processor_layers,
+            hidden_layers=hidden_layers,
+            hidden_dim=hidden_dim,
+            aggregation=aggregation,
+            norm_type=norm_type,
+            do_concat_trick=do_concat_trick,
+            has_time_dim=has_time_dim)
+        
+        # Output layer
+        self.linear1 = torch.nn.Linear(output_dim_grid_nodes, lin_channels)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels)
+        
+        self.is_graph_or_node = is_graph_or_node == 'graph'
+        
+        self.act_func = getattr(torch.nn, act_func)()
+        
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()  # For regression or custom handling
+
+    def forward(self, X, graph, graph2mesh, mesh2graph):
+        #X = X.view(X.shape[0], -1)
+        #print(X.device)
+        #print(X.shape)
+        X = X.permute(2, 0, 1)
+        x = self.net(X, graph, graph2mesh, mesh2graph)[-1]
+        
+        # Activation and output
+        #x = self.act_func(x)
+        x = self.act_func(self.linear1(x))
+        #x = self.dropout(x)
+        x = self.act_func(self.linear2(x))
+        #x = self.dropout(x)
+        x = self.output_layer(x)
+        output = self.output_activation(x)
+        return output
+
+class GraphCastGRU(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        # --- GRU specific parameters ---
+        in_channels: int = 16,
+        num_gru_layers: int = 1,
+        # --- GraphCast parameters (unchanged) ---
+        input_dim_grid_nodes: int = 10,
+        input_dim_mesh_nodes: int = 3,
+        input_dim_edges: int = 4,
+        end_channels: int = 64,
+        lin_channels: int = 64,
+        output_dim_grid_nodes: int = 1,
+        processor_layers: int = 4,
+        hidden_layers: int = 1,
+        hidden_dim: int = 512,
+        aggregation: str = "sum",
+        norm_type: str = "LayerNorm",
+        out_channels: int = 4,
+        task_type: str = "classification",
+        do_concat_trick: bool = False,
+        has_time_dim: bool = False,
+        n_sequences: int = 1,
+        act_func: str = "ReLU",
+        is_graph_or_node: bool = False,
+    ):
+        """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
+
+        Args:
+            in_channels: Dimension of the temporal features fed to the GRU (== input_size).
+            num_gru_layers: Number of stacked GRU layers.
+            input_dim_grid_nodes: Size of the embedding produced by the GRU for each node.  Must
+                match *hidden_size* of the GRU.
+            All other parameters are identical to the original GraphCastGRU.
+        """
+        super().__init__()
+
+        # ------------------------------------------------------------------
+        # GRU — encodes the temporal axis and outputs an embedding per node
+        # ------------------------------------------------------------------
+        self.gru = torch.nn.GRU(
+            input_size=in_channels,
+            hidden_size=input_dim_grid_nodes,
+            num_layers=num_gru_layers,
+            dropout=0.03 if num_gru_layers > 1 else 0.0,
+            batch_first=True,
+        )
+        self.gru_size = input_dim_grid_nodes
+        self.num_gru_layers = num_gru_layers
+
+        # ------------------------------------------------------------------
+        # GraphCast core network (unchanged)
+        # ------------------------------------------------------------------
         self.net = GraphCastNet(
             input_dim_grid_nodes,
             input_dim_mesh_nodes,
@@ -1200,17 +1638,53 @@ class GraphCast(torch.nn.Module):
             aggregation,
             norm_type,
             do_concat_trick,
-            has_time_dim)
-        
-        self.is_graph_or_node = is_graph_or_node == 'graph'
-        
-        self.softmax_layer = torch.nn.Softmax(dim=-1)
+            has_time_dim,
+        )
 
+        # ------------------------------------------------------------------
+        # Output head
+        # ------------------------------------------------------------------
+        self.linear1 = torch.nn.Linear(output_dim_grid_nodes, lin_channels)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels)
+
+        self.is_graph_or_node = is_graph_or_node == "graph"
+
+        self.act_func = getattr(torch.nn, act_func)()
+
+        if task_type == "classification":
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == "binary":
+            self.output_activation = torch.nn.Sigmoid()
+        else:  # regression or custom
+            self.output_activation = torch.nn.Identity()
+
+    # ----------------------------------------------------------------------
+    # Forward pass
+    # ----------------------------------------------------------------------
     def forward(self, X, graph, graph2mesh, mesh2graph):
-        #X = X.view(X.shape[0], -1)
-        X = X.permute(2, 0, 1)
-        x = self.net(X, graph, graph2mesh, mesh2graph)
-        return self.softmax_layer(x)[-1]
+        """Args:
+            X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
+        """
+        # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
+        B, C_in, T = X.shape
+        X_for_gru = X.permute(0, 2, 1)
+        h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
+
+        gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
+        # Keep the last hidden state for each sequence
+        gru_last = gru_out[:, -1, :]  # (B*N, hidden == input_dim_grid_nodes)
+        X_graphcast = gru_last[None,: ,:]
+
+        # GraphCast processing
+        x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
+
+        # Head
+        x = self.act_func(self.linear1(x))
+        x = self.act_func(self.linear2(x))
+        x = self.output_layer(x)
+        output = self.output_activation(x)
+        return output
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,

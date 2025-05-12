@@ -63,7 +63,7 @@ class GraphCastMeshProcessor(nn.Module):
 
         self.has_time_dim = has_time_dim
         self.hidden_dim = hidden_dim
-
+        
         MPB = MeshProcessorGruBlock if has_time_dim else MeshProcessorBlock
         MPB_params = (
             (

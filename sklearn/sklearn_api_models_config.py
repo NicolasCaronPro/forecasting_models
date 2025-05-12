@@ -28,7 +28,7 @@ def read_object(filename: str, path : Path):
     return pickle.load(open(path / filename, 'rb'))
 
 
-def get_model(model_type, name, device, task_type, nbfeatures='all', loss='log_loss', params=None, under_sampling='full', over_sampling='full', target_name='nbsinister', post_process=None) -> Union[Model, ModelTree]:
+def get_model(model_type, name, device, task_type, nbfeatures='all', loss='log_loss', params=None, under_sampling='full', over_sampling='full', target_name='nbsinister', post_process=None, n_run=1) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -77,7 +77,7 @@ def get_model(model_type, name, device, task_type, nbfeatures='all', loss='log_l
     #if isinstance(model, tree_based_models):
     #    model_class = ModelTree(model, model_type=model_type, loss=loss, name=name, under_sampling=under_sampling, over_sampling=over_sampling, target_name=target_name, task_type=task_type, post_process=post_process)
     #else:
-    model_class = Model(model, nbfeatures=nbfeatures, model_type=model_type, loss=loss, name=name, under_sampling=under_sampling, over_sampling=over_sampling, target_name=target_name, task_type=task_type, post_process=post_process)
+    model_class = Model(model, nbfeatures=nbfeatures, model_type=model_type, loss=loss, name=name, under_sampling=under_sampling, over_sampling=over_sampling, target_name=target_name, task_type=task_type, post_process=post_process, n_run=n_run)
 
     return model_class
 

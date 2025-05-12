@@ -199,7 +199,7 @@ class MeshGraphEncoder(nn.Module):
             activation_fn=activation_fn,
             norm_type=norm_type,
         )
-
+        
         # dst node MLP
         self.dst_node_mlp = MeshGraphMLP(
             input_dim=input_dim_dst_nodes + output_dim_edges,

@@ -322,7 +322,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                  model_type, loss='logloss', name='Model',
                  dir_log = Path('../'), under_sampling='full',
                  over_sampling='full', target_name='nbsinister',
-                 task_type='regression', post_process=None):
+                 task_type='regression', post_process=None, n_run=1):
         """
         Initialize the CustomModel class.
 
@@ -348,13 +348,15 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.post_process = post_process
         self.nbfeatures = nbfeatures
         self.over_sampling = over_sampling
+        self.n_run = n_run
+        self.metrics = {}
 
     def split_dataset(self, X, y, y_train_score, nb, is_unknowed_risk):        
         # Separate the positive and zero classes based on y
 
         if not is_unknowed_risk:
-            positive_mask = y > 0
-            non_fire_mask = y == 0
+            positive_mask = y[self.target_name] > 0
+            non_fire_mask = y[self.target_name] == 0
         else:
             non_fire_mask = (X['potential_risk'] > 0) & (y == 0)
             positive_mask = ~non_fire_mask
@@ -370,11 +372,15 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         # Sample non-fire data
         print(nb, len(X_non_fire))
         nb = min(len(X_non_fire), nb)
-        sampled_indices = np.random.RandomState(42).choice(len(X_non_fire), nb, replace=False)
+        if self.n_run == 1:
+            sampled_indices = np.random.RandomState(42).choice(len(X_non_fire), nb, replace=False)
+        else:
+            sampled_indices = np.random.RandomState().choice(len(X_non_fire), nb, replace=False)
+    
         X_non_fire_sampled = X_non_fire.iloc[sampled_indices] if isinstance(X, pd.DataFrame) else X_non_fire[sampled_indices]
 
         if not is_unknowed_risk:
-            y_non_fire_sampled = y_non_fire.iloc[sampled_indices] if isinstance(y, pd.Series) else y_non_fire[sampled_indices]
+            y_non_fire_sampled = y_non_fire.iloc[sampled_indices] if isinstance(y, pd.DataFrame) else y_non_fire[sampled_indices]
             y_train_score_non_fire_sampled = y_train_score_non_fire.iloc[sampled_indices] if isinstance(y_train_score, pd.Series) else y_train_score_non_fire[sampled_indices]
         else:
             print(np.unique(X_non_fire.iloc[sampled_indices]['potential_risk']))
@@ -382,8 +388,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             #y_train_score_non_fire_sampled = X_non_fire.iloc[sampled_indices]['potential_risk']
 
         X_combined = pd.concat([X_positive, X_non_fire_sampled]) if isinstance(X, pd.DataFrame) else np.concatenate([X_positive, X_non_fire_sampled])
-        y_combined = pd.concat([y_positive, y_non_fire_sampled]) if isinstance(y, pd.Series) else np.concatenate([y_positive, y_non_fire_sampled])
-        y_train_score_combined = pd.concat([y_train_score_positive, y_train_score_non_fire_sampled]) if isinstance(y, pd.Series) else np.concatenate([y_train_score_positive, y_train_score_non_fire_sampled])
+        y_combined = pd.concat([y_positive, y_non_fire_sampled]) if isinstance(y, pd.DataFrame) else np.concatenate([y_positive, y_non_fire_sampled])
+        y_train_score_combined = pd.concat([y_train_score_positive, y_train_score_non_fire_sampled]) if isinstance(y, pd.DataFrame) else np.concatenate([y_train_score_positive, y_train_score_non_fire_sampled])
 
         # Update X and y for training
         X_combined.reset_index(drop=True, inplace=True)
@@ -427,7 +433,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             y_test_score = np.copy(y_test)
 
         if not is_unknowed_risk:
-            test_percentage = np.arange(0.1, 1.05, 0.05)
+            test_percentage = np.arange(0.05, 1.05, 0.05)
         else:
             test_percentage = np.arange(0.0, 1.05, 0.05)
 
@@ -435,19 +441,56 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         over_prediction_score_scores = []
         iou_scores = []
 
-        """if is_unknowed_risk:
+        data_log = None
+        if False:
             if (self.dir_log / 'unknowned_scores_per_percentage.pkl').is_file():
                 data_log = read_object('unknowned_scores_per_percentage.pkl', self.dir_log)
         else:
-            if (self.dir_log / 'test_percentage_scores.pkl').is_file():
-                data_log = read_object('test_percentage_scores.pkl', self.dir_log)"""
+            if (self.dir_log / 'metrics.pkl').is_file():
+                print(f'Load metrics')
+                find_log = True
+                data_log = read_object('metrics.pkl', self.dir_log)
+            else:
+                xs = [0, 10]
+                for x in xs:
+                    other_model = f'{self.model_type}_search_full_{x}_all_one_{self.target_name}_{self.task_type}_{self.loss}'
+                    if (self.dir_log / '..'/ other_model / 'metrics.pkl').is_file():
+                        data_log = read_object('metrics.pkl', self.dir_log)
+                    if data_log is not None:
+                        break
+        
+        print(self.metrics)
+        print(f'data_log : {data_log}')
+        if data_log is not None:
+            try:
+                self.metrics = data_log
+                #test_percentage = self.metrics['test_percentage']
+                under_prediction_score_scores = self.metrics['under_prediction_scores']
+                over_prediction_score_scores = self.metrics['over_predictio_scores']
+                iou_scores = self.metrics['iou_scores']
+            except:
+                self.metrics = {}
+                data_log = None
+                pass
 
-        ############ FIX ############
-        if 'data_log' in locals():
-            test_percentage, under_prediction_score_scores, over_prediction_score_scores, iou_scores = data_log[0], data_log[1], data_log[2], data_log[3]
+            #test_percentage, under_prediction_score_scores, over_prediction_score_scores, iou_scores = data_log[0], data_log[1], data_log[2], data_log[3]
+        
+        doSearch = True
+        if data_log is not None:
+            for i in range(0, len(under_prediction_score_scores) - 1):
+                if iou_scores[i] > iou_scores[i + 1]:
+                    doSearch = True
+
+            if doSearch:
+                start_test = np.argmax(iou_scores)
+                #start_test = len(under_prediction_score_scores) - 1
         else:
-            for tp in test_percentage:
-                
+            start_test = 0
+
+        if doSearch:
+            last_score = -math.inf if start_test == 0 else iou_scores[start_test - 1]
+            for i in range(start_test, test_percentage.shape[0]):
+                tp = test_percentage[i]
                 if not is_unknowed_risk:
                     nb = int(tp * len(y[y == 0]))
                 else:
@@ -455,47 +498,120 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
                 print(f'Trained with {tp} -> {nb} sample of class 0')
 
-                X_combined, y_combined, y_train_score_combined = self.split_dataset(X, y, y_train_score, nb, is_unknowed_risk)
-                print(y_combined.shape, y_train_score_combined.shape)
-                print(f'Train mask X shape: {X_combined.shape}, y shape: {y_combined.shape}')
-
-                copy_model = copy.deepcopy(self)
-                if 'dual' in self.loss:
-                    params_model = copy_model.best_estimator_.kwargs
-                    params_model['y_train_origin'] = y_train_score_combined
-                    copy_model.best_estimator_.update_params(params_model)
-
-                copy_model.under_sampling = 'full'
-
-                copy_model.fit(X_combined, y_combined, X_val, y_val, X_test=X_test, y_test=y_test, y_test_score=y_test_score, \
-                               y_train_score=y_train_score, y_val_score=y_val_score, training_mode='normal', \
-                                optimization='skip', grid_params=None, fit_params={}, cv_folds=10)
-
-                prediction = copy_model.predict(X_val)
-
-                #under_prediction_score_value = under_prediction_score(y_test_score, prediction)
-                #over_prediction_score_value = over_prediction_score(y_test_score, prediction)
-
-                under_prediction_score_value = under_prediction_score(y_val, prediction)
-                over_prediction_score_value = over_prediction_score(y_val, prediction)
-                iou = iou_score(y_val, prediction)
+                #if tp not in self.metrics.keys():
+                if True:
+                    self.metrics[tp] = {}
+                    self.metrics[tp]['f1'] = []
+                    self.metrics[tp]['prec'] = []
+                    self.metrics[tp]['recall'] = []
+                    self.metrics[tp]['iou'] = []
+                    self.metrics[tp]['iou_val'] = []
+                    self.metrics[tp]['normalized_iou'] = []
+                    self.metrics[tp]['normalized_f1'] = []
+                else:
+                    continue
                 
-                under_prediction_score_scores.append(under_prediction_score_value)
-                over_prediction_score_scores.append(over_prediction_score_value)
+                for run in range(self.n_run):
+                    print(f'Run {run}')
+                    X_combined, y_combined, y_train_score_combined = self.split_dataset(X, y, y_train_score, nb, is_unknowed_risk)
+                    print(y_combined.shape, y_train_score_combined.shape)
+                    print(f'Train mask X shape: {X_combined.shape}, y shape: {y_combined.shape}')
+
+                    copy_model = copy.deepcopy(self)
+                    if 'dual' in self.loss:
+                        params_model = copy_model.best_estimator_.kwargs
+                        params_model['y_train_origin'] = y_train_score_combined
+                        copy_model.best_estimator_.update_params(params_model)
+
+                    copy_model.under_sampling = 'full'
+
+                    copy_model.fit(X_combined, y_combined, X_val, y_val, X_test=X_test, y_test=y_test, y_test_score=y_test_score, \
+                                y_train_score=y_train_score, y_val_score=y_val_score, training_mode='normal', \
+                                    optimization='skip', grid_params=None, fit_params={}, cv_folds=10)
+                    
+                    prediction = copy_model.predict(X_val)
+                    metrics_run = evaluate_metrics(y_val, self.target_name, prediction)
+                    self.metrics[tp]['iou_val'].append(metrics_run['iou'])
+                    under_prediction_score_value = under_prediction_score(y_val_score, prediction)
+                    over_prediction_score_value = over_prediction_score(y_val_score, prediction)
+
+                    prediction = copy_model.predict(X_test)
+                    metrics_run = evaluate_metrics(y_test, self.target_name, prediction)
+                    self.metrics[tp]['f1'].append(metrics_run['f1'])
+                    self.metrics[tp]['iou'].append(metrics_run['iou'])
+                    self.metrics[tp]['recall'].append(metrics_run['recall'])
+                    self.metrics[tp]['prec'].append(metrics_run['prec'])
+                    self.metrics[tp]['normalized_iou'].append(metrics_run['normalized_iou'])
+                    self.metrics[tp]['normalized_f1'].append(metrics_run['normalized_f1'])
+                    
+                    #under_prediction_score_value = under_prediction_score(y_val, prediction)
+                    #over_prediction_score_value = over_prediction_score(y_val, prediction)
+                    #iou = iou_score(y_val, prediction)
+                    
+                if self.n_run == 1:
+                    self.metrics[tp]['var_f1'] = 0
+                    self.metrics[tp]['IC_f1'] = (0, 0)
+                    self.metrics[tp]['var_iou'] = 0
+                    self.metrics[tp]['IC_iou'] = (0, 0)
+                    self.metrics[tp]['var_Normalized_f1'] = 0
+                    self.metrics[tp]['IC_Normalized_f1'] = (0, 0)
+                    self.metrics[tp]['var_Normalized_iou'] = 0
+                    self.metrics[tp]['IC_Normalized_iou'] = (0, 0)
+                else:
+                    # Calcul de la variance pour chaque métrique
+                    f1_variance = np.var(self.metrics[tp]['f1'])
+                    iou_variance = np.var(self.metrics[tp]['iou'])
+                    normalized_f1_variance = np.var(self.metrics[tp]['normalized_f1'])
+                    normalized_iou_variance = np.var(self.metrics[tp]['normalized_iou'])
+                    
+                    # Calcul de l'IC 95% pour chaque métrique
+                    f1_ic = calculate_ic95(self.metrics[tp]['f1'])
+                    iou_ic = calculate_ic95(self.metrics[tp]['iou'])
+                    normalized_f1_ic = calculate_ic95(self.metrics[tp]['normalized_f1'])
+                    normalized_iou_ic = calculate_ic95(self.metrics[tp]['normalized_iou'])
+                    
+                    # Ajout de la variance et de l'IC dans le dictionnaire avec des clefs spécifiques pour chaque métrique
+                    self.metrics[tp]['var_f1'] = f1_variance
+                    self.metrics[tp]['IC_f1'] = f1_ic
+                    self.metrics[tp]['var_iou'] = iou_variance
+                    self.metrics[tp]['IC_iou'] = iou_ic
+                    self.metrics[tp]['var_normalized_f1'] = normalized_f1_variance
+                    self.metrics[tp]['IC_normalized_f1'] = normalized_f1_ic
+                    self.metrics[tp]['var_normalized_iou'] = normalized_iou_variance
+                    self.metrics[tp]['IC_normalized_iou'] = normalized_iou_ic
+                
+                iou = np.mean(self.metrics[tp]['iou_val'])
+
                 iou_scores.append(iou)
-                
-                print(f'Under achieved : {under_prediction_score_value}, Over achived {over_prediction_score_value}, iou : {iou}')
+                under_prediction_score_scores.append(under_prediction_score_value)
+                over_prediction_score_scores.append(over_prediction_score_value)                
 
-                if under_prediction_score_value > over_prediction_score_value:
+                #save_object([test_percentage[:len(under_prediction_score_scores)], under_prediction_score_scores, over_prediction_score_scores, iou_scores], 'test_percentage_scores.pkl', self.dir_log)
+                save_object(self.metrics, 'metrics.pkl', self.dir_log)
+                
+                print(f'Metrics achieved : {self.metrics[tp]}')
+
+                if iou > last_score:
+                    last_score = iou
+                else:
                     break
                 
         # Find the index where the two scores cross (i.e., where the difference changes sign)
-        score_differences = np.array(under_prediction_score_scores) - np.array(over_prediction_score_scores)
+        #score_differences = np.array(under_prediction_score_scores) - np.array(over_prediction_score_scores)
 
         #index_max = np.argmin(np.abs(score_differences))
         index_max = np.argmax(iou_scores)
         best_tp = test_percentage[index_max]
-        
+        self.metrics['iou_score'] = iou_scores
+        self.metrics['under_prediction_scores'] = under_prediction_score_value
+        self.metrics['over_prediction_scores'] = over_prediction_score_scores
+        self.metrics['test_percentage'] = test_percentage
+        self.metrics['best_tp'] = best_tp
+        self.metrics['run'] = self.n_run
+        save_object(self.metrics, 'metrics.pkl', self.dir_log)
+
+        print(f'Metrics achieved with best percentage {best_tp} {self.metrics[best_tp]}')
+
         if is_unknowed_risk:
             plt.figure(figsize=(15, 7))
             plt.plot(test_percentage[:len(under_prediction_score_scores)], under_prediction_score_scores, label='under_prediction')
@@ -680,6 +796,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         elif 'smote' in self.over_sampling:
             smote_coef = int(self.over_sampling.split('-')[1])
+            y = y_[self.target_name]
             y_negative = y[y == 0].shape[0]
             
             y_one = max(y[y == 1].shape[0], min(y[y == 1].shape[0] * smote_coef, y_negative))
@@ -703,8 +820,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             raise ValueError(f'Unknow value of under_sampling -> {self.over_sampling}')
 
         #print(f'Positive data after treatment : {positive_shape}, {y[y  > 0].shape}')
-        for uy in np.unique(y):
-            print(f'Number of {uy} class : {y[y == uy].shape}') 
+        for uy in np.unique(y[self.target_name]):
+            print(f'Number of {uy} class : {y[y[self.target_name] == uy].shape}') 
         
         X_train = X[features]
         y_train = y
@@ -734,7 +851,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
         ###############################################" Fit pararams depending of the model type #####################################
         
-        fit_params = self.update_fit_params(X_val, y_val, sample_weight, self.features_selected)
+        fit_params = self.update_fit_params(X_val, y_val[self.target_name], sample_weight, self.features_selected)
 
         """if self.loss in ['softprob-dual', 'softmax-dual']:
             new_y_train = np.zeros((y_train.shape[0], 2))
@@ -759,7 +876,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if optimization == 'grid':
             assert grid_params is not None
             grid_search = GridSearchCV(self.best_estimator_, grid_params, scoring=self.get_scorer(), cv=cv_folds, refit=False)
-            grid_search.fit(X_train, y_train, **fit_params)
+            grid_search.fit(X_train, y_train[self.target_name], **fit_params)
             best_params = grid_search.best_params_
             self.cv_results_ = grid_search.cv_results_
         elif optimization == 'bayes':
@@ -785,14 +902,14 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
             opt = Optimizer(param_space, base_estimator='GP', acq_func='gp_hedge')
             bayes_search = BayesSearchCV(self.best_estimator_, opt, scoring=self.get_scorer(), cv=cv_folds, Refit=False)
-            bayes_search.fit(X_train, y_train, **fit_params)
+            bayes_search.fit(X_train, y_train[self.target_name], **fit_params)
             best_params = bayes_search.best_estimator_.get_params()
             self.cv_results_ = bayes_search.cv_results_
         elif optimization == 'skip':
             best_params = self.best_estimator_.get_params()
-            self.best_estimator_.fit(X_train, y_train, **fit_params)
+            self.best_estimator_.fit(X_train, y_train[self.target_name], **fit_params)
         elif optimization == 'cv':
-            self.cv_Model = cross_validate(self.best_estimator_, X_train, y_train, cv=cv_folds, scoring=iou_score, return_estimator=True)
+            self.cv_Model = cross_validate(self.best_estimator_, X_train, y_train[self.target_name], cv=cv_folds, scoring=iou_score, return_estimator=True)
             self.best_estimator_ = self.cv_Model['']
         else:
             raise ValueError("Unsupported optimization method")
@@ -800,15 +917,18 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         ########################### Fit final model on the entire dataset ###########################
         if optimization != 'skip' and optimization != 'cv':
             self.set_params(**best_params)
-            self.best_estimator_.fit(X_train, y_train, **fit_params)
+            self.best_estimator_.fit(X_train, y_train[self.target_name], **fit_params)
 
         ############################# Post process fit ##############################
         if self.post_process is not None:
             pred_val = self.best_estimator_.predict(X_val[self.features_selected])
-            self.post_process.fit(pred_val, y_val, **{
+            self.post_process.fit(pred_val, y_val[self.target_name], **{
                 'disp':True,
                 'method': 'bfgs'
             })
+
+        self.metrics['final'] = evaluate_metrics(y_test, self.target_name, self.predict(X_test))
+        #print(self.metrics)
         
     def get_model(self):
         return self.best_estimator_
@@ -1059,56 +1179,91 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         
         save_object(result, f"{outname}_permutation_importances.pkl", dir_output)
 
-    def shapley_additive_explanation(self, df_set, outname, dir_output, mode = 'bar', figsize=(50,25), samples=None, samples_name=None):
+    def shapley_additive_explanation(self, df_set, outname, dir_output, mode="bar", figsize=(50, 25), samples=None, samples_name=None):
         """
-        Perform shapley additive explanation features on df_set using best_estimator
-        
-        Parameters:
-        - df_set_list : a list for len(self.best_estiamtor) size, with ieme element being the dataframe for ieme estimator 
-        - outname : outname of the figure
-        - mode : mode of ploting
-        - figsize : figure size
-        - samples : use for additional plot where the shapley additive explanation is done on each sample
-        - samples_name : name of each sample 
+        Generate SHAP explanations for model predictions.
+        :param df_set: Dataset to analyze.
+        :param outname: Output file prefix.
+        :param dir_output: Directory to save explanations.
+        :param mode: SHAP visualization type ("bar" or "beeswarm").
+        :param figsize: Figure size.
+        :param samples: Specific samples to analyze.
+        :param samples_name: Names of the samples.
+        """
+        # Compute SHAP values
+        if self.model_type in ['xgboost', 'catboost']:
+            explainer = shap.TreeExplainer(self.best_estimator_.model_)
+        else:
+            explainer = shap.Explainer(self.best_estimator_)
+        shap_values = explainer(df_set)
 
-        Returns:
-        - None
-        """
-        dir_output = Path(dir_output)
-        check_and_create_path(dir_output / 'sample')
-        try:
-            if isinstance(self.best_estimator_, MyXGBClassifier) or isinstance(self.best_estimator_, MyXGBRegressor):
-                self.best_estimator_.shapley_additive_explanation(df_set, outname, dir_output, mode, figsize, samples, samples_name)
-                return
-            else:
-                explainer = shap.Explainer(self.best_estimator_)
-            shap_values = explainer(df_set, check_additivity=False)
+        n_classes = 5 if self.task_type == 'classification' else 2
+
+        # Vérifier si la sortie SHAP est multi-classes
+        if n_classes == 1:
+            shap_values = shap_values[:, :, np.newaxis]
+
+        shap_values = shap_values.values
+        df_features = []
+        # Pour chaque classe, calculer et sauvegarder les résultats SHAP
+        for class_idx in range(n_classes):
+            # Calcul des valeurs SHAP moyennes et écarts-types
+            shap_mean_abs = np.mean(np.abs(shap_values[:, :, class_idx]), axis=0)
+            shap_std_abs = np.std(np.abs(shap_values[:, :, class_idx]), axis=0)
+
+            df_shap = pd.DataFrame({
+                "mean_abs_shap": shap_mean_abs,
+                "stdev_abs_shap": shap_std_abs,
+                "name": self.features_selected
+            }).sort_values("mean_abs_shap", ascending=False)
+
+            df_shap['class'] = class_idx
+            df_features.append(df_shap)
+
+            # Visualisation globale (summary_plot) pour chaque classe
             plt.figure(figsize=figsize)
             if mode == 'bar':
-                shap.plots.bar(shap_values, show=False, max_display=20)
+                shap.summary_plot(
+                    shap_values[:, :, class_idx],
+                    features=df_set,
+                    feature_names=self.features_selected,
+                    plot_type='bar',
+                    show=False
+                )
             elif mode == 'beeswarm':
-                shap.plots.beeswarm(shap_values, show=False, max_display=20)
-            else:
-                raise ValueError(f'Unknow {mode} mode')
-            
-            shap_values_abs = np.abs(shap_values.values).mean(axis=0)  # Importance moyenne absolue des SHAP values
-            top_features_indices = np.argsort(shap_values_abs)[-10:]  # Indices des 10 plus importantes
-            self.top_features_ = df_set.columns[top_features_indices].tolist()  # Noms des 10 features
-            
-            plt.tight_layout()
-            plt.savefig(dir_output / f'{outname}_shapley_additive_explanation.png')
-            plt.close('all')
-            if samples is not None and samples_name is not None:
-                for i, sample in enumerate(samples):
-                    plt.figure(figsize=(30,15))
-                    shap.plots.force(shap_values[sample], show=False, matplotlib=True, text_rotation=45, figsize=(30,15))
-                    plt.tight_layout()
-                    plt.savefig(dir_output / 'sample' / f'{outname}_{samples_name[i]}_shapley_additive_explanation.png')
-                    plt.close('all')
+                shap.summary_plot(
+                    shap_values[:, :, class_idx],
+                    features=df_set,
+                    feature_names=self.features_selected,
+                    show=False
+                )
 
-        except Exception as e:
-            print(f'Error {e} with shapley_additive_explanation')
-            return
+            print(dir_output / f"{outname}_class_{class_idx}_shapley.png")
+            plt.savefig(dir_output / f"{outname}_class_{class_idx}_shapley.png")
+            plt.close()
+
+            # Visualisations spécifiques aux échantillons (force_plot)
+            if samples is not None and samples_name is not None:
+
+                for i, sample in enumerate(samples):
+                    plt.figure(figsize=figsize)
+                    shap.force_plot(
+                        explainer.expected_value[class_idx],
+                        shap_values[sample, :, class_idx],
+                        features=df.iloc[sample].values,
+                        feature_names=self.features_name,
+                        matplotlib=True,
+                        show=False
+                    )
+
+                    plt.savefig(
+                        dir_output / f"{outname}_class_{class_idx}_{samples_name[i]}_shapley.png",
+                        bbox_inches='tight'
+                    )
+                    plt.close()
+
+        df_features = pd.concat(df_features)
+        save_object(df_features, 'features_importance.pkl', dir_output)
 
     def fit_by_features(self, X, y, X_val, y_val, X_test, y_test, features, sample_weight, select):
         final_selected_features = []
@@ -1904,7 +2059,6 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                 probas.append(proba)
             else:
                 raise AttributeError(f"The model {estimator.name} does not support predict_proba.")
-
         try:
             weights2use = weights2use[models_to_mean]
         except:

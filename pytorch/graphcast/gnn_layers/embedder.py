@@ -107,7 +107,6 @@ class GraphCastEncoderEmbedder(nn.Module):
         mesh_efeat: Tensor,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # Input node feature embedding
-        print(grid_nfeat.shape)
         grid_nfeat = self.grid_node_mlp(grid_nfeat)
         mesh_nfeat = self.mesh_node_mlp(mesh_nfeat)
         # Input edge feature embedding

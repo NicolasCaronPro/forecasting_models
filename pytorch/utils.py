@@ -44,7 +44,6 @@ class OutputLayer(torch.nn.Module):
             self.out_channels = 1
 
         self.dropout = torch.nn.Dropout(0.3)
-
         self.fc = nn.Linear(in_channels=in_channels, out_channels=end_channels * 2, weight_initializer='glorot', bias=True).to(device)
         self.fc3 = nn.Linear(in_channels=end_channels * 2, out_channels=end_channels * 4, weight_initializer='glorot', bias=True).to(device)
         self.fc2 = nn.Linear(in_channels=end_channels * 4, out_channels=self.out_channels, weight_initializer='glorot', bias=True).to(device)

@@ -94,7 +94,7 @@ class Zhang(torch.nn.Module):
 ########################### ConvLTSM ####################################
 
 class Bottleneck(nn.Module):
-    def __init__(self,in_places, places, stride=1,downsampling=False, expansion = 4, device=None):
+    def __init__(self, in_places, places, stride=1,downsampling=False, expansion = 4, device=None):
         super(Bottleneck,self).__init__()
         self.expansion = expansion
         self.downsampling = downsampling
@@ -167,7 +167,6 @@ class ResNet(torch.nn.Module):
 
     def forward(self, X, edge_index=None, graphs=None):
         # egde index not used, API configuration
-        
         x = X[:,:,:,:,-1]
 
         # Bottleneck
