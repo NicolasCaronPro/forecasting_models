@@ -17,9 +17,18 @@
     logger.info(f'Ajouter le script pour retrouver les modules : {script_path}')
     sys.path.insert(0, script_path)"""
 
+from pygam import LogisticGAM, GAM
+from sklearn.svm import SVC, SVR
 from forecasting_models.sklearn.sklearn_api_model import *
 
-def get_model(model_type, name, device, task_type, loss='log_loss', params=None, non_fire_number='full', target_name='nbsinister', post_process=None) -> Union[Model, ModelTree]:
+def read_object(filename: str, path : Path):
+    if not (path / filename).is_file():
+        logger.info(f'{path / filename} not found')
+        return None
+    return pickle.load(open(path / filename, 'rb'))
+
+
+def get_model(model_type, name, device, task_type, nbfeatures='all', loss='log_loss', params=None, under_sampling='full', over_sampling='full', target_name='nbsinister', post_process=None, n_run=1) -> Union[Model, ModelTree]:
     """
     Returns the model and hyperparameter search grid based on the model name, task type, and device.
 
@@ -49,6 +58,12 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None,
         model = config_poisson_regressor(device, task_type, params)
     elif model_type == 'gam':
         model = config_gam(device, task_type, params)
+    elif model_type == 'catboost':
+        model = config_catboost(device, task_type, params)
+    elif model_type == 'ordered':
+        model = MyOrderedModel(params)
+    elif model_type == 'lg':
+        model = config_logistic_regression(device, task_type=task_type, params=params)
     else:
         raise ValueError(f"Unrecognized model: {model_type}")
     
@@ -59,10 +74,10 @@ def get_model(model_type, name, device, task_type, loss='log_loss', params=None,
                          LGBMClassifier, LGBMRegressor, 
                          NGBClassifier, NGBRegressor)
 
-    if isinstance(model, tree_based_models):
-        model_class = ModelTree(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
-    else:
-        model_class = Model(model, model_type=model_type, loss=loss, name=name, non_fire_number=non_fire_number, target_name=target_name, task_type=task_type, post_process=post_process)
+    #if isinstance(model, tree_based_models):
+    #    model_class = ModelTree(model, model_type=model_type, loss=loss, name=name, under_sampling=under_sampling, over_sampling=over_sampling, target_name=target_name, task_type=task_type, post_process=post_process)
+    #else:
+    model_class = Model(model, nbfeatures=nbfeatures, model_type=model_type, loss=loss, name=name, under_sampling=under_sampling, over_sampling=over_sampling, target_name=target_name, task_type=task_type, post_process=post_process, n_run=n_run)
 
     return model_class
 
@@ -79,17 +94,19 @@ def config_xgboost(device, task_type, params=None) -> Union[MyXGBRegressor, MyXG
         params = {
             'verbosity':0,
             'learning_rate' :0.01,
-            'min_child_weight' : 5.0,
+            'min_child_weight' : 1.0,
             'max_depth' : 6,
             'max_delta_step' : 1.0,
             'subsample' : 0.3,
             'colsample_bytree' : 0.8,
             'colsample_bylevel': 0.8,
-            'reg_lambda' : 10.5,
+            'reg_lambda' : 1.5,
             'reg_alpha' : 0.9,
             'n_estimators' : 10000,
             'random_state': 42,
             'tree_method':'hist',
+            'early_stopping_rounds' : 15,
+            
         }
 
     if device == 'cuda':
@@ -101,8 +118,32 @@ def config_xgboost(device, task_type, params=None) -> Union[MyXGBRegressor, MyXG
     else:
         return MyXGBClassifier(**params,
                             )
+
+def config_logistic_regression(device, task_type, params=None):
+    """
+    Returns a Logistic Regression model defined by params.
+
+    :param device: 'cpu' or 'cuda' (GPU not applicable for sklearn LogisticRegression)
+    :param task_type: 'classification' or 'regression' (logistic regression typically for classification)
+    :param params: Dictionary of model hyperparameters
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    if params is None:
+        params = {
+            'penalty': 'l2',
+            'C': 1.0,
+            'solver': 'lbfgs',
+            'max_iter': 1000,
+            'class_weight': 'balanced',
+            'random_state': 42
+        }
+
+    model = LogisticRegression(**params)
+
+    return model
     
-def config_catboost(device, task_type, params=None) -> Union[CatBoostClassifier, CatBoostRegressor]:
+def config_catboost(device, task_type, params=None):
     """
     Returns a CatBoost model defined by params.
 
@@ -115,21 +156,21 @@ def config_catboost(device, task_type, params=None) -> Union[CatBoostClassifier,
             'iterations': 10000,
             'learning_rate': 0.01,
             'depth': 6,
-            'l2_leaf_reg': 3,
+            'l2_leaf_reg': 1,
             'random_seed': 42,
             'early_stopping_rounds': 15,
             'verbose': False,
         }
 
-    if device == 'cuda':
+    """if device == 'cuda':
         params['task_type'] = 'GPU'
     else:
-        params['task_type'] = 'CPU'
+        params['task_type'] = 'CPU'"""
 
     if task_type == 'regression':
         return CatBoostRegressor(**params)
     else:
-        return CatBoostClassifier(**params)
+        return MyCatBoostClassifier(**params)
 
 def config_lightGBM(device, task_type, params=None) -> Union[LGBMClassifier, LGBMRegressor]:
     """
@@ -276,7 +317,7 @@ def config_gam(device : str, task_type : str, params = None) -> GAM:
                       'link': 'log',
                     'max_iter' : 1000,
                       } 
-        return GAM(**params)
+        return LogisticGAM(**params)
 
 def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeClassifier, DecisionTreeRegressor]:
     """
@@ -301,111 +342,3 @@ def config_decision_tree(device, task_type, params=None) -> Union[DecisionTreeCl
         return DecisionTreeRegressor(**params)
     else:
         return DecisionTreeClassifier(**params)
-    
-if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser(
-    prog='Test code',
-    description='',
-    )
-    parser.add_argument('-test_id', '--test_id', type=str, help='Test id')
-    args = parser.parse_args()
-    test_id = args.test_id
-
-    check_and_create_path(Path('./Test'))
-
-    X, y = make_regression(n_samples=1000, n_features=10, noise=0.1, random_state=42)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    logger.info(f'Test : {test_id}')
-    if test_id == '1':
-        ############################## XGBOOST TEST ###########################################
-        params = {
-                'objective':'reg:squarederror',
-                'verbosity':0,
-                'early_stopping_rounds':None,
-                'learning_rate' :0.01,
-                'min_child_weight' : 5.0,
-                'max_depth' : 6,
-                'max_delta_step' : 1.0,
-                'subsample' : 0.3,
-                'colsample_bytree' : 0.8,
-                'colsample_bylevel': 0.8,
-                'reg_lambda' : 10.5,
-                'reg_alpha' : 0.9,
-                'n_estimators' : 10000,
-                'random_state': 42,
-                'tree_method':'hist',
-            }
-        
-        grid_params = {
-                'max_depth': [1,2,5,10,15],
-            }
-        
-        name = 'xgboost_test'
-        task_type = 'regression'
-        device='cpu'
-        loss = 'rmse'
-        check_and_create_path(Path('./Test') / name)
-
-        logger.info(f'Configuration du modèle XGBoost pour la {task_type} sur : {device} avec une loss {loss}')
-        model = get_model(type='xgboost', name=name, device=device, task_type=task_type, params=params, loss='rmse')
-
-        logger.info('Fit du modèle avec les données d entraînement')
-        model.fit(X_train, y_train, optimization='grid', grid_params=grid_params, fit_params={})
-
-        logger.info('Prédiction avec les données de test')
-        predictions = model.predict(X_test)
-
-        logger.info('Si le modèle est de type arbre, tracer l arbre')
-        if isinstance(model, ModelTree):
-            features_name = [f"feature_{i}" for i in range(X_train.shape[1])]
-            model.plot_tree(features_name=features_name, outname="xgboost", dir_output=Path("./Test") / name, figsize=(50,25))
-
-        logger.info('Afficher les résultats')
-        logger.info(f"Sample predictions: {predictions[:10]}")
-
-        logger.info('Afficher l importance des caractéristiques')
-        model.plot_features_importance(X_train, y_train, features_name, "xgboost_importance", Path("./Test") / name)
-
-        param_test = 'max_depth'
-        logger.info(f'Afficher l influence d un paramètre {param_test}')
-        if hasattr(model, 'cv_results_') and model.cv_results_ is not None:
-            model.plot_param_influence(param_test, Path("./Test") / name)
-
-    elif test_id == '2':
-    ################################ FUSION ########################################
-        name = 'fusion_mode'
-        check_and_create_path(Path('./Test') / name)
-        # Usage example:
-        logger.info('Initialize base models')
-        xgb_model = Model(XGBRegressor(), loss='rmse', name='xgb')
-        lgb_model = Model(LGBMRegressor(), loss='rmse', name='lgb')
-        ngb_model = Model(NGBRegressor(Dist=Normal, Score=LogScore), loss='rmse', name='ngb')
-
-        logger.info('Initialize fusion model')
-        fusion_model = ModelFusion([xgb_model, lgb_model, ngb_model], LinearRegression(), loss='rmse', name='fusion_rf')
-
-        logger.info('Fit the fusion model')
-        fusion_model.fit([X_train, X_train, X_train], [y_train, y_train, y_train], y_train,
-                        optimization_list='skip', 
-                        grid_params_list=None)
-        
-        predictions = fusion_model.predict([X_test, X_test, X_test])
-        plt.figure(figsize=(15,15))
-        plt.plot(y, label='y')
-        plt.plot(predictions, label='predictions')
-        plt.legend()
-        plt.savefig(Path('./Test') / name / 'predictions.png')
-        
-        features_name = [f"feature_{i}" for i in range(X_train.shape[1])]
-
-        logger.info('Afficher l importance des caractéristiques')
-        fusion_model.plot_features_importance(X_set=[X_train, X_train, X_train], y_set=y_train, names=features_name,
-                                              outname="train_importance", dir_output=Path("./Test") / name, mode='bar', figsize=(50,25))
-
-        logger.info('Afficher l importance des caractéristiques de chaque modèle')
-        fusion_model.plot_features_importance_list(X_list=[X_train, X_train, X_train], y_list=[y_train, y_train, y_train],
-                                                   names_list=[features_name, features_name, features_name], outname="train", dir_output=Path("./Test") / name,
-                                                   mode='bar', figsize=(50,25))
-    else:
-        raise ValueError(f'{test_id} Unknowed')

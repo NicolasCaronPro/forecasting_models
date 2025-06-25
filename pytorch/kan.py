@@ -4,8 +4,8 @@ import math
 from forecasting_models.pytorch.utils import *
 from forecasting_models.pytorch.models import *
 from torch.nn import LSTMCell
-from kan import KANLayer, MultKAN
-
+#from kan import KANLayer, MultKAN
+"""
 class KANnetwork(MultKAN):
     def __init__(
         self,
@@ -164,3 +164,4 @@ class TKAN(torch.nn.Module):
             return output, x
         else:
             return output
+"""

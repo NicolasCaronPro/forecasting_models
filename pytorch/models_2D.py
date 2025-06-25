@@ -11,22 +11,29 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from forecasting_models.pytorch.utils import *
-from conv_lstm import ConvLSTM
+from forecasting_models.pytorch.conv_lstm import *
+
+import torch
+from torch.nn import ReLU, Identity
 
 class Zhang(torch.nn.Module):
-    def __init__(self, in_channels, conv_channels, fc_channels, dropout, binary, device, n_sequences, return_hidden=False):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device, n_sequences, return_hidden=False, out_channels=None, task_type='classification'):
         super(Zhang, self).__init__()
         torch.manual_seed(42)
+
+        self.input_batch_norm = torch.nn.BatchNorm2d(in_channels).to(device)
 
         self.return_hidden = return_hidden
 
         self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
         self.conv_list = []
+        self.batch_norm_list = []
         self.fc_list = []
 
         for i in range(len(conv_channels) - 1):
             self.conv_list.append(torch.nn.Conv2d(in_channels=conv_channels[i], out_channels=conv_channels[i+1], kernel_size=(3,3), padding='same').to(device))
+            self.batch_norm_list.append(torch.nn.BatchNorm2d(conv_channels[i+1]).to(device))
 
         self.pooling = torch.nn.MaxPool2d(kernel_size=(2,2), stride=2).to(device)
         self.activation = ReLU().to(device)
@@ -34,31 +41,32 @@ class Zhang(torch.nn.Module):
         for i in range(len(fc_channels) - 1):
             self.fc_list.append(torch.nn.Linear(in_features=fc_channels[i], out_features=fc_channels[i+1]).to(device))
 
-        self.last_linear = torch.nn.Linear(in_features=fc_channels[-1], out_features=2).to(device) if binary else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.last_linear = torch.nn.Linear(in_features=fc_channels[-1], out_features=out_channels).to(device) if out_channels is not None else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
         self.softmax = torch.nn.Softmax(dim=1)
         self.drop = torch.nn.Dropout(dropout) if dropout > 0.0 else Identity().to(device)
+        
         self.conv_list = torch.nn.ModuleList(self.conv_list)
+        self.batch_norm_list = torch.nn.ModuleList(self.batch_norm_list)
         self.fc_list = torch.nn.ModuleList(self.fc_list)
 
         self.num_conv = len(self.conv_list)
         self.num_fc = len(self.fc_list)
 
-        self.binary = binary
+        self.task_type = task_type
+        self.out_channels = out_channels
         self.is_graph_or_node = False
     
-    def forward(self, X, edge_index, graphs=None):
+    def forward(self, X, edge_index=None, graphs=None):
         # egde index not used, API configuration
-        # Zhang model doesn't take in account time series
-        # (B, H, W, F, T) -> (B, H, W, F)
 
         x = X[:,:,:,:,-1]
-        # (B, H, W, F) -> (B, F, H, W)
-        #x = x.permute(0,3,1,2)
 
         # Bottleneck
+        x = self.input_batch_norm(x)
         x = self.input(x)
         for i, layer in enumerate(self.conv_list):
             x = layer(x)
+            x = self.batch_norm_list[i](x)  # Apply BatchNorm2D after convolution
             if i != self.num_conv - 1:
                 x = self.activation(x)
                 x = self.pooling(x)
@@ -72,7 +80,8 @@ class Zhang(torch.nn.Module):
                 x = self.activation(x)
 
         x_linear = self.last_linear(x)
-        if self.binary:
+
+        if self.task_type == 'classification':
             output = self.softmax(x_linear)
         else:
             output = x_linear
@@ -81,42 +90,150 @@ class Zhang(torch.nn.Module):
             return output, x
         else:
             return output
-    
+
+########################### ConvLTSM ####################################
+
+class Bottleneck(nn.Module):
+    def __init__(self, in_places, places, stride=1,downsampling=False, expansion = 4, device=None):
+        super(Bottleneck,self).__init__()
+        self.expansion = expansion
+        self.downsampling = downsampling
+
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(in_channels=in_places,out_channels=places,kernel_size=1,stride=1, bias=False).to(device),
+            nn.BatchNorm2d(places).to(device),
+            nn.ReLU(inplace=False).to(device),
+            nn.Conv2d(in_channels=places, out_channels=places, kernel_size=3, stride=stride, padding=1, bias=False).to(device),
+            nn.BatchNorm2d(places).to(device),
+            nn.ReLU(inplace=False).to(device),
+            nn.Conv2d(in_channels=places, out_channels=places*self.expansion, kernel_size=1, stride=1, bias=False).to(device),
+            nn.BatchNorm2d(places*self.expansion).to(device),
+        )
+
+        if self.downsampling:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channels=in_places, out_channels=places*self.expansion, kernel_size=1, stride=stride, bias=False).to(device),
+                nn.BatchNorm2d(places*self.expansion).to(device)
+            )
+        self.relu = nn.ReLU(inplace=False)
+
+    def forward(self, x):
+        residual = x
+        out = self.bottleneck(x)
+        if self.downsampling:
+            residual = self.downsample(x)
+        out += residual
+        out = self.relu(out)
+        return out
+
+class ResNet(torch.nn.Module):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device, n_sequences, avgpooling=1, return_hidden=False, out_channels=None, task_type='classification'):
+        super(ResNet, self).__init__()
+        torch.manual_seed(42)
+
+        self.input_batch_norm = torch.nn.BatchNorm2d(in_channels).to(device)
+
+        self.return_hidden = return_hidden
+
+        self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
+
+        self.bottleneck = []
+        self.batch_norm_list = []
+        self.fc_list = []
+
+        for i in range(len(conv_channels) - 1):
+            self.bottleneck.append(Bottleneck(conv_channels[i], conv_channels[i + 1], stride=1, downsampling=True, expansion=1, device=device))
+
+        self.activation = ReLU().to(device)
+        self.pooling = torch.nn.AdaptiveAvgPool2d(avgpooling)
+
+        for i in range(len(fc_channels) - 1):
+            self.fc_list.append(torch.nn.Linear(in_features=fc_channels[i], out_features=fc_channels[i+1]).to(device))
+
+        self.last_linear = torch.nn.Linear(in_features=fc_channels[-1], out_features=out_channels).to(device) if out_channels is not None else torch.nn.Linear(in_features=fc_channels[-1], out_features=1).to(device)
+        self.softmax = torch.nn.Softmax(dim=1)
+        self.drop = torch.nn.Dropout(dropout) if dropout > 0.0 else Identity().to(device)
+
+        self.bottleneck = torch.nn.ModuleList(self.bottleneck)
+        self.batch_norm_list = torch.nn.ModuleList(self.batch_norm_list)
+        self.fc_list = torch.nn.ModuleList(self.fc_list)
+
+        self.num_conv = len(self.bottleneck)
+        self.num_fc = len(self.fc_list)
+
+        self.task_type = task_type
+        self.out_channels = out_channels
+        self.is_graph_or_node = False
+
+    def forward(self, X, edge_index=None, graphs=None):
+        # egde index not used, API configuration
+        x = X[:,:,:,:,-1]
+
+        # Bottleneck
+        x = self.input_batch_norm(x)
+        x = self.input(x)
+        for i, layer in enumerate(self.bottleneck):
+            x = layer(x)
+        
+        x = self.pooling(x)
+        x = x.reshape(x.shape[0], -1)
+
+        for i, layer in enumerate(self.fc_list):
+            x = layer(x)
+            x = self.drop(x)
+            x = self.activation(x)
+
+        x_linear = self.last_linear(x)
+
+        if self.task_type == 'classification':
+            output = self.softmax(x_linear)
+        else:
+            output = x_linear
+
+        if self.return_hidden:
+            return output, x
+        else:
+            return output
+
 ########################### ConvLTSM ####################################    
 
 class CONVLSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_dim, end_channels, size, n_sequences, device, act_func, dropout, binary):
+    def __init__(self, in_channels, hidden_dim, end_channels, size, n_sequences, device, act_func, dropout, out_channels=None, task_type='classification'):
         super(CONVLSTM, self).__init__()
 
+        self.input_batch_norm = torch.nn.BatchNorm3d(in_channels).to(device)
         num_layer = len(hidden_dim)
         self.device = device
         self.dropout = torch.nn.Dropout(dropout) if dropout > 0 else torch.nn.Identity()
-        self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=hidden_dim[0], kernel_size=(1,1)).to(device)
+        self.input = torch.nn.Conv3d(in_channels=in_channels, out_channels=hidden_dim[0], kernel_size=(1, 1, 1)).to(device)
 
         self.convlstm = ConvLSTM(input_dim=hidden_dim[0],
                                 hidden_dim=hidden_dim,
-                                kernel_size=[3 for i in range(num_layer)] ,
+                                kernel_size=[(3, 3, 3) for i in range(num_layer)],
                                 num_layers=num_layer,
                                 batch_first=True,
                                 bias=True,
                                 return_all_layers=False).to(device)
-
+        
         self.conv1 = torch.nn.Conv2d(hidden_dim[-1], 1, kernel_size=(3,3), padding=1, stride=1).to(device)
         
         self.output = OutputLayer(in_channels=hidden_dim[-1] * size[0] * size[1], end_channels=end_channels,
                         n_steps=n_sequences, device=device, act_func=act_func,
-                        binary=binary)
+                        task_type=task_type, out_channels=out_channels)
+
+        self.task_type = task_type
         
-    def forward(self, X, edge_index):
+    def forward(self, X, edge_index=None):
         # edge Index is used for api facility but it is ignore
-        X = self.input(X)
-        X = X.permute(0, 4, 1, 3, 2)
-        x, _ = self.convlstm(X)
+        x = self.input_batch_norm(X)
+        x = self.input(x)
+        x = x.permute(0, 4, 1, 3, 2)
+        x, _ = self.convlstm(x)
         x = x[0][:, -1, :, :]
         x = self.dropout(x)
-        x = self.output(x)
+        output = self.output(x)
 
-        return x 
+        return output
 
 ########################### ST-GATCONVLSTM ####################################    
 
@@ -131,7 +248,7 @@ class ST_GATCONVLSTM(torch.nn.Module):
 
         self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels, n_steps=n_sequences, device=device, act_func=act_func)
 
-    def forward(self, X, edge_index):
+    def forward(self, X, edge_index=None):
         x = self.input(X)
         # TO DO
         x = self.output(x)
@@ -149,7 +266,7 @@ class ST_GATCONV2D(torch.nn.Module):
         
         self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels, n_steps=n_sequences, device=device, act_func=act_func)
 
-    def forward(self, X, edge_index):
+    def forward(self, X, edge_index=None):
         x = self.input(X)
         # TO DO
         x = self.output(x)
@@ -228,26 +345,26 @@ class OutConv(torch.nn.Module):
         return self.conv(x)
 
 class UNet(torch.nn.Module):
-    def __init__(self, n_channels, n_classes, features, bilinear=False):
+    def __init__(self, n_channels, out_channels, conv_channels, bilinear=False):
         super(UNet, self).__init__()
         self.n_channels = n_channels
-        self.n_classes = n_classes
+        self.out_channels = out_channels
         self.bilinear = bilinear
 
-        self.inc = DoubleConv(n_channels, features[0])
+        self.inc = DoubleConv(n_channels, conv_channels[0])
 
         self.downs = torch.nn.ModuleList()
-        for idx in range(len(features) - 1):
-            self.downs.append(Down(features[idx], features[idx + 1]))
+        for idx in range(len(conv_channels) - 1):
+            self.downs.append(Down(conv_channels[idx], conv_channels[idx + 1]))
 
         self.ups = torch.nn.ModuleList()
-        for idx in range(len(features) - 1, 0, -1):
-            self.ups.append(Up(features[idx], features[idx - 1], bilinear))
+        for idx in range(len(conv_channels) - 1, 0, -1):
+            self.ups.append(Up(conv_channels[idx], conv_channels[idx - 1], bilinear))
 
-        self.outc = OutConv(features[0], n_classes)
+        self.outc = OutConv(conv_channels[0], out_channels)
         self.is_graph_or_node = False
 
-    def forward(self, x, edge_index, graph=None):
+    def forward(self, x, edge_index=None, graph=None):
         if len(x.shape) == 5:
             x = x[:, :, :, :, -1]
             
@@ -267,7 +384,7 @@ class UNet(torch.nn.Module):
         x = self.outc(x)
         
         return x
-
+    
 #################################### ULSTM #############################################
 
 class ULSTM(torch.nn.Module):
@@ -277,6 +394,7 @@ class ULSTM(torch.nn.Module):
         self.n_classes = n_classes
         self.bilinear = bilinear
 
+        self.input_batch_norm = torch.nn.BatchNorm2d(in_channels)
         self.inc = DoubleConv(n_channels, features[0])
 
         self.downs = torch.nn.ModuleList()
@@ -297,9 +415,10 @@ class ULSTM(torch.nn.Module):
 
         self.outc = OutConv(features[0], n_classes)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index=None):
 
         x = x[:, :, :, :, -1]
+        x = self.input_batch_norm(x)
         x = self.inc(x)
         skip_connections = [x]
 
