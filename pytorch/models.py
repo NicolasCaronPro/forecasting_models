@@ -2108,5 +2108,4 @@ class TransformerNet(torch.nn.Module):
 
         x = self.classifier(x)
         x = self.output_activation(x)
-
         return x
