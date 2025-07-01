@@ -145,6 +145,63 @@ class ExponentialLoss(torch.nn.Module):
         else:
             return torch.mean(exp_loss)
 
+class BCELoss(torch.nn.Module):
+    """Binomial Cross Entropy loss for ordinal classification.
+
+    This implementation follows the "All-threshold" approach for ordinal
+    regression where a multi-class ordinal target of ``num_classes`` is
+    converted into ``num_classes - 1`` binary classification tasks. Each
+    output of ``y_pred`` represents the probability that the true class is
+    strictly greater than the associated threshold.
+    """
+
+    def __init__(self, num_classes: int):
+        super(BCELoss, self).__init__()
+        self.num_classes = num_classes
+
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        sample_weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute the BCE loss for ordinal targets.
+
+        Parameters
+        ----------
+        y_pred : torch.Tensor
+            Tensor of shape ``(N, num_classes - 1)`` containing the predicted
+            probabilities ``P(y > k)`` for each threshold ``k``.
+        y_true : torch.Tensor
+            Tensor of shape ``(N,)`` with integer labels in ``[0, num_classes-1]``.
+        sample_weights : Optional[torch.Tensor]
+            Optional tensor of shape ``(N,)`` with per-sample weights.
+
+        Returns
+        -------
+        torch.Tensor
+            The averaged binomial cross entropy loss.
+        """
+
+        # Ensure target is one-dimensional and integer
+        y_true = y_true.long().view(-1)
+
+        # Create binary targets for each threshold
+        thresholds = torch.arange(self.num_classes - 1, device=y_true.device)
+        y_true_bin = (y_true.unsqueeze(1) > thresholds).float()
+
+        # BCE for each threshold
+        loss_per_thresh = F.binary_cross_entropy(y_pred, y_true_bin, reduction="none")
+
+        # Average loss over thresholds for each sample
+        loss = loss_per_thresh.mean(dim=1)
+
+        if sample_weights is not None:
+            weighted_loss = loss * sample_weights
+            return torch.sum(weighted_loss) / torch.sum(sample_weights)
+        else:
+            return torch.mean(loss)
+
 class WeightedCrossEntropyLossLearnable(torch.nn.Module):
     def __init__(self, num_classes=5, min_value=0.5):
         super(WeightedCrossEntropyLossLearnable, self).__init__()
