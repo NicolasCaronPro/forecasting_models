@@ -148,11 +148,12 @@ class ExponentialLoss(torch.nn.Module):
 class BCELoss(torch.nn.Module):
     """Binomial Cross Entropy loss for ordinal classification.
 
-    This implementation follows the "All-threshold" approach for ordinal
-    regression where a multi-class ordinal target of ``num_classes`` is
-    converted into ``num_classes - 1`` binary classification tasks. Each
-    output of ``y_pred`` represents the probability that the true class is
-    strictly greater than the associated threshold.
+    In this repository the models return a probability for each class, e.g.
+    a tensor of shape ``(N, num_classes)`` when ``num_classes`` is the number of
+    ordinal categories.  In order to compute the BCE in an "all-threshold"
+    fashion, these class probabilities are converted into ``num_classes - 1``
+    binary classification targets representing ``P(y > k)`` for each threshold
+    ``k``.
     """
 
     def __init__(self, num_classes: int):
@@ -170,8 +171,9 @@ class BCELoss(torch.nn.Module):
         Parameters
         ----------
         y_pred : torch.Tensor
-            Tensor of shape ``(N, num_classes - 1)`` containing the predicted
-            probabilities ``P(y > k)`` for each threshold ``k``.
+            Tensor of shape ``(N, num_classes)`` containing the predicted
+            probabilities for each class. These probabilities will be
+            converted internally into ``P(y > k)`` for each threshold ``k``.
         y_true : torch.Tensor
             Tensor of shape ``(N,)`` with integer labels in ``[0, num_classes-1]``.
         sample_weights : Optional[torch.Tensor]
@@ -186,12 +188,16 @@ class BCELoss(torch.nn.Module):
         # Ensure target is one-dimensional and integer
         y_true = y_true.long().view(-1)
 
+        # Convert class probabilities into P(y > k) for each threshold k
+        cumulative = torch.cumsum(y_pred, dim=1)
+        y_pred_bin = 1 - cumulative[:, :-1]
+
         # Create binary targets for each threshold
         thresholds = torch.arange(self.num_classes - 1, device=y_true.device)
         y_true_bin = (y_true.unsqueeze(1) > thresholds).float()
 
         # BCE for each threshold
-        loss_per_thresh = F.binary_cross_entropy(y_pred, y_true_bin, reduction="none")
+        loss_per_thresh = F.binary_cross_entropy(y_pred_bin, y_true_bin, reduction="none")
 
         # Average loss over thresholds for each sample
         loss = loss_per_thresh.mean(dim=1)
