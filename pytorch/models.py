@@ -21,7 +21,7 @@ import math
 
 ##################################### SIMPLE GRAPH #####################################
 class NetGCN(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type):
+    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type, return_hidden=False):
         super(NetGCN, self).__init__()
         self.layer1 = GraphConv(in_dim * n_sequences, hidden_dim).to(device)
         self.layer2 = GraphConv(hidden_dim, hidden_dim_2).to(device)
@@ -30,6 +30,7 @@ class NetGCN(torch.nn.Module):
         self.device = device
         self.task_type = task_type
         self.soft = torch.nn.Softmax(dim=1)
+        self.return_hidden = return_hidden
 
         self.output_layer = OutputLayer(
             in_channels=hidden_dim_2,
@@ -48,9 +49,13 @@ class NetGCN(torch.nn.Module):
         x = F.relu(self.layer1(g, features))
         x = self.layer2(g, x)
 
-        x = self.output_layer(x)
+        hidden = x
+        output = self.output_layer(hidden)
 
-        return x
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
     
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
@@ -61,7 +66,7 @@ class MLPLayer(torch.nn.Module):
         return self.mlp(x)
     
 class NetMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type):
+    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False):
         super(NetMLP, self).__init__()
         self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim, device)
         self.layer3 = MLPLayer(hidden_dim, hidden_dim, device)
@@ -70,16 +75,21 @@ class NetMLP(torch.nn.Module):
         self.task_type = task_type
         self.n_sequences = n_sequences
         self.soft = torch.nn.Softmax(dim=1)
+        self.return_hidden = return_hidden
 
     def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
         x = F.relu(self.layer4(x))
-        x = self.layer2(x)
+        hidden = self.layer2(x)
+        output = hidden
         if self.task_type == 'classification':
-            x = self.soft(x)
-        return x
+            output = self.soft(hidden)
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
     
 #####################################################""""
 
@@ -1004,11 +1014,14 @@ class Sep_LSTM_GNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
+        x = self.output_layer(hidden)
         output = self.output_activation(x)
-        return output
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
 
 class Sep_GRU_GNN(torch.nn.Module):
     def __init__(
@@ -1157,6 +1170,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         temporal_idx=None,
         use_layernorm=False,
         dropout=0.03,
+        return_hidden=False,
     ):
         super(LSTM_GNN_Feedback, self).__init__()
         
@@ -1165,6 +1179,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         self.static_idx = static_idx
         self.temporal_idx = temporal_idx
         self.task_type = task_type
+        self.return_hidden = return_hidden
 
         # LSTMCell: traite séquentiellement les pas de temps
         self.lstm_cell = torch.nn.LSTMCell(
@@ -1252,11 +1267,14 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
+        x = self.output_layer(hidden)
         output = self.output_activation(x)
-        return output
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
 
 class GRU(torch.nn.Module):
     def __init__(self, in_channels, gru_size, hidden_channels, end_channels, n_sequences, device,
@@ -1337,12 +1355,12 @@ class GRU(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
+        x = self.output_layer(hidden)
         output = self.output_activation(x)
         if self.return_hidden:
-            return output, x
+            return output, hidden
         else:
             return output
 
@@ -1436,7 +1454,7 @@ class LSTM(torch.nn.Module):
             return output
         
 class DilatedCNN(torch.nn.Module):
-    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False):
+    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False):
         super(DilatedCNN, self).__init__()
 
         # Initialisation des listes pour les convolutions et les BatchNorm
@@ -1469,7 +1487,7 @@ class DilatedCNN(torch.nn.Module):
         # Activation function
         self.act_func = getattr(torch.nn, act_func)()
         
-        self.return_hidden = False 
+        self.return_hidden = return_hidden
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1524,7 +1542,8 @@ class GraphCast(torch.nn.Module):
         has_time_dim: bool = False,
         n_sequences = 1,
         act_func='ReLU',
-        is_graph_or_node=False):
+        is_graph_or_node=False,
+        return_hidden=False):
         super(GraphCast, self).__init__()
 
         self.net = GraphCastNet(
@@ -1548,6 +1567,7 @@ class GraphCast(torch.nn.Module):
         self.is_graph_or_node = is_graph_or_node == 'graph'
         
         self.act_func = getattr(torch.nn, act_func)()
+        self.return_hidden = return_hidden
         
         # Output activation depending on task
         if task_type == 'classification':
@@ -1600,6 +1620,7 @@ class GraphCastGRU(torch.nn.Module):
         n_sequences: int = 1,
         act_func: str = "ReLU",
         is_graph_or_node: bool = False,
+        return_hidden: bool = False,
     ):
         """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1652,6 +1673,7 @@ class GraphCastGRU(torch.nn.Module):
         self.is_graph_or_node = is_graph_or_node == "graph"
 
         self.act_func = getattr(torch.nn, act_func)()
+        self.return_hidden = return_hidden
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1682,10 +1704,13 @@ class GraphCastGRU(torch.nn.Module):
 
         # Head
         x = self.act_func(self.linear1(x))
-        x = self.act_func(self.linear2(x))
-        x = self.output_layer(x)
+        hidden = self.act_func(self.linear2(x))
+        x = self.output_layer(hidden)
         output = self.output_activation(x)
-        return output
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,
@@ -1770,7 +1795,7 @@ class GraphCastGRU(torch.nn.Module):
 class MultiScaleGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
-        graph_or_node, task_type, num_sequence=1, out_channels=5
+        graph_or_node, task_type, num_sequence=1, out_channels=5, return_hidden=False
     ):
         super(MultiScaleGraph, self).__init__()
         
@@ -1780,6 +1805,7 @@ class MultiScaleGraph(torch.nn.Module):
         self.task_type = task_type
         self.device = device
         self.features_per_scale = features_per_scale
+        self.return_hidden = return_hidden
 
         ### Embedding Layer (for scale 0 only)
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -1845,13 +1871,19 @@ class MultiScaleGraph(torch.nn.Module):
 
         ### Step 5: Final prediction at each scale
         outputs = []
+        hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
             outputs.append(F.softmax(logits, dim=-1))
+            if i == self.num_output_scale - 1:
+                hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        return outputs
+        if self.return_hidden:
+            return outputs, hidden
+        else:
+            return outputs
 
 class CrossScaleAttention(torch.nn.Module):
     def __init__(self, input_dim, output_dim, num_heads):
@@ -1890,7 +1922,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
         graph_or_node='graph', task_type='classification',
-        num_sequence=1, out_channels=5, num_heads=4
+        num_sequence=1, out_channels=5, num_heads=4, return_hidden=False
     ):
         super(MultiScaleAttentionGraph, self).__init__()
 
@@ -1900,6 +1932,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
         self.task_type = task_type
         self.device = device
         self.features_per_scale = features_per_scale
+        self.return_hidden = return_hidden
 
         # Embedding Layer for scale 0
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -1963,13 +1996,19 @@ class MultiScaleAttentionGraph(torch.nn.Module):
 
         # Step 5: Output heads for predictions
         outputs = []
+        hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
             outputs.append(F.softmax(logits, dim=-1))
+            if i == self.num_output_scale - 1:
+                hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        return outputs
+        if self.return_hidden:
+            return outputs, hidden
+        else:
+            return outputs
     
 ##############################################################################################################
 #                                                                                                            #
@@ -2018,6 +2057,7 @@ class TransformerNet(torch.nn.Module):
             graph_or_node='node',
             out_channels=2,
             task_type='binary',
+            return_hidden=False,
     ):
 
         super().__init__()
@@ -2069,6 +2109,7 @@ class TransformerNet(torch.nn.Module):
             self.classifier = torch.nn.Linear(d_model, out_channels)
 
         self.d_model = d_model
+        self.return_hidden = return_hidden
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -2106,6 +2147,9 @@ class TransformerNet(torch.nn.Module):
 
             x = torch.cat([self.resh(g1, x) * x, self.resh(g2, x) * y], dim=1)
 
-        x = self.classifier(x)
-        x = self.output_activation(x)
-        return x
+        hidden = self.classifier(x)
+        output = self.output_activation(hidden)
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
