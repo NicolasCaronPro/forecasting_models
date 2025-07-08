@@ -15,8 +15,11 @@ from forecasting_models.pytorch.graphcast.graph_cast_net import *
 from dgl.nn.pytorch.conv import GraphConv, GATConv
 from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU
+from blitz.modules import BayesianLinear
+from blitz.utils import variational_estimator
 import dgl
 import dgl.function as fn
+import torch
 import math
 
 ##################################### SIMPLE GRAPH #####################################
@@ -2155,39 +2158,13 @@ class TransformerNet(torch.nn.Module):
             return output
 
 
-class BayesianLinear(torch.nn.Module):
-    """Simple Bayesian linear layer with Gaussian prior."""
-    def __init__(self, in_features, out_features, prior_var=1.0, device='cpu'):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.prior_var = prior_var
-
-        self.weight_mu = torch.nn.Parameter(torch.zeros(in_features, out_features, device=device))
-        self.weight_logvar = torch.nn.Parameter(torch.zeros(in_features, out_features, device=device))
-        self.bias_mu = torch.nn.Parameter(torch.zeros(out_features, device=device))
-        self.bias_logvar = torch.nn.Parameter(torch.zeros(out_features, device=device))
-
-    def forward(self, x):
-        weight = self.weight_mu + torch.exp(0.5 * self.weight_logvar) * torch.randn_like(self.weight_mu)
-        bias = self.bias_mu + torch.exp(0.5 * self.bias_logvar) * torch.randn_like(self.bias_mu)
-        return x @ weight + bias
-
-    def kl_loss(self):
-        weight_var = torch.exp(self.weight_logvar)
-        bias_var = torch.exp(self.bias_logvar)
-        kl_weight = 0.5 * (weight_var + self.weight_mu ** 2 / self.prior_var - 1 - self.weight_logvar + math.log(self.prior_var)).sum()
-        kl_bias = 0.5 * (bias_var + self.bias_mu ** 2 / self.prior_var - 1 - self.bias_logvar + math.log(self.prior_var)).sum()
-        return kl_weight + kl_bias
-
-
 class BayesianMLP(torch.nn.Module):
-    """Minimal Bayesian MLP for demonstration."""
+    """Minimal Bayesian MLP implemented with blitz."""
     def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
                  device='cpu', graph_or_node='node', return_hidden=False):
         super().__init__()
-        self.fc1 = BayesianLinear(in_dim, hidden_dim, device=device)
-        self.fc2 = BayesianLinear(hidden_dim, out_channels, device=device)
+        self.fc1 = BayesianLinear(in_dim, hidden_dim)
+        self.fc2 = BayesianLinear(hidden_dim, out_channels)
         self.to(device)
 
         self.graph_or_node = graph_or_node
