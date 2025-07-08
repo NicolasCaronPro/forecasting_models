@@ -731,6 +731,31 @@ def weighted_class_loss_objective(y, pred):
 
     return gradient.flatten(), hessian.flatten()
 
+def mse_obj(y, pred):
+    """Multi-class MSE objective used by :func:`mcewk_obj`."""
+
+    pred = pred.reshape(y.shape[0], -1)
+    y_onehot = np.zeros_like(pred)
+    y_onehot[np.arange(y.shape[0]), y.astype(int)] = 1.0
+
+    grad = 2 * (pred - y_onehot)
+    hess = 2 * np.ones_like(pred)
+
+    return grad.flatten(), hess.flatten()
+
+
+def mcewk_obj(y, pred, C=0.5):
+    """Combined weighted kappa and MSE objective for XGBoost."""
+
+    pred = pred.reshape(y.shape[0], -1)
+    grad_wk, hess_wk = weighted_class_loss_objective(y, pred)
+    grad_mse, hess_mse = mse_obj(y, pred)
+
+    grad = C * grad_wk + (1 - C) * grad_mse
+    hess = C * hess_wk + (1 - C) * hess_mse
+
+    return grad, hess
+
 def softmax(x):
     '''Softmax function with x as input vector.'''
     e = np.exp(x)
@@ -1056,7 +1081,61 @@ class dice_loss_class(object):
             hess.append(hess_row)
         
         return (grad, hess)
-    
+
+class mcewk_class(object):
+    """CatBoost objective combining weighted kappa and MSE."""
+
+    def __init__(self, C=0.5, num_classes=5):
+        self.C = C
+        self.num_classes = num_classes
+        self.ratio_matrix = np.array([
+            [0.1, 0.25, 0.5, 0.75, 1.0],
+            [0.25, 0.25, 0.25, 0.5, 0.75],
+            [0.5, 0.25, 0.5, 0.25, 0.5],
+            [0.75, 0.5, 0.25, 0.75, 0.25],
+            [1.0, 0.75, 0.5, 0.25, 1.0],
+        ])
+
+    def __call__(self, y_true, y_pred):
+        y_pred = y_pred.reshape(-1, self.num_classes)
+        g_wk, h_wk = weighted_class_loss_objective(y_true, y_pred)
+        g_mse, h_mse = mse_obj(y_true, y_pred)
+        grad = self.C * g_wk + (1 - self.C) * g_mse
+        hess = self.C * h_wk + (1 - self.C) * h_mse
+        return grad, hess
+
+    def softmax(self, x):
+        exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))
+        return exp_x / np.sum(exp_x, axis=1, keepdims=True)
+
+    def calc_ders_multi(self, approx, target, weight):
+        approx = [approx[i] - max(approx) for i in range(len(approx))]
+        exp_approx = [np.exp(a) for a in approx]
+        exp_sum = np.sum(exp_approx)
+
+        grad = []
+        hess = []
+        ratio = self.ratio_matrix[int(target)]
+        for j in range(len(approx)):
+            der1 = -exp_approx[j] / exp_sum
+            if j == target:
+                der1 += 1
+            hess_row = []
+            for j2 in range(len(approx)):
+                der2 = exp_approx[j] * exp_approx[j2] / (exp_sum ** 2)
+                if j2 == j:
+                    der2 -= exp_approx[j] / exp_sum
+                wk_h = der2 * ratio[j]
+                mse_h = 2.0 if j == j2 else 0.0
+                hess_row.append(self.C * wk_h + (1 - self.C) * mse_h)
+
+            wk_g = der1 * ratio[j]
+            mse_g = 2 * (approx[j] - (1 if j == target else 0))
+            grad.append(self.C * wk_g + (1 - self.C) * mse_g)
+            hess.append(hess_row)
+
+        return grad, hess
+
 class LogLossDual:
     def __init__(self, y):
         self.y_temp = y  # Store reference labels
