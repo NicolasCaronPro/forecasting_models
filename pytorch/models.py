@@ -19,6 +19,7 @@ from blitz.modules import BayesianLinear
 from blitz.utils import variational_estimator
 import dgl
 import dgl.function as fn
+import torch
 import math
 
 ##################################### SIMPLE GRAPH #####################################
