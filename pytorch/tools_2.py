@@ -747,7 +747,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
           'in_dim':in_dim,
           'hidden_dim' : in_dim,
           'end_channels' : 64,
-          'output_channels' : out_channels,          
+          'output_channels' : out_channels,
             'n_sequences' : k_days + 1,
             'device' : device,
             'return_hidden': False
@@ -757,6 +757,20 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         default_params['task_type'] = task_type
         model = NetMLP(**default_params)
+        model_params.update(default_params)
+    elif model_name == 'BayesianMLP':
+        default_params = {
+            'in_dim': in_dim,
+            'hidden_dim': in_dim,
+            'out_channels': out_channels,
+            'task_type': task_type,
+            'device': device,
+            'graph_or_node': graph_or_node,
+            'return_hidden': False,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = BayesianMLP(**default_params)
         model_params.update(default_params)
     else:
         raise ValueError(f"Modèle '{model_name}' non reconnu.")

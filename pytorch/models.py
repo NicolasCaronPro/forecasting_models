@@ -15,8 +15,11 @@ from forecasting_models.pytorch.graphcast.graph_cast_net import *
 from dgl.nn.pytorch.conv import GraphConv, GATConv
 from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU
+from blitz.modules import BayesianLinear
+from blitz.utils import variational_estimator
 import dgl
 import dgl.function as fn
+import torch
 import math
 
 ##################################### SIMPLE GRAPH #####################################
@@ -2153,3 +2156,37 @@ class TransformerNet(torch.nn.Module):
             return output, hidden
         else:
             return output
+
+
+
+
+@variational_estimator
+class BayesianMLP(torch.nn.Module):
+    """Minimal Bayesian MLP implemented with blitz."""
+    def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
+                 device='cpu', graph_or_node='node', return_hidden=False):
+        super().__init__()
+        self.fc1 = BayesianLinear(in_dim, hidden_dim)
+        self.fc2 = BayesianLinear(hidden_dim, out_channels)
+        self.to(device)
+
+        self.graph_or_node = graph_or_node
+        self.return_hidden = return_hidden
+
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()
+
+    def forward(self, x, edge_index=None):
+        x = torch.relu(self.fc1(x))
+        hidden = self.fc2(x)
+        output = self.output_activation(hidden)
+        if self.return_hidden:
+            return output, hidden
+        return output
+
+    def kl_loss(self):
+        return self.fc1.kl_loss() + self.fc2.kl_loss()
