@@ -2158,9 +2158,6 @@ class TransformerNet(torch.nn.Module):
             return output
 
 
-
-
-@variational_estimator
 class BayesianMLP(torch.nn.Module):
     """Minimal Bayesian MLP implemented with blitz."""
     def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
