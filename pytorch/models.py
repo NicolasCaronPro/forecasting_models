@@ -17,9 +17,9 @@ from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU
 from blitz.modules import BayesianLinear
 from blitz.utils import variational_estimator
+from blitz.losses import kl_divergence_from_nn
 import dgl
 import dgl.function as fn
-import torch
 import math
 
 ##################################### SIMPLE GRAPH #####################################
@@ -892,7 +892,7 @@ class ST_GATLSTM(torch.nn.Module):
         output = self.output(x)
         
         return (output, x) if self.return_hidden else output
-
+    
 class Sep_LSTM_GNN(torch.nn.Module):
     def __init__(
         self,
@@ -1051,6 +1051,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         self.temporal_idx = temporal_idx
         self.is_graph_or_node = False
         self.device = device
+        self.return_hidden = False
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1136,7 +1137,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         if S == 0:
             gnn_out = torch.zeros(B, self.gnn_output_dim, device=x.device)
         else:
-            h = x_static.squeeze(-1)  # (B, S)
+            h = x_static.squeeze(-1)  # (B, S)false
             for layer in self.gnn_layers:
                 h = layer(graph, h)
                 h = torch.relu(h)
@@ -2039,6 +2040,8 @@ class PositionalEncoding(torch.nn.Module):
         """
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
+    
+################################################# TransformerNet #############################################################""
 
 class TransformerNet(torch.nn.Module):
     """
@@ -2070,7 +2073,7 @@ class TransformerNet(torch.nn.Module):
 
         # self.emb = torch.nn.Embedding(input_dim, d_model)
         self.channel_attention = channel_attention
-
+        
         self.lin_time = torch.nn.Linear(input_dim, d_model)
         self.lin_channel = torch.nn.Linear(seq_len, d_model)
 
@@ -2127,6 +2130,7 @@ class TransformerNet(torch.nn.Module):
 
     def forward(self, x_, edge_index=None):
         x_ = x_.permute(2, 0, 1)
+
         x = torch.tanh(self.lin_time(x_))
         x = self.pos_encoder(x)
         x = self.transformer_encoder_time(x)
@@ -2152,12 +2156,147 @@ class TransformerNet(torch.nn.Module):
 
         hidden = self.classifier(x)
         output = self.output_activation(hidden)
+        
         if self.return_hidden:
             return output, hidden
         else:
             return output
 
+class TransformerNetCutClient(torch.nn.Module):
+    def __init__(
+            self,
+            seq_len=30,
+            input_dim=24,
+            d_model=256,
+            nhead=8,
+            dim_feedforward=512,
+            num_layers=4,
+            dropout=0.1,
+            graph_or_node='node'):
 
+        super().__init__()
+        assert d_model % nhead == 0, "nheads must divide evenly into d_model"
+        
+        self.graph_or_node = graph_or_node == 'graph'
+
+        # self.emb = torch.nn.Embedding(input_dim, d_model)
+
+        self.lin_time = torch.nn.Linear(input_dim, d_model)
+
+        self.pos_encoder = PositionalEncoding(
+            d_model=d_model,
+            dropout=dropout
+        )
+
+        encoder_layer_time = torch.nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.transformer_encoder_time = torch.nn.TransformerEncoder(
+            encoder_layer_time,
+            num_layers=num_layers,
+        )
+
+    def resh(self, x, y):
+        return x.unsqueeze(1).expand(y.size(0), -1)
+
+    def forward(self, x_, edge_index=None):
+        print(x_.shape)
+        x_ = x_.permute(2, 0, 1)
+        x = torch.tanh(self.lin_time(x_))
+        """x = self.pos_encoder(x)
+        x = self.transformer_encoder_time(x)"""
+        return x
+
+class TransformerNetCutServer(torch.nn.Module):
+
+    def __init__(self,
+            d_model=256,
+            seq_len=1,
+            nhead=8,
+            dim_feedforward=512,
+            num_layers=4,
+            dropout=0.1,
+            channel_attention=True,
+            task_type='binary',
+            out_channels=2,
+            return_hidden=False,
+            graph_or_node='node'):
+        
+        super().__init__()
+
+        self.lin_channel = torch.nn.Linear(seq_len, d_model)
+        self.channel_attention = channel_attention
+
+        self.graph_or_node = graph_or_node == 'graph'
+        
+        encoder_layer_channel = torch.nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.transformer_encoder_channel = torch.nn.TransformerEncoder(
+            encoder_layer_channel,
+            num_layers=num_layers,
+        )
+
+        self.out_time = torch.nn.Linear(d_model, d_model)
+        self.out_channel = torch.nn.Linear(d_model, d_model)
+        #self.lin_channel = torch.nn.Linear(seq_len, d_model)
+
+        self.lin = torch.nn.Linear(d_model, 2)
+
+        if self.channel_attention:
+            self.classifier = torch.nn.Linear(d_model * 2, out_channels)
+        else:
+            self.classifier = torch.nn.Linear(d_model, out_channels)
+
+        self.d_model = d_model
+        self.return_hidden = return_hidden
+
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()  # For regression or custom handling
+
+    def forward(self, x_):
+        if self.channel_attention:
+            y = torch.transpose(x_, 0, 2)
+
+            y = torch.tanh(self.lin_channel(y))
+            
+            y = self.transformer_encoder_channel(y)
+
+            y = torch.tanh(self.out_channel(y[0, :, :]))
+
+            h = self.lin(y, dim=1)
+
+            """m = torch.nn.Softmax(dim=1)
+            g = m(h)
+
+            g1 = g[:, 0]
+            g2 = g[:, 1]
+
+            x = torch.cat([self.resh(g1, x) * x, self.resh(g2, x) * y], dim=1)"""
+
+            x = h
+        else:
+            x = x_
+            
+        hidden = self.classifier(x)
+        output = self.output_activation(hidden)
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
+        
+################################### BAYESIAN ######################################
 class BayesianMLP(torch.nn.Module):
     """Minimal Bayesian MLP implemented with blitz."""
     def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
@@ -2178,6 +2317,7 @@ class BayesianMLP(torch.nn.Module):
             self.output_activation = torch.nn.Identity()
 
     def forward(self, x, edge_index=None):
+        x = x[:, :, -1]
         x = torch.relu(self.fc1(x))
         hidden = self.fc2(x)
         output = self.output_activation(hidden)
@@ -2186,4 +2326,4 @@ class BayesianMLP(torch.nn.Module):
         return output
 
     def kl_loss(self):
-        return self.fc1.kl_loss() + self.fc2.kl_loss()
+        return kl_divergence_from_nn(self)

@@ -145,6 +145,9 @@ class MyXGBRegressor(BaseEstimator, RegressorMixin):
         elif loss == 'log':
             params['objective'] = 'reg:logistic'
 
+        elif loss == 'mcewk':
+            params['objective'] = mcewk_obj
+
         elif loss == 'exponential':
             params['objective'] = exponential_absolute_error_loss(self.alpha)
 
@@ -295,6 +298,10 @@ class MyXGBClassifier(BaseEstimator, ClassifierMixin):
             params['num_class'] = 5
             del params['y_train_origin']
             del params['y_val_origin']
+
+        elif loss == 'mcewk':
+            params['objective'] = mcewk_obj
+            params['eval_metric'] = 'mlogloss'
         
         elif loss == 'softprob-risk-dual' or loss == 'softmax-risk-dual':
             params['objective'] = softprob_obj_risk_dual(params['y_train_origin'])
@@ -373,6 +380,10 @@ class MyXGBClassifier(BaseEstimator, ClassifierMixin):
         # Détection du type de perte (objective)
         if loss == 'logloss':
             params['objective'] = 'binary:logistic'
+        
+        elif loss == 'mcewk':
+            params['objective'] = 'mcewk_class'
+            params['eval_metric'] = 'mlogloss'
 
         elif loss in ['softmax', 'softprob']:
 
@@ -568,6 +579,9 @@ class MyCatBoostClassifier(BaseEstimator, ClassifierMixin):
         # Detect and adjust loss functions
         if self.loss == "logloss":
             params["loss_function"] = "Logloss"
+        
+        elif self.loss == 'mcewk':
+            params['loss_function'] = mcewk_class
 
         elif self.loss in ["softmax", "softprob"]:
             params["loss_function"] = "MultiClass"
@@ -595,6 +609,9 @@ class MyCatBoostClassifier(BaseEstimator, ClassifierMixin):
         # Detect and adjust loss functions
         if self.loss == "logloss":
             params["loss_function"] = "Logloss"
+        
+        elif self.loss == 'mcewk':
+            params['loss_function'] = mcewk_class
 
         elif self.loss in ["softmax", "softprob"]:
             params["loss_function"] = "MultiClass"

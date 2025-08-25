@@ -184,6 +184,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
     shape2D = {10: (24, 24),
            30 : (30, 30),
+          2  : (16,16, 2**0),
+          3  : (16,16, 2**0),
           4  : (16,16, 2**0),
           5  : (32,32, 2**0),
           6  : (32,32, 2**0),
@@ -224,6 +226,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
+
         model = GAT(**default_params)
         model_params.update(default_params)
 
@@ -317,17 +320,57 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'dim_feedforward' : 512,
             'num_layers' : 4,
             'dropout' : 0.1,
-            'channel_attention' : False,
+            'channel_attention' : True,
             'graph_or_node' : graph_or_node,
             'task_type' : task_type,
             'out_channels' : out_channels,
+            'return_hidden': False
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        print(custom_model_params)
+        model = TransformerNet(**default_params)
+        model_params.update(default_params)
+
+    elif model_name == 'TransformerNetCutClient':
+        default_params = {
+            'seq_len' : k_days + 1,
+            'input_dim' : in_dim,
+            'd_model' : 256,
+            'nhead' : 8,
+            'dim_feedforward' : 512,
+            'num_layers' : 4,
+            'dropout' : 0.1,
+            'graph_or_node' : graph_or_node,
+
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        print(custom_model_params)
+        model = TransformerNetCutClient(**default_params)
+        model_params.update(default_params)
+        
+    elif model_name == 'TransformerNetCutServer':
+        default_params = {
+            'seq_len' : k_days + 1,
+            'd_model' : 256,
+            'nhead' : 8,
+            'dim_feedforward' : 512,
+            'num_layers' : 4,
+            'dropout' : 0.1,
+            'channel_attention' : True,
+            'task_type' : task_type,
+            'out_channels' : out_channels,
+            'graph_or_node' : graph_or_node,
             'return_hidden': False
 
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
-        model = TransformerNet(**default_params)
+        print(custom_model_params)
+        model = TransformerNetCutServer(**default_params)
         model_params.update(default_params)
+
     elif model_name == 'DilatedCNN':
         default_params = {
             'channels': [in_dim, in_dim, in_dim],
@@ -412,7 +455,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         )
 
         model_params.update(default_params)
-
+        
     elif model_name == 'SepGRUGNN':
         input_temporal = len(custom_model_params['temporal_idx'])
         input_spatial = len(custom_model_params['static_idx'])
@@ -601,7 +644,6 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'out_channels': out_channels,                # Nombre de classes en sortie
             'task_type': task_type,     # Type de tâche ('classification' ou 'régression')
             'return_hidden': False
-
         }
 
         # Mettre à jour avec des paramètres personnalisés si nécessaire
@@ -655,16 +697,16 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     
     elif model_name == 'graphCastGRU':
         default_params = {
-            'input_dim_grid_nodes': 64,
             'num_gru_layers' : 2,
             'in_channels' : in_dim,
+            'input_dim_grid_nodes': 64,
             'input_dim_mesh_nodes': 3,
             'input_dim_edges':4,
             'output_dim_grid_nodes' : 64,
             'processor_layers' : 6,
             'hidden_layers' : 1,
             'hidden_dim' : in_dim,
-            'lin_channels' : 256,
+            'lin_channels' : 64,
             'end_channels' : 64,
             'aggregation' : 'sum',
             'norm_type' : 'LayerNorm',
@@ -747,7 +789,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
           'in_dim':in_dim,
           'hidden_dim' : in_dim,
           'end_channels' : 64,
-          'output_channels' : out_channels,
+          'output_channels' : out_channels,          
             'n_sequences' : k_days + 1,
             'device' : device,
             'return_hidden': False

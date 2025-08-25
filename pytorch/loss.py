@@ -196,6 +196,8 @@ class BCELoss(torch.nn.Module):
         thresholds = torch.arange(self.num_classes - 1, device=y_true.device)
         y_true_bin = (y_true.unsqueeze(1) > thresholds).float()
 
+        y_pred_bin = torch.abs(y_pred_bin)
+
         # BCE for each threshold
         loss_per_thresh = F.binary_cross_entropy(y_pred_bin, y_true_bin, reduction="none")
 

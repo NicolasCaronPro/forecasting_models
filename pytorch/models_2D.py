@@ -127,10 +127,13 @@ class Bottleneck(nn.Module):
         return out
 
 class ResNet(torch.nn.Module):
-    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device, n_sequences, avgpooling=1, return_hidden=False, out_channels=None, task_type='classification'):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device,
+                 n_sequences, avgpooling=1, return_hidden=False,
+                 out_channels=None, task_type='classification'):
+        
         super(ResNet, self).__init__()
         torch.manual_seed(42)
-
+        
         self.input_batch_norm = torch.nn.BatchNorm2d(in_channels).to(device)
 
         self.return_hidden = return_hidden
@@ -168,6 +171,8 @@ class ResNet(torch.nn.Module):
     def forward(self, X, edge_index=None, graphs=None):
         # egde index not used, API configuration
         x = X[:,:,:,:,-1]
+
+        x = x.permute(0,3,1,2)
 
         # Bottleneck
         x = self.input_batch_norm(x)
@@ -215,20 +220,19 @@ class CONVLSTM(torch.nn.Module):
                                 bias=True,
                                 return_all_layers=False).to(device)
         
-        self.conv1 = torch.nn.Conv2d(hidden_dim[-1], 1, kernel_size=(3,3), padding=1, stride=1).to(device)
-        
         self.output = OutputLayer(in_channels=hidden_dim[-1] * size[0] * size[1], end_channels=end_channels,
                         n_steps=n_sequences, device=device, act_func=act_func,
                         task_type=task_type, out_channels=out_channels)
 
         self.task_type = task_type
         self.return_hidden = return_hidden
-        
+
     def forward(self, X, edge_index=None):
         # edge Index is used for api facility but it is ignore
-        x = self.input_batch_norm(X)
+        x = X.permute(0, 3, 1, 2, 4)
+        x = self.input_batch_norm(x)
         x = self.input(x)
-        x = x.permute(0, 4, 1, 3, 2)
+        x = x.permute(0, 4, 1, 2, 3)
         x, _ = self.convlstm(x)
         x = x[0][:, -1, :, :]
         x = self.dropout(x)

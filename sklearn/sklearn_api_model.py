@@ -242,9 +242,9 @@ def calculate_and_plot_feature_importance(X, y, feature_names, dir_output, targe
     - A DataFrame with feature names and average importance.
     - A bar plot showing the average feature importance.
     """
-    #if (dir_output / f'importance_model_{target}.pkl').is_file():
-    #    importance_df = read_object(f'importance_model_{target}.pkl', dir_output)
-    #    return importance_df
+    if (dir_output / f'importance_model_{target}.pkl').is_file():
+        importance_df = read_object(f'importance_model_{target}.pkl', dir_output)
+        return importance_df
     
     # Initialize models
 
@@ -1897,6 +1897,8 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         - cv_folds: Number of cross-validation folds.
         """
 
+        print('heheheheheh')
+
         self.cv_results_ = []
         self.is_fitted_ = [True] * len(self.best_estimator_)
         self.weights_for_model = []
@@ -2223,29 +2225,181 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
             #aggregated_pred = np.max(predictions_array * weight2use[:, None], axis=0)
         
         return aggregated_pred
+    
+    def predict_proba_with_weights(self, X, hard_or_soft='soft', weights_average='weight', top_model='all', weights2use=[], id_col=(None, None)):
+        """
+        Predict probabilities for input data using each model and aggregate the results.
 
-    """def aggregate_predictions_id(self, predictions_array, models_to_mean, id_col=(None, None)):
-        assert id_col[0] is not None and id_col[1] is not None
-        id = id_col[0]
-        vals = id_col[1]
-        uvals = np.unique(vals)
+        Parameters:
+        - X_list: List of data to predict probabilities for.
+        
+        Returns:
+        - Aggregated predicted probabilities.
+        """
+        models_list = np.asarray([estimator.name for estimator in self.best_estimator_])
+        weights2use = np.asarray(weights2use)
 
-        weight2use = np.zeros((len(models_to_mean), predictions_array.shape[1]))
-        for val in uvals:
-            mask = (vals == val)
-            weight2use[:, mask] = self.weights_id_model[id][val][models_to_mean]
-            if np.all(weight2use[:, mask] == 0):
-                weight2use[:, mask] = self.weights_for_model[models_to_mean]
+        if top_model != 'all':
+                top_model = int(top_model)
+                key = np.argsort(weights2use)
+                models_list = models_list[np.asarray(key)]
+                models_list = models_list[-top_model:]
+                #weights2use = weights2use[np.asarray(key)]
+                #weights2use = weights2use[-top_model:]
+        else:
+            key = np.arange(0, len(self.best_estimator_))
+            
+        probas = []
+        models_to_mean = []
+        for i, estimator in enumerate(self.best_estimator_):
+            if estimator.name not in models_list:
+                continue
+            X_ = X
+            if hasattr(estimator, "predict_proba"):
+                proba = estimator.predict_proba(X_)
+                if proba.shape[1] != 5:
+                    continue
+                #print(estimator.name, np.asarray(probas).shape)
+                models_to_mean.append(key[i])
+                probas.append(proba)
+            else:
+                raise AttributeError(f"The model {estimator.name} does not support predict_proba.")
+        try:
+            weights2use = weights2use[models_to_mean]
+        except:
+            pass
+        # Aggregate probabilities
+        aggregated_proba = self.aggregate_probabilities(probas, models_to_mean, weights2use)
+        return aggregated_proba
+    
+    def predict_with_tasks(
+        self,
+        X,
+        hard_or_soft="soft",
+        weights_average="weight",
+        model_per_task=None,
+        generalized_departement=None,
+        id_col=(None, None),
+        proba = False
+    ):
+        """Predict with a specific ``top_model`` per task.
 
-        unique_classes = np.arange(0, 5)
-        weighted_votes = np.zeros((len(unique_classes), predictions_array.shape[1]))
+        Parameters
+        ----------
+        X : pandas.DataFrame
+            Input dataframe.
+        hard_or_soft : str
+            Mode passed to :func:`predict_with_weight`.
+        weights_average : str
+            Weighting mode for aggregation.
+        model_per_task : dict
+            Mapping of task names to number of models to use.
+        generalized_departement : list
+            Departments for which to apply ``generalized_prediction`` task.
+        id_col : tuple
+            Id column information for weighted predictions.
+        """
 
-        for i, cls in enumerate(unique_classes):
-            mask = (predictions_array == cls)
-            weighted_votes[i] = np.sum(mask * weight2use, axis=0)
+        if model_per_task is None:
+            model_per_task = {}
+        
+        if model_per_task == 'default':
+            model_per_task={'normal_predictions' : 4,
+                                'generalized_prediction' : 12,
+                                'class_value_2_predictions' : 12,
+                                'class_value_3_predictions' : 20,
+                                'class_value_4_predictions' : 20
+                                }
+            
+            generalized_departement = [
+                1.,  2.,  3.,  4.,  5.,  8.,  9., 10., 12., 14.,
+                15., 16., 17., 18., 19., 21., 22., 23., 24., 25.,
+                26., 27., 28., 29., 31., 32., 35., 36., 37., 38.,
+                39., 41., 42., 43., 44., 45., 46., 47., 48., 49.,
+                50., 51., 52., 53., 54., 55., 56., 57., 58., 59.,
+                60., 61., 62., 63., 64., 65., 67., 68., 69., 70.,
+                71., 72., 73., 74., 75., 76., 77., 78., 79., 80.,
+                81., 82., 85., 86., 87., 88., 89., 90., 91., 92.,
+                93., 94., 95.
+            ]
+        
 
-        aggregated_pred = unique_classes[np.argmax(weighted_votes, axis=0)]
-        return aggregated_pred"""   
+        # Normal prediction for all samples
+        top_model = model_per_task.get("normal_predictions", "all")
+        if not proba:
+            predictions = self.predict_with_weight(
+                X,
+                hard_or_soft=hard_or_soft,
+                weights_average=weights_average,
+                weights2use=self.weights_for_model,
+                top_model=top_model,
+            )
+        else:
+            predictions = self.predict_proba_with_weights(
+                X,
+                hard_or_soft=hard_or_soft,
+                weights_average=weights_average,
+                weights2use=self.weights_for_model,
+                top_model=top_model,
+            )
+
+        predictions = np.asarray(predictions)
+
+        # Generalized prediction
+        if (
+            model_per_task.get("generalized_prediction") is not None
+            and generalized_departement is not None
+            and "departement" in X.columns
+        ):
+            mask = X["departement"].isin(generalized_departement).values
+            if mask.any():
+                if not proba:
+                    preds_gen  = self.predict_with_weight(
+                        X[mask],
+                        hard_or_soft=hard_or_soft,
+                        weights_average=weights_average,
+                        weights2use=self.weights_for_model,
+                        top_model=model_per_task["generalized_prediction"],
+                    )
+                else:
+                    preds_gen  = self.predict_proba_with_weights(
+                        X[mask],
+                        hard_or_soft=hard_or_soft,
+                        weights_average=weights_average,
+                        weights2use=self.weights_for_model,
+                        top_model=model_per_task["generalized_prediction"],
+                    )
+                mask = np.isin(y[:, 4], generalized_departement)
+                predictions[mask] = preds_gen
+
+        for val in [2, 3, 4]:
+            task_name = f"class_value_{val}_predictions"
+            if task_name in model_per_task:
+                if not proba:
+                    preds_cls = self.predict_with_weight(
+                        X,
+                        hard_or_soft=hard_or_soft,
+                        weights_average=weights_average,
+                        weights2use=self.weights_for_model,
+                        top_model=model_per_task[task_name],
+                    )
+                    mask = (preds_cls >= val) | (predictions >= val)
+                    if mask.any():
+                        predictions[mask] = preds_cls[mask]
+                else:
+                    preds_cls = self.predict_proba_with_weights(
+                        X,
+                        hard_or_soft=hard_or_soft,
+                        weights_average=weights_average,
+                        weights2use=self.weights_for_model,
+                        top_model=model_per_task[task_name],
+                    )
+                    # prendre les lignes où la classe la plus probable est >= val
+                    mask = (np.argmax(preds_cls, axis=1) >= val) | (np.argmax(predictions, axis=1) >= val)
+                    if mask.any():
+                        predictions[mask] = preds_cls[mask]
+
+        return predictions
 
     def aggregate_probabilities(self, probas_list, models_to_mean, weight2use=[], id_col=(None, None)):
         """
@@ -2266,23 +2420,6 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         aggregated_proba = weighted_sum / np.sum(weight2use)
         #aggregated_proba = np.max(probas_array * weight2use[:, None, None], axis=0)
         return aggregated_proba
-    
-    """def aggregate_probabilities_id(self, probas_array, models_to_mean, id_col=(None, None)):
-        assert id_col[0] is not None and id_col[1] is not None
-        id = id_col[0]
-        vals = id_col[1]
-        uvals = np.unique(vals)
-        weight2use = np.zeros((len(models_to_mean), probas_array.shape[1]))
-        for val in uvals:
-            mask = (vals == val)
-            weight2use[:, mask] = self.weights_id_model[id][val][models_to_mean]
-            if np.all(weight2use[:, mask] == 0):
-                weight2use[:, mask] = self.weights_for_model[models_to_mean]
-
-        #aggregated_proba = np.max(probas_array * weight2use[:, :, None], axis=0)
-        weighted_sum = np.sum(probas_array * weight2use[:, None, None], axis=0)
-        aggregated_proba = weighted_sum / np.sum(weight2use)
-        return aggregated_proba"""
 
     def score(self, X, y, sample_weight=None):
         """
