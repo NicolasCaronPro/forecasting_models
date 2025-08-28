@@ -85,23 +85,12 @@ class NetMLP(torch.nn.Module):
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
         x = F.relu(self.layer4(x))
-<<<<<<< HEAD
         hidden = x
         logits = self.layer2(x)
         if self.task_type == 'classification':
             output = self.soft(logits)
             
         return output, logits, hidden
-=======
-        hidden = self.layer2(x)
-        output = hidden
-        if self.task_type == 'classification':
-            output = self.soft(hidden)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
->>>>>>> cc903518c96f902faf5bb8bc2b2dc05485206d23
     
 #####################################################""""
 

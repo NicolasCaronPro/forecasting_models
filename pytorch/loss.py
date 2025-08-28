@@ -377,11 +377,8 @@ class LossPerId(torch.nn.Module):
         total_loss = 0.0
         total_samples = 0
 
-<<<<<<< HEAD
         res = []
 
-=======
->>>>>>> cc903518c96f902faf5bb8bc2b2dc05485206d23
         for group in group_ids:
             group_mask = (id_mask == group)
             y_pred_group = y_pred[group_mask]
@@ -397,16 +394,9 @@ class LossPerId(torch.nn.Module):
                 loss = self.criterion(y_pred_group, y_true_group)
                 group_loss = loss.sum() / y_pred_group.size(0)
 
-<<<<<<< HEAD
             res.append(group_loss)
 
         return torch.tensor(res)  # or total_loss / total_samples if you want average
-=======
-            total_loss += group_loss
-            total_samples += 1  # Or optionally accumulate weights instead
-
-        return total_loss  # or total_loss / total_samples if you want average
->>>>>>> cc903518c96f902faf5bb8bc2b2dc05485206d23
 
 class ExponentialAbsoluteErrorLoss(torch.nn.Module):
     def __init__(self, alpha=1.0):
