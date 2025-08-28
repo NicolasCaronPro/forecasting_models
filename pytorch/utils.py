@@ -16,7 +16,7 @@ from torch_geometric.nn.sequential import Sequential
 from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric_temporal.nn.recurrent import A3TGCN
+#from torch_geometric_temporal.nn.recurrent import A3TGCN
 
 from torch_geometric.utils import (
     add_self_loops,
@@ -43,18 +43,21 @@ class OutputLayer(torch.nn.Module):
         else:
             self.out_channels = 1
 
-        self.fc = nn.Linear(in_channels=in_channels, out_channels=end_channels, weight_initializer='glorot', bias=True).to(device)
         self.dropout = torch.nn.Dropout(0.3)
-        self.fc2 = nn.Linear(in_channels=end_channels, out_channels=self.out_channels, weight_initializer='glorot', bias=True).to(device)
+        self.fc = nn.Linear(in_channels=in_channels, out_channels=end_channels * 2, weight_initializer='glorot', bias=True).to(device)
+        self.fc3 = nn.Linear(in_channels=end_channels * 2, out_channels=end_channels * 4, weight_initializer='glorot', bias=True).to(device)
+        self.fc2 = nn.Linear(in_channels=end_channels * 4, out_channels=self.out_channels, weight_initializer='glorot', bias=True).to(device)
         self.n_steps = n_steps
 
     def forward(self, x):
         x = x.view(x.shape[0], -1)
-        x = self.activation(x)
-        x = self.fc(x)
+        x = self.activation(self.fc(x))
+        #x = self.dropout(x)
+        x = self.activation(self.fc3(x))
         x = self.dropout(x)
-        x = self.activation(x)
+
         x = self.fc2(x)
+
         x = x.view(x.shape[0], self.out_channels)
         x = torch.clamp(x, min=0)
         if self.task_type == 'classification':
