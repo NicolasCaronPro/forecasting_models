@@ -79,17 +79,15 @@ class Zhang(torch.nn.Module):
                 x = self.drop(x)
                 x = self.activation(x)
 
-        x_linear = self.last_linear(x)
+        logits = self.last_linear(x)
 
         if self.task_type == 'classification':
-            output = self.softmax(x_linear)
+            output = self.softmax(logits)
         else:
-            output = x_linear
+            output = logits
 
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        return output, logits, hidden
 
 ########################### ConvLTSM ####################################
 
@@ -188,17 +186,15 @@ class ResNet(torch.nn.Module):
             x = self.drop(x)
             x = self.activation(x)
 
-        x_linear = self.last_linear(x)
+        logits = self.last_linear(x)
 
         if self.task_type == 'classification':
-            output = self.softmax(x_linear)
+            output = self.softmax(logits)
         else:
-            output = x_linear
+            output = logits
 
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        return output, logits, hidden
 
 ########################### ConvLTSM ####################################    
 
@@ -237,12 +233,10 @@ class CONVLSTM(torch.nn.Module):
         x = x[0][:, -1, :, :]
         x = self.dropout(x)
         hidden = x
-        output = self.output(x)
+        logits = self.output(x)
+        output = logits
 
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        return output, logits, hidden
 
 ########################### ST-GATCONVLSTM ####################################    
 
@@ -260,8 +254,11 @@ class ST_GATCONVLSTM(torch.nn.Module):
     def forward(self, X, edge_index=None):
         x = self.input(X)
         # TO DO
-        x = self.output(x)
-    
+        hidden = x
+        logits = self.output(x)
+        output = logits
+        return output, logits, hidden
+
 ########################### ST-GATCONV2D ####################################
 
 class ST_GATCONV2D(torch.nn.Module):
@@ -280,11 +277,9 @@ class ST_GATCONV2D(torch.nn.Module):
         x = self.input(X)
         # TO DO
         hidden = x
-        x = self.output(x)
-        if self.return_hidden:
-            return x, hidden
-        else:
-            return x
+        logits = self.output(x)
+        output = logits
+        return output, logits, hidden
     
 
 #################################### UNET ##########################################
@@ -397,12 +392,10 @@ class UNet(torch.nn.Module):
             x = up(x, x_skip)
 
         hidden = x
-        x = self.outc(x)
+        logits = self.outc(x)
+        output = logits
 
-        if self.return_hidden:
-            return x, hidden
-        else:
-            return x
+        return output, logits, hidden
     
 #################################### ULSTM #############################################
 
@@ -454,11 +447,9 @@ class ULSTM(torch.nn.Module):
             x = up(x, x_skip)
 
         hidden = x
-        x = self.outc(x)
-        if self.return_hidden:
-            return x, hidden
-        else:
-            return x
+        logits = self.outc(x)
+        output = logits
+        return output, logits, hidden
 
 #################################### ConvGraphNet #######################################
 
@@ -483,12 +474,10 @@ class ConvGraphNet(torch.nn.Module):
         x = torch.concat(cnn_x, gnn_x)
 
         hidden = x
-        output = self.output(x)
+        logits = self.output(x)
+        output = logits
 
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        return output, logits, hidden
 
 ###########################################################################################
 
@@ -557,14 +546,12 @@ class ResGCN(torch.nn.Module):
                 x = self.drop(x)
                 x = self.activation(x)
 
-        x_linear = self.last_linear(x)
+        logits = self.last_linear(x)
 
         if self.binary:
-            output = self.softmax(x_linear)
+            output = self.softmax(logits)
         else:
-            output = x_linear
+            output = logits
 
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        return output, logits, hidden
