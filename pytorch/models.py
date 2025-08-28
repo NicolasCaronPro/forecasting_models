@@ -53,12 +53,10 @@ class NetGCN(torch.nn.Module):
         x = self.layer2(g, x)
 
         hidden = x
-        output = self.output_layer(hidden)
+        logits = self.output_layer(hidden)
+        output = logits
 
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        return output, logits, hidden
     
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
@@ -193,11 +191,10 @@ class GAT(torch.nn.Module):
             x_add = global_add_pool(x, graphs)
             x = torch.cat([x_mean, x_max, x_add], dim=1)
 
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 
 ################################ GCN ################################################
@@ -296,11 +293,10 @@ class GCN(torch.nn.Module):
             x_add = global_add_pool(x, graphs)
             x = torch.cat([x_mean, x_max, x_add], dim=1)
 
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################### DSTGCN ######################################
     
@@ -415,11 +411,10 @@ class DSTGCN(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
         
 ################################################### DST GAT ##########################################################
 
@@ -541,11 +536,10 @@ class DSTGAT(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################# ST-GATCONV ###################################
     
@@ -691,11 +685,10 @@ class STGAT(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
             
         # Output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ###################################### ST-GCN #####################################################
 
@@ -808,11 +801,10 @@ class STGCN(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
             
         # Output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################### ST_LSTM ######################################
 
@@ -887,9 +879,11 @@ class ST_GATLSTM(torch.nn.Module):
             xg = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output
-        output = self.output(x)
-        
-        return (output, x) if self.return_hidden else output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+
+        return output, logits, hidden
     
 class Sep_LSTM_GNN(torch.nn.Module):
     def __init__(
@@ -1017,12 +1011,9 @@ class Sep_LSTM_GNN(torch.nn.Module):
         #x = self.dropout(x)
         hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(hidden)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class Sep_GRU_GNN(torch.nn.Module):
     def __init__(
@@ -1150,11 +1141,11 @@ class Sep_GRU_GNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class LSTM_GNN_Feedback(torch.nn.Module):
     def __init__(
@@ -1271,12 +1262,9 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         #x = self.dropout(x)
         hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(hidden)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class GRU(torch.nn.Module):
     def __init__(self, in_channels, gru_size, hidden_channels, end_channels, n_sequences, device,
@@ -1359,12 +1347,9 @@ class GRU(torch.nn.Module):
         #x = self.dropout(x)
         hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(hidden)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
@@ -1446,14 +1431,11 @@ class LSTM(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False):
@@ -1516,14 +1498,11 @@ class DilatedCNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1590,11 +1569,11 @@ class GraphCast(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class GraphCastGRU(torch.nn.Module):
     def __init__(
@@ -1707,12 +1686,9 @@ class GraphCastGRU(torch.nn.Module):
         # Head
         x = self.act_func(self.linear1(x))
         hidden = self.act_func(self.linear2(x))
-        x = self.output_layer(hidden)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,
@@ -1873,19 +1849,19 @@ class MultiScaleGraph(torch.nn.Module):
 
         ### Step 5: Final prediction at each scale
         outputs = []
+        logits_list = []
         hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
+            logits_list.append(logits)
             outputs.append(F.softmax(logits, dim=-1))
             if i == self.num_output_scale - 1:
                 hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        if self.return_hidden:
-            return outputs, hidden
-        else:
-            return outputs
+        logits = torch.cat(logits_list, dim=0)
+        return outputs, logits, hidden
 
 class CrossScaleAttention(torch.nn.Module):
     def __init__(self, input_dim, output_dim, num_heads):
@@ -1998,19 +1974,19 @@ class MultiScaleAttentionGraph(torch.nn.Module):
 
         # Step 5: Output heads for predictions
         outputs = []
+        logits_list = []
         hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
+            logits_list.append(logits)
             outputs.append(F.softmax(logits, dim=-1))
             if i == self.num_output_scale - 1:
                 hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        if self.return_hidden:
-            return outputs, hidden
-        else:
-            return outputs
+        logits = torch.cat(logits_list, dim=0)
+        return outputs, logits, hidden
     
 ##############################################################################################################
 #                                                                                                            #
@@ -2152,13 +2128,11 @@ class TransformerNet(torch.nn.Module):
 
             x = torch.cat([self.resh(g1, x) * x, self.resh(g2, x) * y], dim=1)
 
-        hidden = self.classifier(x)
-        output = self.output_activation(hidden)
-        
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        hidden = x
+        logits = self.classifier(hidden)
+        output = self.output_activation(logits)
+
+        return output, logits, hidden
 
 class TransformerNetCutClient(torch.nn.Module):
     def __init__(
@@ -2201,12 +2175,12 @@ class TransformerNetCutClient(torch.nn.Module):
         return x.unsqueeze(1).expand(y.size(0), -1)
 
     def forward(self, x_, edge_index=None):
-        print(x_.shape)
         x_ = x_.permute(2, 0, 1)
         x = torch.tanh(self.lin_time(x_))
-        """x = self.pos_encoder(x)
-        x = self.transformer_encoder_time(x)"""
-        return x
+        hidden = x
+        logits = x
+        output = x
+        return output, logits, hidden
 
 class TransformerNetCutServer(torch.nn.Module):
 
@@ -2287,12 +2261,10 @@ class TransformerNetCutServer(torch.nn.Module):
         else:
             x = x_
             
-        hidden = self.classifier(x)
-        output = self.output_activation(hidden)
-        if self.return_hidden:
-            return output, hidden
-        else:
-            return output
+        hidden = x
+        logits = self.classifier(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
         
 ################################### BAYESIAN ######################################
 class BayesianMLP(torch.nn.Module):
@@ -2316,12 +2288,10 @@ class BayesianMLP(torch.nn.Module):
 
     def forward(self, x, edge_index=None):
         x = x[:, :, -1]
-        x = torch.relu(self.fc1(x))
-        hidden = self.fc2(x)
-        output = self.output_activation(hidden)
-        if self.return_hidden:
-            return output, hidden
-        return output
+        hidden = torch.relu(self.fc1(x))
+        logits = self.fc2(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
     def kl_loss(self):
         return kl_divergence_from_nn(self)
