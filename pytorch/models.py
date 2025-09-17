@@ -15,13 +15,16 @@ from forecasting_models.pytorch.graphcast.graph_cast_net import *
 from dgl.nn.pytorch.conv import GraphConv, GATConv
 from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU
+from blitz.modules import BayesianLinear
+from blitz.utils import variational_estimator
+from blitz.losses import kl_divergence_from_nn
 import dgl
 import dgl.function as fn
 import math
 
 ##################################### SIMPLE GRAPH #####################################
 class NetGCN(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type):
+    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type, return_hidden=False):
         super(NetGCN, self).__init__()
         self.layer1 = GraphConv(in_dim * n_sequences, hidden_dim).to(device)
         self.layer2 = GraphConv(hidden_dim, hidden_dim_2).to(device)
@@ -30,6 +33,7 @@ class NetGCN(torch.nn.Module):
         self.device = device
         self.task_type = task_type
         self.soft = torch.nn.Softmax(dim=1)
+        self.return_hidden = return_hidden
 
         self.output_layer = OutputLayer(
             in_channels=hidden_dim_2,
@@ -48,9 +52,11 @@ class NetGCN(torch.nn.Module):
         x = F.relu(self.layer1(g, features))
         x = self.layer2(g, x)
 
-        x = self.output_layer(x)
+        hidden = x
+        logits = self.output_layer(hidden)
+        output = logits
 
-        return x
+        return output, logits, hidden
     
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
@@ -61,7 +67,7 @@ class MLPLayer(torch.nn.Module):
         return self.mlp(x)
     
 class NetMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type):
+    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False):
         super(NetMLP, self).__init__()
         self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim, device)
         self.layer3 = MLPLayer(hidden_dim, hidden_dim, device)
@@ -70,16 +76,19 @@ class NetMLP(torch.nn.Module):
         self.task_type = task_type
         self.n_sequences = n_sequences
         self.soft = torch.nn.Softmax(dim=1)
+        self.return_hidden = return_hidden
 
     def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
         x = F.relu(self.layer4(x))
-        x = self.layer2(x)
+        hidden = x
+        logits = self.layer2(x)
         if self.task_type == 'classification':
-            x = self.soft(x)
-        return x
+            output = self.soft(logits)
+            
+        return output, logits, hidden
     
 #####################################################""""
 
@@ -182,11 +191,10 @@ class GAT(torch.nn.Module):
             x_add = global_add_pool(x, graphs)
             x = torch.cat([x_mean, x_max, x_add], dim=1)
 
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 
 ################################ GCN ################################################
@@ -285,11 +293,10 @@ class GCN(torch.nn.Module):
             x_add = global_add_pool(x, graphs)
             x = torch.cat([x_mean, x_max, x_add], dim=1)
 
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################### DSTGCN ######################################
     
@@ -404,11 +411,10 @@ class DSTGCN(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
         
 ################################################### DST GAT ##########################################################
 
@@ -530,11 +536,10 @@ class DSTGAT(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################# ST-GATCONV ###################################
     
@@ -680,11 +685,10 @@ class STGAT(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
             
         # Output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ###################################### ST-GCN #####################################################
 
@@ -797,11 +801,10 @@ class STGCN(torch.nn.Module):
             x = torch.cat([x_mean, x_max, x_sum], dim=1)
             
         # Output layer
-        output = self.output(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
+        return output, logits, hidden
 
 ################################### ST_LSTM ######################################
 
@@ -876,10 +879,12 @@ class ST_GATLSTM(torch.nn.Module):
             xg = torch.cat([x_mean, x_max, x_sum], dim=1)
 
         # Final output
-        output = self.output(x)
-        
-        return (output, x) if self.return_hidden else output
+        hidden = x
+        logits = self.output(hidden)
+        output = logits
 
+        return output, logits, hidden
+    
 class Sep_LSTM_GNN(torch.nn.Module):
     def __init__(
         self,
@@ -1004,11 +1009,11 @@ class Sep_LSTM_GNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class Sep_GRU_GNN(torch.nn.Module):
     def __init__(
@@ -1035,6 +1040,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         self.temporal_idx = temporal_idx
         self.is_graph_or_node = False
         self.device = device
+        self.return_hidden = False
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1120,7 +1126,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         if S == 0:
             gnn_out = torch.zeros(B, self.gnn_output_dim, device=x.device)
         else:
-            h = x_static.squeeze(-1)  # (B, S)
+            h = x_static.squeeze(-1)  # (B, S)false
             for layer in self.gnn_layers:
                 h = layer(graph, h)
                 h = torch.relu(h)
@@ -1135,11 +1141,11 @@ class Sep_GRU_GNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class LSTM_GNN_Feedback(torch.nn.Module):
     def __init__(
@@ -1157,6 +1163,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         temporal_idx=None,
         use_layernorm=False,
         dropout=0.03,
+        return_hidden=False,
     ):
         super(LSTM_GNN_Feedback, self).__init__()
         
@@ -1165,6 +1172,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         self.static_idx = static_idx
         self.temporal_idx = temporal_idx
         self.task_type = task_type
+        self.return_hidden = return_hidden
 
         # LSTMCell: traite séquentiellement les pas de temps
         self.lstm_cell = torch.nn.LSTMCell(
@@ -1252,11 +1260,11 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class GRU(torch.nn.Module):
     def __init__(self, in_channels, gru_size, hidden_channels, end_channels, n_sequences, device,
@@ -1337,14 +1345,11 @@ class GRU(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
@@ -1426,17 +1431,14 @@ class LSTM(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
         
 class DilatedCNN(torch.nn.Module):
-    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False):
+    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False):
         super(DilatedCNN, self).__init__()
 
         # Initialisation des listes pour les convolutions et les BatchNorm
@@ -1469,7 +1471,7 @@ class DilatedCNN(torch.nn.Module):
         # Activation function
         self.act_func = getattr(torch.nn, act_func)()
         
-        self.return_hidden = False 
+        self.return_hidden = return_hidden
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1496,14 +1498,11 @@ class DilatedCNN(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        if self.return_hidden:
-            return output, x
-        else:
-            return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1524,7 +1523,8 @@ class GraphCast(torch.nn.Module):
         has_time_dim: bool = False,
         n_sequences = 1,
         act_func='ReLU',
-        is_graph_or_node=False):
+        is_graph_or_node=False,
+        return_hidden=False):
         super(GraphCast, self).__init__()
 
         self.net = GraphCastNet(
@@ -1548,6 +1548,7 @@ class GraphCast(torch.nn.Module):
         self.is_graph_or_node = is_graph_or_node == 'graph'
         
         self.act_func = getattr(torch.nn, act_func)()
+        self.return_hidden = return_hidden
         
         # Output activation depending on task
         if task_type == 'classification':
@@ -1568,11 +1569,11 @@ class GraphCast(torch.nn.Module):
         #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
         #x = self.dropout(x)
-        x = self.act_func(self.linear2(x))
+        hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 class GraphCastGRU(torch.nn.Module):
     def __init__(
@@ -1600,6 +1601,7 @@ class GraphCastGRU(torch.nn.Module):
         n_sequences: int = 1,
         act_func: str = "ReLU",
         is_graph_or_node: bool = False,
+        return_hidden: bool = False,
     ):
         """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1652,6 +1654,7 @@ class GraphCastGRU(torch.nn.Module):
         self.is_graph_or_node = is_graph_or_node == "graph"
 
         self.act_func = getattr(torch.nn, act_func)()
+        self.return_hidden = return_hidden
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1682,10 +1685,10 @@ class GraphCastGRU(torch.nn.Module):
 
         # Head
         x = self.act_func(self.linear1(x))
-        x = self.act_func(self.linear2(x))
-        x = self.output_layer(x)
-        output = self.output_activation(x)
-        return output
+        hidden = self.act_func(self.linear2(x))
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,
@@ -1770,7 +1773,7 @@ class GraphCastGRU(torch.nn.Module):
 class MultiScaleGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
-        graph_or_node, task_type, num_sequence=1, out_channels=5
+        graph_or_node, task_type, num_sequence=1, out_channels=5, return_hidden=False
     ):
         super(MultiScaleGraph, self).__init__()
         
@@ -1780,6 +1783,7 @@ class MultiScaleGraph(torch.nn.Module):
         self.task_type = task_type
         self.device = device
         self.features_per_scale = features_per_scale
+        self.return_hidden = return_hidden
 
         ### Embedding Layer (for scale 0 only)
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -1845,13 +1849,19 @@ class MultiScaleGraph(torch.nn.Module):
 
         ### Step 5: Final prediction at each scale
         outputs = []
+        logits_list = []
+        hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
+            logits_list.append(logits)
             outputs.append(F.softmax(logits, dim=-1))
+            if i == self.num_output_scale - 1:
+                hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        return outputs
+        logits = torch.cat(logits_list, dim=0)
+        return outputs, logits, hidden
 
 class CrossScaleAttention(torch.nn.Module):
     def __init__(self, input_dim, output_dim, num_heads):
@@ -1890,7 +1900,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
         graph_or_node='graph', task_type='classification',
-        num_sequence=1, out_channels=5, num_heads=4
+        num_sequence=1, out_channels=5, num_heads=4, return_hidden=False
     ):
         super(MultiScaleAttentionGraph, self).__init__()
 
@@ -1900,6 +1910,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
         self.task_type = task_type
         self.device = device
         self.features_per_scale = features_per_scale
+        self.return_hidden = return_hidden
 
         # Embedding Layer for scale 0
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -1963,13 +1974,19 @@ class MultiScaleAttentionGraph(torch.nn.Module):
 
         # Step 5: Output heads for predictions
         outputs = []
+        logits_list = []
+        hidden = None
         for i in range(self.num_output_scale):
             combined = torch.cat([gcn_outputs[i], decoded_features[i]], dim=-1)
             logits = self.output_heads[i](combined)
+            logits_list.append(logits)
             outputs.append(F.softmax(logits, dim=-1))
+            if i == self.num_output_scale - 1:
+                hidden = combined
 
         outputs = torch.cat(outputs, dim=0)
-        return outputs
+        logits = torch.cat(logits_list, dim=0)
+        return outputs, logits, hidden
     
 ##############################################################################################################
 #                                                                                                            #
@@ -1997,6 +2014,8 @@ class PositionalEncoding(torch.nn.Module):
         """
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
+    
+################################################# TransformerNet #############################################################""
 
 class TransformerNet(torch.nn.Module):
     """
@@ -2018,6 +2037,7 @@ class TransformerNet(torch.nn.Module):
             graph_or_node='node',
             out_channels=2,
             task_type='binary',
+            return_hidden=False,
     ):
 
         super().__init__()
@@ -2027,7 +2047,7 @@ class TransformerNet(torch.nn.Module):
 
         # self.emb = torch.nn.Embedding(input_dim, d_model)
         self.channel_attention = channel_attention
-
+        
         self.lin_time = torch.nn.Linear(input_dim, d_model)
         self.lin_channel = torch.nn.Linear(seq_len, d_model)
 
@@ -2069,6 +2089,7 @@ class TransformerNet(torch.nn.Module):
             self.classifier = torch.nn.Linear(d_model, out_channels)
 
         self.d_model = d_model
+        self.return_hidden = return_hidden
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -2083,6 +2104,7 @@ class TransformerNet(torch.nn.Module):
 
     def forward(self, x_, edge_index=None):
         x_ = x_.permute(2, 0, 1)
+
         x = torch.tanh(self.lin_time(x_))
         x = self.pos_encoder(x)
         x = self.transformer_encoder_time(x)
@@ -2106,6 +2128,170 @@ class TransformerNet(torch.nn.Module):
 
             x = torch.cat([self.resh(g1, x) * x, self.resh(g2, x) * y], dim=1)
 
-        x = self.classifier(x)
-        x = self.output_activation(x)
-        return x
+        hidden = x
+        logits = self.classifier(hidden)
+        output = self.output_activation(logits)
+
+        return output, logits, hidden
+
+class TransformerNetCutClient(torch.nn.Module):
+    def __init__(
+            self,
+            seq_len=30,
+            input_dim=24,
+            d_model=256,
+            nhead=8,
+            dim_feedforward=512,
+            num_layers=4,
+            dropout=0.1,
+            graph_or_node='node'):
+
+        super().__init__()
+        assert d_model % nhead == 0, "nheads must divide evenly into d_model"
+        
+        self.graph_or_node = graph_or_node == 'graph'
+
+        # self.emb = torch.nn.Embedding(input_dim, d_model)
+
+        self.lin_time = torch.nn.Linear(input_dim, d_model)
+
+        self.pos_encoder = PositionalEncoding(
+            d_model=d_model,
+            dropout=dropout
+        )
+
+        encoder_layer_time = torch.nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.transformer_encoder_time = torch.nn.TransformerEncoder(
+            encoder_layer_time,
+            num_layers=num_layers,
+        )
+
+    def resh(self, x, y):
+        return x.unsqueeze(1).expand(y.size(0), -1)
+
+    def forward(self, x_, edge_index=None):
+        x_ = x_.permute(2, 0, 1)
+        x = torch.tanh(self.lin_time(x_))
+        hidden = x
+        logits = x
+        output = x
+        return output, logits, hidden
+
+class TransformerNetCutServer(torch.nn.Module):
+
+    def __init__(self,
+            d_model=256,
+            seq_len=1,
+            nhead=8,
+            dim_feedforward=512,
+            num_layers=4,
+            dropout=0.1,
+            channel_attention=True,
+            task_type='binary',
+            out_channels=2,
+            return_hidden=False,
+            graph_or_node='node'):
+        
+        super().__init__()
+
+        self.lin_channel = torch.nn.Linear(seq_len, d_model)
+        self.channel_attention = channel_attention
+
+        self.graph_or_node = graph_or_node == 'graph'
+        
+        encoder_layer_channel = torch.nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.transformer_encoder_channel = torch.nn.TransformerEncoder(
+            encoder_layer_channel,
+            num_layers=num_layers,
+        )
+
+        self.out_time = torch.nn.Linear(d_model, d_model)
+        self.out_channel = torch.nn.Linear(d_model, d_model)
+        #self.lin_channel = torch.nn.Linear(seq_len, d_model)
+
+        self.lin = torch.nn.Linear(d_model, 2)
+
+        if self.channel_attention:
+            self.classifier = torch.nn.Linear(d_model * 2, out_channels)
+        else:
+            self.classifier = torch.nn.Linear(d_model, out_channels)
+
+        self.d_model = d_model
+        self.return_hidden = return_hidden
+
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()  # For regression or custom handling
+
+    def forward(self, x_):
+        if self.channel_attention:
+            y = torch.transpose(x_, 0, 2)
+
+            y = torch.tanh(self.lin_channel(y))
+            
+            y = self.transformer_encoder_channel(y)
+
+            y = torch.tanh(self.out_channel(y[0, :, :]))
+
+            h = self.lin(y, dim=1)
+
+            """m = torch.nn.Softmax(dim=1)
+            g = m(h)
+
+            g1 = g[:, 0]
+            g2 = g[:, 1]
+
+            x = torch.cat([self.resh(g1, x) * x, self.resh(g2, x) * y], dim=1)"""
+
+            x = h
+        else:
+            x = x_
+            
+        hidden = x
+        logits = self.classifier(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
+        
+################################### BAYESIAN ######################################
+class BayesianMLP(torch.nn.Module):
+    """Minimal Bayesian MLP implemented with blitz."""
+    def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
+                 device='cpu', graph_or_node='node', return_hidden=False):
+        super().__init__()
+        self.fc1 = BayesianLinear(in_dim, hidden_dim)
+        self.fc2 = BayesianLinear(hidden_dim, out_channels)
+        self.to(device)
+
+        self.graph_or_node = graph_or_node
+        self.return_hidden = return_hidden
+
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()
+
+    def forward(self, x, edge_index=None):
+        x = x[:, :, -1]
+        hidden = torch.relu(self.fc1(x))
+        logits = self.fc2(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
+
+    def kl_loss(self):
+        return kl_divergence_from_nn(self)

@@ -1,7 +1,6 @@
 #import lightning as L
 import logging
 import torch
-import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 import torch.nn as nn
 import torch
-
 
 class ConvLSTMCell(nn.Module):
 
@@ -40,17 +38,23 @@ class ConvLSTMCell(nn.Module):
         self.padding = kernel_size[0] // 2, kernel_size[1] // 2
         self.bias = bias
 
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
+        self.conv = torch.nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
                               out_channels=4 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
+                              kernel_size=3,
                               padding=self.padding,
+                              stride=1,
                               bias=self.bias)
 
     def forward(self, input_tensor, cur_state):
         h_cur, c_cur = cur_state
+        
+        assert input_tensor.dim() == 4, f"Conv2d attend (B,C,H,W), reçu {tuple(input_tensor.shape)}"
+        assert h_cur.dim() == 4 and c_cur.dim() == 4, f"h/c doivent être 4D, reçu h={tuple(h_cur.shape)}, c={tuple(c_cur.shape)}"
+        assert input_tensor.shape[0] == h_cur.shape[0], "Batch size de x_t et h diffèrent"
+        assert input_tensor.shape[2:] == h_cur.shape[2:], f"Tailles spatiales diffèrent: x_t{tuple(input_tensor.shape)}, h{tuple(h_cur.shape)}"
 
         combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
-
+        
         combined_conv = self.conv(combined)
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
         i = torch.sigmoid(cc_i)
@@ -67,8 +71,35 @@ class ConvLSTMCell(nn.Module):
         height, width = image_size
         return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
                 torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device))
+    
+class ConvLSTMCell3D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size=(3,3,3), bias=True):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        pad = tuple(k//2 for k in kernel_size)
+        self.conv = nn.Conv3d(input_dim + hidden_dim, 4*hidden_dim,
+                              kernel_size=kernel_size, padding=pad, bias=bias)
 
+    def forward(self, input_tensor, cur_state):
+        # x_t: (B, C_in, D, H, W), h/c: (B, C_hidden, D, H, W)
+        h, c = cur_state
+        print(input_tensor.shape, h.shape, input_conv.shape)
+        input_conv = torch.cat([input_tensor, h], dim=1)
+        y = self.conv(input_conv)
+        i, f, o, g = torch.chunk(y, 4, dim=1)
+        i, f, o = torch.sigmoid(i), torch.sigmoid(f), torch.sigmoid(o)
+        g = torch.tanh(g)
+        c_next = f * c + i * g
+        h_next = o * torch.tanh(c_next)
+        return h_next, c_next
 
+    def init_hidden(self, batch_size, vol_size, device=None):
+        _, H, W = vol_size
+        return (
+            torch.zeros(batch_size, self.hidden_dim, H, W, device=device),
+            torch.zeros(batch_size, self.hidden_dim, H, W, device=device),
+        )
+    
 class ConvLSTM(nn.Module):
 
     """
@@ -147,7 +178,7 @@ class ConvLSTM(nn.Module):
             input_tensor = input_tensor.permute(1, 0, 2, 3, 4)
 
         b, _, _, h, w = input_tensor.size()
-
+        
         # Implement stateful ConvLSTM
         if hidden_state is not None:
             raise NotImplementedError()
