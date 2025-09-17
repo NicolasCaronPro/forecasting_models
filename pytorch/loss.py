@@ -13,7 +13,7 @@ class PoissonLoss(torch.nn.Module):
     def forward(self, y_pred, y_true, sample_weights=None):
         # Assurer que les prédictions sont positives pour éviter log(0) en utilisant torch.clamp
         y_pred = torch.clamp(y_pred, min=1e-8)
-        
+
         # Calcul de la Poisson Loss
         loss = y_pred - y_true * torch.log(y_pred)
         
@@ -24,8 +24,16 @@ class PoissonLoss(torch.nn.Module):
         else:
             # Si aucun poids n'est fourni, on calcule la moyenne simple
             mean_loss = torch.mean(loss)
-        
+
         return mean_loss
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss applique la log-vraisemblance négative de la distribution"
+            " de Poisson pour pénaliser les écarts entre les prédictions positives"
+            " et les observations comptées."
+        )
     
 class EGPDNLLLoss(torch.nn.Module):
     """Negative log-likelihood for the eGPD (first family) when ``y > 0``.
@@ -90,6 +98,14 @@ class EGPDNLLLoss(torch.nn.Module):
     
     def get_learnable_parameters(self):
         return {"kappa" : self.kappa, "xi" : self.xi}
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss calcule la log-vraisemblance négative d'une loi eGPD pour"
+            " modéliser les queues lourdes des valeurs positives à l'aide de"
+            " paramètres apprenants kappa et xi."
+        )
     
 class RMSLELoss(torch.nn.Module):
     def __init__(self):
@@ -116,8 +132,16 @@ class RMSLELoss(torch.nn.Module):
         
         # Racine carrée pour obtenir la RMSLE
         rmsle = torch.sqrt(mean_squared_log_error)
-        
+
         return rmsle
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss mesure l'écart relatif en comparant les logarithmes"
+            " des prédictions et des vérités afin d'équilibrer pénalités"
+            " sur les sous- et surestimations proportionnelles."
+        )
 
 class RMSELoss(torch.nn.Module):
     def __init__(self):
@@ -137,8 +161,16 @@ class RMSELoss(torch.nn.Module):
         
         # Racine carrée pour obtenir la RMSE
         rmse = torch.sqrt(mean_squared_error)
-        
+
         return rmse
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss calcule la racine de l'erreur quadratique moyenne pour"
+            " quantifier la magnitude moyenne des erreurs dans l'unité"
+            " d'origine."
+        )
 
 class MSELoss(torch.nn.Module):
     def __init__(self):
@@ -151,6 +183,13 @@ class MSELoss(torch.nn.Module):
             return torch.sum(weighted_error) / torch.sum(sample_weights)
         else:
             return torch.mean(error)
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss évalue l'erreur quadratique moyenne pour amplifier les"
+            " grandes différences entre prédictions et observations."
+        )
 
 class HuberLoss(torch.nn.Module):
     def __init__(self, delta=1.0):
@@ -167,6 +206,14 @@ class HuberLoss(torch.nn.Module):
         else:
             return torch.mean(quadratic)
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss adopte un comportement quadratique pour les petites"
+            " erreurs et linéaire au-delà de delta afin de limiter l'impact"
+            " des valeurs aberrantes."
+        )
+
 class LogCoshLoss(torch.nn.Module):
     def __init__(self):
         super(LogCoshLoss, self).__init__()
@@ -179,6 +226,14 @@ class LogCoshLoss(torch.nn.Module):
             return torch.sum(weighted_loss) / torch.sum(sample_weights)
         else:
             return torch.mean(log_cosh)
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss utilise le log du cosinus hyperbolique pour offrir une"
+            " approximation douce de l'erreur quadratique, limitant l'effet des"
+            " grandes erreurs."
+        )
 
 class TukeyBiweightLoss(torch.nn.Module):
     def __init__(self, c=4.685):
@@ -197,6 +252,14 @@ class TukeyBiweightLoss(torch.nn.Module):
         else:
             return torch.mean(tukey_loss)
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss robuste annule progressivement la pénalisation des"
+            " erreurs au-delà du seuil c afin de réduire l'influence des"
+            " outliers."
+        )
+
 class ExponentialLoss(torch.nn.Module):
     def __init__(self):
         super(ExponentialLoss, self).__init__()
@@ -208,6 +271,13 @@ class ExponentialLoss(torch.nn.Module):
             return torch.sum(weighted_error) / torch.sum(sample_weights)
         else:
             return torch.mean(exp_loss)
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss exponentielle accentue la pénalisation en fonction de"
+            " l'erreur absolue, rendant les grandes divergences très coûteuses."
+        )
 
 class BCELoss(torch.nn.Module):
     """Binomial Cross Entropy loss for ordinal classification.
@@ -274,6 +344,14 @@ class BCELoss(torch.nn.Module):
         else:
             return torch.mean(loss)
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss convertit la classification ordinale en tâches binaires"
+            " P(y > k) et applique l'entropie croisée pour respecter l'ordre"
+            " des classes."
+        )
+
 class WeightedCrossEntropyLossLearnable(torch.nn.Module):
     def __init__(self, num_classes=5, min_value=0.5):
         super(WeightedCrossEntropyLossLearnable, self).__init__()
@@ -334,6 +412,14 @@ class WeightedCrossEntropyLossLearnable(torch.nn.Module):
         """Expose the learnable parameters to the external optimizer."""
         return {'adjustment_rate': self.adjustment_rate}
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss adapte une matrice de ratios apprenable pour moduler"
+            " dynamiquement l'entropie croisée selon les confusions observées"
+            " entre classes."
+        )
+
 class WeightedCrossEntropyLoss(torch.nn.Module):
     def __init__(self, num_classes=5):
         super(WeightedCrossEntropyLoss, self).__init__()
@@ -361,6 +447,14 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
             return torch.sum(weighted_loss) / torch.sum(sample_weights)
         else:
             return loss.sum() / y_pred.size(0)
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss correspond à l'entropie croisée classique avec la"
+            " possibilité d'appliquer des poids d'échantillons pour gérer les"
+            " déséquilibres."
+        )
 
 class LossPerId(torch.nn.Module):
     def __init__(self, criterion, id, num_classes=5):
@@ -398,6 +492,13 @@ class LossPerId(torch.nn.Module):
 
         return torch.tensor(res)  # or total_loss / total_samples if you want average
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss évalue un critère pour chaque groupe d'identifiants afin"
+            " de suivre la performance par entité ou région spécifique."
+        )
+
 class ExponentialAbsoluteErrorLoss(torch.nn.Module):
     def __init__(self, alpha=1.0):
         super(ExponentialAbsoluteErrorLoss, self).__init__()
@@ -409,6 +510,13 @@ class ExponentialAbsoluteErrorLoss(torch.nn.Module):
         # Application de l'exponentielle
         loss = torch.mean(torch.exp(self.alpha * errors))
         return loss
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss applique une exponentielle à l'erreur absolue pour"
+            " accentuer fortement les écarts selon un facteur alpha."
+        )
 
 class DiceLoss(torch.nn.Module):
     def __init__(self, num_classes=5, smooth=1e-6):
@@ -469,10 +577,18 @@ class DiceLoss(torch.nn.Module):
 
         :param y_pred: Tenseur contenant les prédictions du modèle (probabilités ou valeurs continues).
         :param y_true: Tenseur contenant les vérités terrain (cibles).
-        
+
         :return: La Dice Loss.
         """
         return self.dice_loss(y_true, y_pred)
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss basée sur le coefficient de Dice mesure le"
+            " chevauchement entre les segments prédits et réels pour"
+            " favoriser une segmentation équilibrée."
+        )
     
 class DiceLoss2(torch.nn.Module):
     """Dice Loss PyTorch
@@ -516,6 +632,14 @@ class DiceLoss2(torch.nn.Module):
 
         return dice_loss
 
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss généralise le coefficient de Dice en considérant les"
+            " probabilités multi-classes pour mesurer le chevauchement entre"
+            " prédictions et cibles."
+        )
+
 class OrdinalDiceLoss(torch.nn.Module):
     def __init__(self, weight=None):
         super(OrdinalDiceLoss, self).__init__()
@@ -551,6 +675,13 @@ class OrdinalDiceLoss(torch.nn.Module):
         dice_loss = 1 - dice_coef.sum() / predict.size(0)
 
         return dice_loss
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss ajuste le coefficient de Dice pour prendre en compte"
+            " l'ordre des classes en pondérant les probabilités par leur rang."
+        )
 
 class CDWCELoss(torch.nn.Module):
     """Class Distance Weighted Cross-Entropy Loss proposed in :footcite:t:`polat2022class`.
@@ -609,6 +740,13 @@ class CDWCELoss(torch.nn.Module):
         loss = loss.sum()
 
         return -loss / N
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss pondère l'entropie croisée par la distance entre"
+            " classes pour mieux respecter leur ordre et leur proximité."
+        )
 
 class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     """
@@ -699,3 +837,11 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         mce_result = self.mce(y_true, y_pred)
 
         return self.C * wk_result + (1 - self.C) * mce_result
+
+    @staticmethod
+    def explain():
+        return (
+            "Cette loss combine la Quadratic Weighted Kappa et l'entropie"
+            " croisée moyenne pour concilier cohérence ordinale et précision"
+            " de classification."
+        )
