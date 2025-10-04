@@ -1,1 +1,1 @@
-# GraphCast implementation from https://github.com/seasfire/firecastnet
+GraphCast implementation from https://github.com/seasfire/firecastnet
