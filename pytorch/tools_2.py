@@ -275,8 +275,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         print(f'num_lstm_layers -> {num_lstm_layers}')
         default_params = {
             'in_channels': in_dim,
-            'lstm_size': 64,
-            'hidden_channels': 64,
+            'lstm_size': 128,
+            'hidden_channels': 256,
             'out_channels' : out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
@@ -296,7 +296,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         default_params = {
             'in_channels': in_dim,
             'hidden_channels': 256,
-            'gru_size': in_dim,
+            'gru_size': 128,
             'out_channels' : out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
@@ -373,10 +373,10 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
     elif model_name == 'DilatedCNN':
         default_params = {
-            'channels': [in_dim, in_dim, in_dim],
+            'channels': [in_dim, in_dim, 128],
             'dilations': [1, 3, 4],
             'end_channels': 64,
-            'lin_channels': 64,
+            'lin_channels': 256,
             'n_sequences': k_days + 1,
             'device': device,
             'act_func': act_func,
@@ -699,14 +699,14 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         default_params = {
             'num_gru_layers' : 2,
             'in_channels' : in_dim,
-            'input_dim_grid_nodes': 64,
+            'input_dim_grid_nodes': 128,
             'input_dim_mesh_nodes': 3,
             'input_dim_edges':4,
-            'output_dim_grid_nodes' : 64,
+            'output_dim_grid_nodes' : 128,
             'processor_layers' : 6,
             'hidden_layers' : 1,
-            'hidden_dim' : in_dim,
-            'lin_channels' : 64,
+            'hidden_dim' : 128,
+            'lin_channels' : 256,
             'end_channels' : 64,
             'aggregation' : 'sum',
             'norm_type' : 'LayerNorm',
@@ -724,6 +724,68 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         default_params['is_graph_or_node'] = default_params.pop('graph_or_node')
         model = GraphCastGRU(**default_params)
+        model_params.update(default_params)
+
+    elif model_name == 'graphCastGRUWithAttentionTrans':
+        default_params = {
+            'num_gru_layers' : 2,
+            'in_channels' : in_dim,
+            'input_dim_grid_nodes': 128,
+            'input_dim_mesh_nodes': 3,
+            'input_dim_edges':4,
+            'output_dim_grid_nodes' : 128,
+            'processor_layers' : 6,
+            'hidden_layers' : 1,
+            'hidden_dim' : 128,
+            'lin_channels' : 256,
+            'end_channels' : 64,
+            'aggregation' : 'sum',
+            'norm_type' : 'LayerNorm',
+            'do_concat_trick' : False,
+            'out_channels' : out_channels,
+            'act_func' : act_func,
+            'task_type' : task_type,
+            'has_time_dim' : True,
+            'graph_or_node':graph_or_node,
+            'n_sequences' : k_days + 1,
+            'return_hidden': False,
+            'attention' : "Transformer"
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        default_params['is_graph_or_node'] = default_params.pop('graph_or_node')
+        model = GraphCastGRUWithAttention(**default_params)
+        model_params.update(default_params)
+    
+    elif model_name == 'graphCastGRUWithAttentionGAT':
+        default_params = {
+            'num_gru_layers' : 2,
+            'in_channels' : in_dim,
+            'input_dim_grid_nodes': 128,
+            'input_dim_mesh_nodes': 3,
+            'input_dim_edges':4,
+            'output_dim_grid_nodes' : 128,
+            'processor_layers' : 6,
+            'hidden_layers' : 1,
+            'hidden_dim' : 128,
+            'lin_channels' : 256,
+            'end_channels' : 64,
+            'aggregation' : 'sum',
+            'norm_type' : 'LayerNorm',
+            'do_concat_trick' : False,
+            'out_channels' : out_channels,
+            'act_func' : act_func,
+            'task_type' : task_type,
+            'has_time_dim' : True,
+            'graph_or_node':graph_or_node,
+            'n_sequences' : k_days + 1,
+            'return_hidden': False,
+            'attention' : "GAT"
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        default_params['is_graph_or_node'] = default_params.pop('graph_or_node')
+        model = GraphCastGRUWithAttention(**default_params)
         model_params.update(default_params)
 
     elif model_name == 'MultiScaleGraph':
@@ -787,13 +849,12 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     elif model_name == 'NetMLP':
         default_params = {
           'in_dim':in_dim,
-          'hidden_dim' : in_dim,
+          'hidden_dim' : [128, 256],
           'end_channels' : 64,
           'output_channels' : out_channels,          
             'n_sequences' : k_days + 1,
             'device' : device,
             'return_hidden': False
-
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)

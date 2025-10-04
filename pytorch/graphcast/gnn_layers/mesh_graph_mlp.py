@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dgl import DGLGraph
+from dgl.nn.pytorch import GATConv
 from torch import Tensor
 
 try:
@@ -34,7 +35,6 @@ from .utils import concat_efeat, sum_efeat
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 class MeshGraphMLP(nn.Module):
     """MLP layer which is commonly used in building blocks
@@ -98,8 +98,80 @@ class MeshGraphMLP(nn.Module):
         else:
             self.model = nn.Identity()
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, graph=None) -> Tensor:
         self.model = self.model.to(x)
+        return self.model(x)
+    
+class MeshGraphMLPAttention(MeshGraphMLP):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int = 512,
+        hidden_dim: int = 512,
+        hidden_layers: Union[int, None] = 1,
+        activation_fn: nn.Module = nn.SiLU(),
+        norm_type: str = "LayerNorm",
+        nhead: int = 4
+    ):
+        super(MeshGraphMLPAttention, self).__init__(
+            input_dim,
+            output_dim,
+            hidden_dim,
+            hidden_layers,
+            activation_fn,
+            norm_type,
+        )
+        self.q_proj = nn.Linear(input_dim, input_dim)
+        self.k_proj = nn.Linear(input_dim, input_dim)
+        self.v_proj = nn.Linear(input_dim, input_dim)
+
+        self.norm1 = nn.LayerNorm(input_dim)
+
+        self.attention_layer = nn.MultiheadAttention(input_dim, nhead, dropout=0.03, batch_first=True)
+
+    def forward(self, x: Tensor, graph=None) -> Tensor:
+        q = self.q_proj(self.norm1(x)).unsqueeze(0)  # (1, L, E)
+        k = self.k_proj(self.norm1(x)).unsqueeze(0)  # (1, L, E)
+        v = self.v_proj(self.norm1(x)).unsqueeze(0)  # (1, L, E)
+
+        attention, _ = self.attention_layer(q, k, v)      # (1, L, E)
+        attention = attention.squeeze(0)   
+
+        attention = attention + x
+        self.model = self.model.to(attention)
+        return self.model(x)
+    
+class MeshGraphMLPGAT(MeshGraphMLP):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int = 512,
+        hidden_dim: int = 512,
+        hidden_layers: Union[int, None] = 1,
+        activation_fn: nn.Module = nn.SiLU(),
+        norm_type: str = "LayerNorm",
+        nhead: int = 4
+    ):
+        super(MeshGraphMLPGAT, self).__init__(
+            input_dim,
+            output_dim,
+            hidden_dim,
+            hidden_layers,
+            activation_fn,
+            norm_type,
+        )
+        self.norm1 = nn.LayerNorm(input_dim)
+
+        self.attention_layer = GATConv(input_dim, input_dim, nhead)
+        self.residual = nn.Linear(input_dim, input_dim * nhead)
+
+    def forward(self, x: Tensor, graph : DGLGraph) -> Tensor:
+
+        x = self.norm1(x).unsqueeze(0)
+        attention = self.attention_layer(graph, x)      # (1, L, E)
+        attention = attention.squeeze(0)
+        attention = attention + self.residual(x).squeeze(0)
+        self.model = self.model.to(attention)
         return self.model(x)
 
 class MeshGraphEdgeMLPConcat(MeshGraphMLP):
@@ -163,7 +235,6 @@ class MeshGraphEdgeMLPConcat(MeshGraphMLP):
         efeat = concat_efeat(efeat, nfeat, graph)
         efeat = self.model(efeat)
         return efeat
-
 
 class MeshGraphEdgeMLPSum(nn.Module):
     """MLP layer which is commonly used in building blocks

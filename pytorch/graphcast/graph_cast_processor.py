@@ -21,7 +21,6 @@ from torch import Tensor
 from .gnn_layers.mesh_edge_block import MeshEdgeBlock
 from .gnn_layers.mesh_node_block import MeshNodeBlock
 
-
 class GraphCastProcessor(nn.Module):
     """Processor block used in GraphCast operating on a latent space
     represented by hierarchy of icosahedral meshes.

@@ -20,132 +20,10 @@ import torch
 import torch.nn as nn
 from dgl import DGLGraph
 from torch import Tensor
+import dgl.function as fn
 
-from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP
-from .utils import aggregate_and_concat
-
-
-class MeshGraphEncoder(nn.Module):
-    """Encoder used e.g. in GraphCast
-       which acts on the bipartite graph connecting a mostly
-       regular grid (e.g. representing the input domain) to a mesh
-       (e.g. representing a latent space).
-
-    Parameters
-    ----------
-    aggregation : str, optional
-        Message passing aggregation method ("sum", "mean"), by default "sum"
-    input_dim_src_nodes : int, optional
-        Input dimensionality of the source node features, by default 512
-    input_dim_dst_nodes : int, optional
-        Input dimensionality of the destination node features, by default 512
-    input_dim_edges : int, optional
-        Input dimensionality of the edge features, by default 512
-    output_dim_src_nodes : int, optional
-        Output dimensionality of the source node features, by default 512
-    output_dim_dst_nodes : int, optional
-        Output dimensionality of the destination node features, by default 512
-    output_dim_edges : int, optional
-        Output dimensionality of the edge features, by default 512
-    hidden_dim : int, optional
-        Number of neurons in each hidden layer, by default 512
-    hidden_layers : int, optional
-        Number of hiddel layers, by default 1
-    activation_fn : nn.Module, optional
-        Type of activation function, by default nn.SiLU()
-    norm_type : str, optional
-        Normalization type, by default "LayerNorm"
-    do_conat_trick: : bool, default=False
-        Whether to replace concat+MLP with MLP+idx+sum
-    """
-
-    def __init__(
-        self,
-        aggregation: str = "sum",
-        input_dim_src_nodes: int = 512,
-        input_dim_dst_nodes: int = 512,
-        input_dim_edges: int = 512,
-        output_dim_src_nodes: int = 512,
-        output_dim_dst_nodes: int = 512,
-        output_dim_edges: int = 512,
-        hidden_dim: int = 512,
-        hidden_layers: int = 1,
-        activation_fn: int = nn.SiLU(),
-        norm_type: str = "LayerNorm",
-        do_concat_trick: bool = False,
-    ):
-        super().__init__()
-        self.aggregation = aggregation
-
-        MLP = MeshGraphEdgeMLPSum if do_concat_trick else MeshGraphEdgeMLPConcat
-        # edge MLP
-        self.edge_mlp = MLP(
-            efeat_dim=input_dim_edges,
-            src_dim=input_dim_src_nodes,
-            dst_dim=input_dim_dst_nodes,
-            output_dim=output_dim_edges,
-            hidden_dim=hidden_dim,
-            hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
-            norm_type=norm_type,
-        )
-
-        # src node MLP
-        self.src_node_mlp = MeshGraphMLP(
-            input_dim=input_dim_src_nodes,
-            output_dim=output_dim_src_nodes,
-            hidden_dim=hidden_dim,
-            hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
-            norm_type=norm_type,
-        )
-
-        # dst node MLP
-        self.dst_node_mlp = MeshGraphMLP(
-            input_dim=input_dim_dst_nodes + output_dim_edges,
-            output_dim=output_dim_dst_nodes,
-            hidden_dim=hidden_dim,
-            hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
-            norm_type=norm_type,
-        )
-
-    @torch.jit.ignore()
-    def forward(
-        self,
-        g2m_efeat: Tensor,
-        grid_nfeat: Tensor,
-        mesh_nfeat: Tensor,
-        graph: DGLGraph,
-    ) -> Tuple[Tensor, Tensor]:
-
-        has_time_dim = len(grid_nfeat.shape) == 3
-        if has_time_dim:
-            timesteps = grid_nfeat.size(0)
-            mesh_nfeat_new = []
-            grid_nfeat_new = []
-            for i in range(timesteps):
-                # update edge features by concatenating node features (both mesh and grid)
-                # and existing edge features (or applying the concat trick instead)
-                efeat = self.edge_mlp(g2m_efeat, (grid_nfeat[i], mesh_nfeat), graph)
-                # aggregate messages (edge features) to obtain updated node features
-                cat_feat = aggregate_and_concat(
-                    efeat, mesh_nfeat, graph, self.aggregation
-                )
-                # update src, dst node features + residual connections
-                mesh_nfeat_new.append(mesh_nfeat + self.dst_node_mlp(cat_feat))
-                grid_nfeat_new.append(grid_nfeat[i] + self.src_node_mlp(grid_nfeat[i]))
-            return torch.stack(grid_nfeat_new), torch.stack(mesh_nfeat_new)
-        else:
-            # update edge features by concatenating node features (both mesh and grid)
-            # and existing edge features (or applying the concat trick instead)
-            efeat = self.edge_mlp(g2m_efeat, (grid_nfeat, mesh_nfeat), graph)
-            # aggregate messages (edge features) to obtain updated node features
-            cat_feat = aggregate_and_concat(efeat, mesh_nfeat, graph, self.aggregation)
-            # update src, dst node features + residual connections
-            mesh_nfeat = mesh_nfeat + self.dst_node_mlp(cat_feat)
-            grid_nfeat = grid_nfeat + self.src_node_mlp(grid_nfeat)
-            return grid_nfeat, mesh_nfeat
+from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP, MeshGraphMLPAttention, MeshGraphMLPGAT
+from .utils import aggregate_and_concat, aggregate_and_concat_with_attention, EdgeScoreDotProductTransformer, EdgeScoreDotProductGAT
 
 class MeshGraphEncoder(nn.Module):
     def __init__(
@@ -159,16 +37,25 @@ class MeshGraphEncoder(nn.Module):
         output_dim_edges: int = 512,
         hidden_dim: int = 512,
         hidden_layers: int = 1,
-        activation_fn: int = nn.SiLU(),
+        activation_fn: nn.Module = nn.SiLU(),
         norm_type: str = "LayerNorm",
         do_concat_trick: bool = False,
         use_lstm: bool = True,
+        attention: str = None
     ):
         super().__init__()
         self.aggregation = aggregation
         self.use_lstm = use_lstm
+        self.attention = attention
 
         MLP = MeshGraphEdgeMLPSum if do_concat_trick else MeshGraphEdgeMLPConcat
+
+        if attention == "Transformer":
+            MLP_PROCESS = MeshGraphMLPAttention
+        elif attention == "GAT":
+            MLP_PROCESS = MeshGraphMLPGAT
+        else:
+            MLP_PROCESS = MeshGraphMLP
 
         # LSTM for temporal encoding (only for grid_nfeat here, but could be extended)
         if self.use_lstm:
@@ -189,9 +76,14 @@ class MeshGraphEncoder(nn.Module):
             activation_fn=activation_fn,
             norm_type=norm_type,
         )
+        
+        if attention == "GAT":
+            self.attention_score = EdgeScoreDotProductGAT(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
+        elif attention == "Transformer":
+            self.attention_score = EdgeScoreDotProductTransformer(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
 
         # src node MLP
-        self.src_node_mlp = MeshGraphMLP(
+        self.src_node_mlp = MLP_PROCESS(
             input_dim=input_dim_src_nodes,
             output_dim=output_dim_src_nodes,
             hidden_dim=hidden_dim,
@@ -201,7 +93,7 @@ class MeshGraphEncoder(nn.Module):
         )
         
         # dst node MLP
-        self.dst_node_mlp = MeshGraphMLP(
+        self.dst_node_mlp = MLP_PROCESS(
             input_dim=input_dim_dst_nodes + output_dim_edges,
             output_dim=output_dim_dst_nodes,
             hidden_dim=hidden_dim,
@@ -234,17 +126,26 @@ class MeshGraphEncoder(nn.Module):
                 grid_input = grid_encoded[i] if self.use_lstm else grid_nfeat[i]
 
                 efeat = self.edge_mlp(g2m_efeat, (grid_input, mesh_nfeat), graph)
-                cat_feat = aggregate_and_concat(
-                    efeat, mesh_nfeat, graph, self.aggregation
-                )
-                mesh_nfeat_new.append(mesh_nfeat + self.dst_node_mlp(cat_feat))
-                grid_nfeat_new.append(grid_input + self.src_node_mlp(grid_input))
+                if self.attention:
+                    attention_score = self.attention_score(graph, grid_input, mesh_nfeat, efeat)
+                    cat_feat = aggregate_and_concat_with_attention(
+                        efeat, mesh_nfeat, graph, attention_score
+                    )
+                else:  
+                    cat_feat = aggregate_and_concat(
+                        efeat, mesh_nfeat, graph, self.aggregation
+                    )
+                mesh_nfeat_new.append(mesh_nfeat + self.dst_node_mlp(cat_feat), graph)
+                grid_nfeat_new.append(grid_input + self.src_node_mlp(grid_input), graph)
 
             return torch.stack(grid_nfeat_new), torch.stack(mesh_nfeat_new)
-
         else:
             efeat = self.edge_mlp(g2m_efeat, (grid_nfeat, mesh_nfeat), graph)
-            cat_feat = aggregate_and_concat(efeat, mesh_nfeat, graph, self.aggregation)
-            mesh_nfeat = mesh_nfeat + self.dst_node_mlp(cat_feat)
-            grid_nfeat = grid_nfeat + self.src_node_mlp(grid_nfeat)
+            if self.aggregation:
+                attention_score = self.attention_score(graph, g2m_efeat, mesh_nfeat, efeat)
+                cat_feat = aggregate_and_concat_with_attention(grid_nfeat, mesh_nfeat, graph, attention_score)
+            else:
+                cat_feat = aggregate_and_concat(efeat, mesh_nfeat, graph, self.aggregation)
+            mesh_nfeat = mesh_nfeat + self.dst_node_mlp(cat_feat, graph)
+            grid_nfeat = grid_nfeat + self.src_node_mlp(grid_nfeat, graph)
             return grid_nfeat, mesh_nfeat

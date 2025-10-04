@@ -195,7 +195,7 @@ class MyXGBRegressor(BaseEstimator, RegressorMixin):
         self.model_.fit(X, y, **fit_params)
         return self
 
-    def predict(self, X):
+    def predict(self, X, prediction_type='Class'):
         """
         Prédit les valeurs de sortie pour les données d'entrée.
         :param X: Features d'entrée.
@@ -493,7 +493,7 @@ class MyXGBClassifier(BaseEstimator, ClassifierMixin):
             )
         return self
 
-    def predict(self, X):
+    def predict(self, X, prediction_type='Class'):
         """
         Prédit les classes pour les données d'entrée.
         :param X: Features d'entrée.
@@ -581,7 +581,13 @@ class MyCatBoostClassifier(BaseEstimator, ClassifierMixin):
             params["loss_function"] = "Logloss"
         
         elif self.loss == 'mcewk':
-            params['loss_function'] = mcewk_class
+            params['loss_function'] = mcewk_class()
+            params['classes_count'] = params.get('num_class', 5)
+            params['eval_metric'] = MCEWK_metric()
+        
+        elif self.loss in ['bceloss', 'bce', 'bce_ordinal']:
+            # Use custom CatBoost ordinal BCE objective
+            params['loss_function'] = BCEOrdinalCatBoost(num_classes=params.get('num_class', 5))
 
         elif self.loss in ["softmax", "softprob"]:
             params["loss_function"] = "MultiClass"
@@ -611,7 +617,12 @@ class MyCatBoostClassifier(BaseEstimator, ClassifierMixin):
             params["loss_function"] = "Logloss"
         
         elif self.loss == 'mcewk':
-            params['loss_function'] = mcewk_class
+            params['loss_function'] = mcewk_class()
+            params['classes_count'] = num_class
+            params['eval_metric'] = MCEWK_metric()
+        
+        elif self.loss in ['bceloss', 'bce', 'bce_ordinal']:
+            params['loss_function'] = BCEOrdinalCatBoost(num_classes=params.get('num_class', 5))
 
         elif self.loss in ["softmax", "softprob"]:
             params["loss_function"] = "MultiClass"
@@ -645,13 +656,13 @@ class MyCatBoostClassifier(BaseEstimator, ClassifierMixin):
         self.model_.fit(X, y, **fit_params)
         return self
 
-    def predict(self, X):
+    def predict(self, X, prediction_type='Class'):
         """
         Predict class labels.
         :param X: Input features.
         :return: Predicted class labels.
         """
-        return self.model_.predict(X)
+        return self.model_.predict(X, prediction_type=prediction_type)
 
     def predict_proba(self, X):
         """

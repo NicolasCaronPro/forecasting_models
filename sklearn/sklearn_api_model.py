@@ -242,9 +242,9 @@ def calculate_and_plot_feature_importance(X, y, feature_names, dir_output, targe
     - A DataFrame with feature names and average importance.
     - A bar plot showing the average feature importance.
     """
-    if (dir_output / f'importance_model_{target}.pkl').is_file():
-        importance_df = read_object(f'importance_model_{target}.pkl', dir_output)
-        return importance_df
+    #if (dir_output / f'importance_model_{target}.pkl').is_file():
+    #    importance_df = read_object(f'importance_model_{target}.pkl', dir_output)
+    #    return importance_df
     
     # Initialize models
 
@@ -445,7 +445,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
             if (self.dir_log / 'unknowned_scores_per_percentage.pkl').is_file():
                 data_log = read_object('unknowned_scores_per_percentage.pkl', self.dir_log)
         else:
-            if (self.dir_log / 'metrics.pkl').is_file():
+            if False:
+            #if (self.dir_log / 'metrics.pkl').is_file():
                 print(f'Load metrics')
                 find_log = True
                 try:
@@ -483,16 +484,18 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         if data_log is not None: #and self.n_run == data_log['n_run']:
             for i in range(0, len(iou_scores) - 1):
                 try:
-                    if data_log[test_percentage[i]]['iou_val'] > data_log[test_percentage[i + 1]]['iou_val']:
-                        print(f"Last score {data_log[test_percentage[i]]['iou_val']} current score {data_log[test_percentage[i + 1]]['iou_val']} -> {test_percentage[i]}")
-                        doSearch = True
+                    test_percentage = self.metrics['test_percentage']
+                    if np.mean(data_log[test_percentage[i]]['iou_val']) > np.mean(data_log[test_percentage[i + 1]]['iou_val']):
+                        print(f"Last score {np.mean(data_log[test_percentage[i]]['iou_val'])} current score {np.mean(data_log[test_percentage[i + 1]]['iou_val'])} -> {test_percentage[i]}")
+                        doSearch = False
                 except Exception as e:
                     print(e)
                     doSearch = True
                     break
 
             if doSearch:
-                start_test = np.argmax(iou_scores)
+                #start_test = np.argmax(iou_scores)
+                start_test = len(iou_scores)
                 #start_test = len(under_prediction_score_scores) - 1
         else:
             start_test = 0
@@ -509,9 +512,8 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                 print(f'Trained with {tp} -> {nb} sample of class 0')
 
                 if tp in self.metrics.keys():
-                    change_value = True
-                else:
-                    change_value = False
+                    continue
+
 
                 if True:
                     self.metrics[tp] = {}
@@ -546,65 +548,21 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     
                     prediction = copy_model.predict(X_val)
                     metrics_run = evaluate_metrics(y_val, self.target_name, prediction)
-                    self.metrics[tp]['iou_val'].append(metrics_run['iou'])
-                    under_prediction_score_value = under_prediction_score(y_val_score, prediction)
-                    over_prediction_score_value = over_prediction_score(y_val_score, prediction)
+                    metrics_run = round_floats(metrics_run)
+                    update_metrics_as_arrays(self, tp, metrics_run, 'val')
+
 
                     prediction = copy_model.predict(X_test)
                     metrics_run = evaluate_metrics(y_test, self.target_name, prediction)
-                    self.metrics[tp]['f1'].append(metrics_run['f1'])
-                    self.metrics[tp]['iou'].append(metrics_run['iou'])
-                    self.metrics[tp]['recall'].append(metrics_run['recall'])
-                    self.metrics[tp]['prec'].append(metrics_run['prec'])
-                    self.metrics[tp]['normalized_iou'].append(metrics_run['normalized_iou'])
-                    self.metrics[tp]['normalized_f1'].append(metrics_run['normalized_f1'])
+                    metrics_run = round_floats(metrics_run)
+                    update_metrics_as_arrays(self, tp, metrics_run, 'test')
                     
                     #under_prediction_score_value = under_prediction_score(y_val, prediction)
                     #over_prediction_score_value = over_prediction_score(y_val, prediction)
                     #iou = iou_score(y_val, prediction)
-                    
-                if self.n_run == 1:
-                    self.metrics[tp]['var_f1'] = 0
-                    self.metrics[tp]['IC_f1'] = (0, 0)
-                    self.metrics[tp]['var_iou'] = 0
-                    self.metrics[tp]['IC_iou'] = (0, 0)
-                    self.metrics[tp]['var_Normalized_f1'] = 0
-                    self.metrics[tp]['IC_Normalized_f1'] = (0, 0)
-                    self.metrics[tp]['var_Normalized_iou'] = 0
-                    self.metrics[tp]['IC_Normalized_iou'] = (0, 0)
-                else:
-                    # Calcul de la variance pour chaque métrique
-                    f1_variance = np.var(self.metrics[tp]['f1'])
-                    iou_variance = np.var(self.metrics[tp]['iou'])
-                    normalized_f1_variance = np.var(self.metrics[tp]['normalized_f1'])
-                    normalized_iou_variance = np.var(self.metrics[tp]['normalized_iou'])
-                    
-                    # Calcul de l'IC 95% pour chaque métrique
-                    f1_ic = calculate_ic95(self.metrics[tp]['f1'])
-                    iou_ic = calculate_ic95(self.metrics[tp]['iou'])
-                    normalized_f1_ic = calculate_ic95(self.metrics[tp]['normalized_f1'])
-                    normalized_iou_ic = calculate_ic95(self.metrics[tp]['normalized_iou'])
-                    
-                    # Ajout de la variance et de l'IC dans le dictionnaire avec des clefs spécifiques pour chaque métrique
-                    self.metrics[tp]['var_f1'] = f1_variance
-                    self.metrics[tp]['IC_f1'] = f1_ic
-                    self.metrics[tp]['var_iou'] = iou_variance
-                    self.metrics[tp]['IC_iou'] = iou_ic
-                    self.metrics[tp]['var_Normalized_f1'] = normalized_f1_variance
-                    self.metrics[tp]['IC_Normalized_f1'] = normalized_f1_ic
-                    self.metrics[tp]['var_Normalized_iou'] = normalized_iou_variance
-                    self.metrics[tp]['IC_Normalized_iou'] = normalized_iou_ic
                 
+                self.metrics[tp] = add_ic95_to_dict(self.metrics[tp], None, "_ic95")
                 iou = np.mean(self.metrics[tp]['iou_val'])
-                if not change_value:
-                    iou_scores.append(iou)
-                    #under_prediction_score_scores.append(under_prediction_score_value)
-                    #over_prediction_score_scores.append(over_prediction_score_value)
-                else:
-                    iou_scores[i] = iou
-                    #under_prediction_score_scores[i] = under_prediction_score_value
-                    #over_prediction_score_scores[i] = over_prediction_score_value
-
                 #save_object([test_percentage[:len(under_prediction_score_scores)], under_prediction_score_scores, over_prediction_score_scores, iou_scores], 'test_percentage_scores.pkl', self.dir_log)
                 save_object(self.metrics, 'metrics.pkl', self.dir_log)
                 
@@ -614,60 +572,50 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     last_score = iou
                 else:
                     break
-        
-        # Find the index where the two scores cross (i.e., where the difference changes sign)
-        index_max = np.argmax(iou_scores)
-        best_tp = test_percentage[index_max]
-        self.metrics['best_tp'] = best_tp
-        if doSearch:
-            self.metrics['iou_score'] = iou_scores
-            self.metrics['under_prediction_scores'] = under_prediction_score_scores
-            self.metrics['over_prediction_scores'] = over_prediction_score_scores
-            self.metrics['test_percentage'] = test_percentage
-            self.metrics['run'] = self.n_run
-            save_object(self.metrics, 'metrics.pkl', self.dir_log)
 
-        print(f'All metrics : {self.metrics}')
-        print(f'Metrics achieved with best percentage {best_tp} {self.metrics[best_tp]}')
+        keys_array = []
+        eps = 1e-9  # tolérance pour considérer deux moyennes égales
 
-        if is_unknowed_risk:
-            plt.figure(figsize=(15, 7))
-            plt.plot(test_percentage[:len(under_prediction_score_scores)], under_prediction_score_scores, label='under_prediction')
-            plt.plot(test_percentage[:len(under_prediction_score_scores)], over_prediction_score_scores, label='over_prediction')
-            plt.plot(test_percentage[:len(under_prediction_score_scores)], iou_scores, label='IoU')
-            plt.xticks(test_percentage)
-            plt.xlabel('Percentage of Unknowed sample')
-            plt.ylabel('IOU Score')
+        iou_means = []
+        iou_stds = []
+        for k in self.metrics.keys():
+            if isinstance(k, float) and "iou_val" in self.metrics[k]:
+                vals = np.asarray(self.metrics[k]["iou_val"], dtype=float)
+                mean_iou = float(np.nanmean(vals)) if vals.size else -np.inf
+                std_iou = np.std(vals)
 
-            # Ajouter une ligne verticale pour le meilleur pourcentage (best_tp)
-            plt.axvline(x=best_tp, color='r', linestyle='--', label=f'Best TP: {best_tp:.2f}')
-            
-            # Ajouter une légende
-            plt.legend()
+                print(f"{k} -> mean={mean_iou:.6f}, std={std_iou:.6f}")
+                keys_array.append(k)
+                iou_means.append(mean_iou)
+                iou_stds.append(std_iou)
 
-            # Sauvegarder et fermer la figure
-            plt.savefig(self.dir_log / f'{self.name}_unknowned_scores_per_percentage.png')
-            plt.close()
-            save_object([test_percentage, under_prediction_score_scores, over_prediction_score_scores, iou_scores], 'unknowned_scores_per_percentage.pkl', self.dir_log)
+        if not keys_array:
+            raise ValueError("Aucune clé float avec 'iou_val' trouvée dans self.metrics.")
+
+        # Sélection avec tie-break: max(mean), puis min(std)
+        iou_means = np.array(iou_means, dtype=float)
+        iou_stds  = np.array(iou_stds,  dtype=float)
+
+        max_mean = np.nanmax(iou_means)
+        candidates = np.where(np.isclose(iou_means, max_mean, atol=eps))[0]
+        if candidates.size == 1:
+            index_max = int(candidates[0])
         else:
-            plt.figure(figsize=(15, 7))
-            #plt.plot(test_percentage[:len(iou_scores)], under_prediction_score_scores, label='under_prediction')
-            #plt.plot(test_percentage[:len(iou_scores)], over_prediction_score_scores, label='over_prediction')
-            plt.plot(test_percentage[:len(iou_scores)], iou_scores, label='IoU')
-            plt.xticks(test_percentage)
-            plt.xlabel('Percentage of Binary sample')
-            plt.ylabel('IOU Score')
+            # parmi les ex aequo en moyenne, prendre le plus petit std
+            index_max = int(candidates[np.nanargmin(iou_stds[candidates])])
 
-            # Ajouter une ligne verticale pour le meilleur pourcentage (best_tp)
-            plt.axvline(x=best_tp, color='r', linestyle='--', label=f'Best TP: {best_tp:.2f}')
-            
-            # Ajouter une légende
-            plt.legend()
+        best_tp = keys_array[index_max]
+        logger.info(f'Best tp {best_tp}')
+        self.metrics['iou_score'] = iou_scores
+        self.metrics['test_percentage'] = test_percentage
+        self.metrics['under_prediction_scores'] = under_prediction_score_scores
+        self.metrics['over_prediction_scores'] = over_prediction_score_scores
+        self.metrics['best_tp'] = best_tp
+        self.metrics['run'] = self.n_run
 
-            # Sauvegarder et fermer la figure
-            plt.savefig(self.dir_log / f'{self.name}_scores_per_percentage.png')
-            plt.close()
-            save_object([test_percentage, under_prediction_score_scores, over_prediction_score_scores, iou_scores], 'test_percentage_scores.pkl', self.dir_log)
+        logger.info(f'{self.metrics[best_tp]}')
+
+        save_object(self.metrics, 'metrics.pkl', self.dir_log)
 
         return best_tp
 
@@ -950,7 +898,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
     def get_model(self):
         return self.best_estimator_
 
-    def predict(self, X):
+    def predict(self, X, prediction_type="Class"):
         """
         Predict labels for input data.
 
@@ -960,7 +908,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         Returns:
         - Predicted labels.
         """
-        res = self.best_estimator_.predict(X[self.features_selected])
+        if isinstance(self.best_estimator_, LogisticRegression):
+            res = self.best_estimator_.predict(X[self.features_selected])
+        else:
+            res = self.best_estimator_.predict(X[self.features_selected], prediction_type=prediction_type)
         if self.post_process is not None:
             res = self.post_process.predict(res)
         return res
@@ -1897,8 +1848,6 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         - cv_folds: Number of cross-validation folds.
         """
 
-        print('heheheheheh')
-
         self.cv_results_ = []
         self.is_fitted_ = [True] * len(self.best_estimator_)
         self.weights_for_model = []
@@ -1974,7 +1923,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
             predict = self.predict(X, hard_or_soft=hard_or_soft, weights_average=weights_average, top_model=top_model)
             return self.post_process.predict_nbsinister(predict, ids)
     
-    def predict_risk(self, X, ids=None, preprocessor_ids=None, hard_or_soft='soft', weights_average=True, top_model='all'):
+    def predict_risk(self, X, ids=None, preprocessor_ids=None, hard_or_soft='soft', weights_average=True, top_model='all', prediction_type='Probability'):
 
         if self.task_type == 'classification' or self.task_type == 'ordinal-classification':
             return self.predict(X, hard_or_soft=hard_or_soft, weights_average=weights_average, top_model=top_model)
@@ -2000,12 +1949,12 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
 
             return self.post_process.predict_risk(predict, None, ids, preprocessor_ids)
 
-    def predict_with_weight(self, X, hard_or_soft='soft', weights_average='weight', weights2use=[], top_model='all'):
+    def predict_with_weight(self, X, hard_or_soft='soft', weights_average='weight', weights2use=[], top_model='all', prediction_type='Class'):
         
         models_list = np.asarray([estimator.name for estimator in self.best_estimator_])
         weights2use = np.asarray(weights2use)
         
-        if hard_or_soft == 'hard':
+        if hard_or_soft == 'hard' or prediction_type == 'RawFormulaVal':
             if top_model != 'all':
                 top_model = int(top_model)
                 key = np.argsort(weights2use)
@@ -2022,7 +1971,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                 if estimator.name not in models_list:
                     continue
                 else:
-                    pred = estimator.predict(X)
+                    pred = estimator.predict(X, prediction_type=prediction_type)
                     predictions.append(pred)
 
                 models_to_mean.append(key[i])
@@ -2085,7 +2034,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         aggregated_proba = self.aggregate_probabilities(probas, models_to_mean, weights2use)
         return aggregated_proba
 
-    def predict(self, X, hard_or_soft='soft', weights_average='weight', top_model='all', id_col=(None, None)):
+    def predict(self, X, hard_or_soft='soft', weights_average='weight', top_model='all', id_col=(None, None), prediction_type='Probability'):
         """
         Predict labels for input data using each model and aggregate the results.
 
@@ -2104,7 +2053,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
             for id in unique_ids:
                 print(f'Prediction for {id_col[0]} {id}')
                 mask = (id_col[1] == id)
-                prediction[mask] = self.predict_with_weight(X[mask], hard_or_soft=hard_or_soft, weights_average='weight', weights2use=self.weights_id_model[id_col[0]][id], top_model=top_model)
+                prediction[mask] = self.predict_with_weight(X[mask], hard_or_soft=hard_or_soft, weights_average='weight', weights2use=self.weights_id_model[id_col[0]][id], top_model=top_model, prediction_type=prediction_type)
             return prediction
 
         else:
@@ -2194,7 +2143,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         aggregated_proba = self.aggregate_probabilities(probas, models_to_mean, weights_average)
         return aggregated_proba"""
 
-    def aggregate_predictions(self, predictions_list, models_to_mean, weight2use=[], id_col=(None, None)):
+    def aggregate_predictions(self, predictions_list, models_to_mean, weight2use=[], id_col=(None, None), prediction_type='Class'):
         """
         Aggregate predictions from multiple models with weights.
 
@@ -2204,6 +2153,9 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         Returns:
         - Aggregated predictions.
         """
+        if prediction_type == 'RawFormulaVal' or prediction_type == 'Probability':
+            return self.aggregate_probabilities(predictions_list, models_to_mean, weight2use=weight2use, id_col=id_col)
+        
         predictions_array = np.array(predictions_list)
         if len(weight2use) == 0 or weight2use is None:
             weight2use = np.ones_like(self.weights_for_model)[models_to_mean]
@@ -2280,7 +2232,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         model_per_task=None,
         generalized_departement=None,
         id_col=(None, None),
-        proba = False
+        prediction_type='Class'
     ):
         """Predict with a specific ``top_model`` per task.
 
@@ -2326,13 +2278,14 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
 
         # Normal prediction for all samples
         top_model = model_per_task.get("normal_predictions", "all")
-        if not proba:
+        if prediction_type == 'Class' or prediction_type == 'RawFormulaVal':
             predictions = self.predict_with_weight(
                 X,
                 hard_or_soft=hard_or_soft,
                 weights_average=weights_average,
                 weights2use=self.weights_for_model,
                 top_model=top_model,
+                prediction_type=prediction_type
             )
         else:
             predictions = self.predict_proba_with_weights(
@@ -2341,6 +2294,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                 weights_average=weights_average,
                 weights2use=self.weights_for_model,
                 top_model=top_model,
+                prediction_type=prediction_type
             )
 
         predictions = np.asarray(predictions)
@@ -2353,13 +2307,14 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         ):
             mask = X["departement"].isin(generalized_departement).values
             if mask.any():
-                if not proba:
+                if prediction_type == 'Class' or prediction_type == 'RawFormulaVal':
                     preds_gen  = self.predict_with_weight(
                         X[mask],
                         hard_or_soft=hard_or_soft,
                         weights_average=weights_average,
                         weights2use=self.weights_for_model,
                         top_model=model_per_task["generalized_prediction"],
+                        prediction_type=prediction_type
                     )
                 else:
                     preds_gen  = self.predict_proba_with_weights(
@@ -2368,6 +2323,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                         weights_average=weights_average,
                         weights2use=self.weights_for_model,
                         top_model=model_per_task["generalized_prediction"],
+                        prediction_type=prediction_type
                     )
                 mask = np.isin(y[:, 4], generalized_departement)
                 predictions[mask] = preds_gen
@@ -2375,13 +2331,14 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
         for val in [2, 3, 4]:
             task_name = f"class_value_{val}_predictions"
             if task_name in model_per_task:
-                if not proba:
+                if prediction_type == 'Class' or prediction_type == 'RawFormulaVal':
                     preds_cls = self.predict_with_weight(
                         X,
                         hard_or_soft=hard_or_soft,
                         weights_average=weights_average,
                         weights2use=self.weights_for_model,
                         top_model=model_per_task[task_name],
+                        prediction_type=prediction_type
                     )
                     mask = (preds_cls >= val) | (predictions >= val)
                     if mask.any():
@@ -2393,6 +2350,7 @@ class ModelVoting(RegressorMixin, ClassifierMixin):
                         weights_average=weights_average,
                         weights2use=self.weights_for_model,
                         top_model=model_per_task[task_name],
+                        prediction_type=prediction_type
                     )
                     # prendre les lignes où la classe la plus probable est >= val
                     mask = (np.argmax(preds_cls, axis=1) >= val) | (np.argmax(predictions, axis=1) >= val)

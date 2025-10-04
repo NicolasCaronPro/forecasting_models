@@ -21,8 +21,84 @@ import torch
 from dgl import DGLGraph
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
+from dgl.nn.functional import edge_softmax
+import torch.nn as nn
+
+import torch
+import torch.nn as nn
+import dgl.function as fn
+from dgl import DGLGraph
+
+# ---------------------------
+# 1) Scores de type Transformer
+# ---------------------------
+class EdgeScoreDotProductTransformer(nn.Module):
+    def __init__(self, input_dim_node_src: int, input_dim_node_dst, input_dim_edge: int, num_heads: int = 4, head_dim: int = 32):
+        super().__init__()
+        self.H, self.Dh = num_heads, head_dim
+        self.Wq = nn.Linear(input_dim_node_src,  num_heads * head_dim, bias=False)
+        self.Wk = nn.Linear(input_dim_node_dst,  num_heads * head_dim, bias=False)
+        self.Be = nn.Linear(input_dim_edge, num_heads, bias=False) if input_dim_edge > 0 else None  # biais par arête
+        self.scale = head_dim ** 0.5
+
+    def forward(self, g: DGLGraph, h_src: torch.Tensor,
+                h_dst: torch.Tensor, efeat: torch.Tensor) -> torch.Tensor:
+        """
+        Retourne des scores bruts (E, H) = (u·v / sqrt(Dh)) + biais d'arête (optionnel)
+        """
+        with g.local_scope():
+            Q = self.Wq(h_src).view(-1, self.H, self.Dh)   # (N_src, H, Dh)
+            K = self.Wk(h_dst).view(-1, self.H, self.Dh)   # (N_dst, H, Dh)
+            g.srcdata['Q'] = Q
+            g.dstdata['K'] = K
+            g.apply_edges(fn.u_dot_v('Q', 'K', 'score'))   # 'score': (E, H)
+            score = g.edata['score'] / self.scale          # (E, H)
+            if self.Be is not None and efeat is not None:
+                score = score + self.Be(efeat)             # (E, H)
+            return score
 
 
+# ---------------------------
+# 2) Scores de type GAT
+# ---------------------------
+class EdgeScoreDotProductGAT(nn.Module):
+    def __init__(self, input_dim_node_src: int, input_dim_node_dst, input_dim_edge: int, num_heads: int = 4, head_dim: int = 32, negative_slope: float = 0.2):
+        super().__init__()
+        self.H, self.Dh = num_heads, head_dim
+        self.Wq = nn.Linear(input_dim_node_src, num_heads * head_dim, bias=False)
+        self.Wk = nn.Linear(input_dim_node_dst, num_heads * head_dim, bias=False)
+
+        self.a = nn.Parameter(torch.empty((num_heads, 2 * head_dim)))
+        nn.init.xavier_uniform_(self.Wq.weight, gain=1.414)
+        nn.init.xavier_uniform_(self.Wk.weight, gain=1.414)
+        nn.init.xavier_uniform_(self.a,        gain=1.414)
+        self.leakyrelu = nn.LeakyReLU(negative_slope)
+
+    def forward(self, g: DGLGraph, h_src: torch.Tensor,
+                h_dst: torch.Tensor, efeat: torch.Tensor = None) -> torch.Tensor:
+        """
+        Retourne des scores bruts e_ij^(h) de GAT (E, H) = LeakyReLU(a_l^T z_i + a_r^T z_j)
+        (Pas de biais d'arête par défaut ; ajouter si souhaité via une autre tête/MLP.)
+        """
+        with g.local_scope():
+            # 1) Projections par tête
+            z_src = self.Wq(h_src).view(-1, self.H, self.Dh)   # (N_src, H, Dh)
+            z_dst = self.Wk(h_dst).view(-1, self.H, self.Dh)   # (N_dst, H, Dh)
+
+            # 2) Séparer a = [a_l | a_r]
+            a_l, a_r = self.a[:, :self.Dh], self.a[:, self.Dh:]  # (H, Dh), (H, Dh)
+
+            # 3) Demi-scores par nœud
+            el = (z_src * a_l.unsqueeze(0)).sum(dim=-1)  # (N_src, H)
+            er = (z_dst * a_r.unsqueeze(0)).sum(dim=-1)  # (N_dst, H)
+
+            # 4) Combinaison par arête et activation
+            g.srcdata['el'] = el
+            g.dstdata['er'] = er
+            g.apply_edges(fn.u_add_v('el', 'er', 'e'))        # (E, H)
+            e = self.leakyrelu(g.edata['e'])                  # (E, H)
+            return e
+            
 def checkpoint_identity(layer: Callable, *args: Any, **kwargs: Any) -> Any:
     """Applies the identity function for checkpointing.
 
@@ -160,7 +236,6 @@ def concat_efeat(
         # update edge features through concatenating edge and node features
         efeat = concat_efeat_dgl(efeat, (src_feat, dst_feat), graph)
     return efeat
-
 
 @torch.jit.script
 def sum_efeat_dgl(
@@ -302,3 +377,119 @@ def aggregate_and_concat(
     cat_feat = agg_concat_dgl(efeat, nfeat, graph, aggregation)
 
     return cat_feat
+
+@torch.jit.ignore()
+def aggregate_and_concat_with_attention(
+    efeat: Tensor,
+    dst_nfeat: Tensor,
+    graph: DGLGraph,
+    edge_scores: Tensor,
+    norm_by: str = "dst",
+) -> Tensor:
+    """
+    Version attention : normalise des scores par arête via edge_softmax, pèse
+    les messages d'arête, agrège (somme) puis concatène avec dst_nfeat.
+
+    Paramètres
+    ----------
+    efeat : Tensor
+        Features des arêtes, shape (E, De).
+    dst_nfeat : Tensor
+        Features des nœuds destination, shape (N_dst, Dd).
+    graph : DGLGraph
+        Graphe bipartite/grid->mesh.
+    edge_scores : Tensor
+        Scores d'attention par arête avant softmax. Shape (E,) ou (E, H).
+        Si (E, H), on fait une attention multi-têtes et on agrège par somme
+        sur H après pondération.
+    norm_by : str
+        "dst" (par défaut) ou "src" pour la normalisation dans edge_softmax.
+
+    Retour
+    ------
+    Tensor
+        cat_feat de shape (N_dst, De + Dd) si (E,) ; ou (N_dst, De + Dd) après
+        somme des têtes si (E, H).
+    """
+    with graph.local_scope():
+        # 1) Normalisation softmax sur les arêtes (par dst par défaut)
+        #    edge_softmax accepte (E,) -> (E,1) ou (E,H).
+        if edge_scores.dim() == 1:
+            edge_scores = edge_scores.unsqueeze(-1)  # (E, 1)
+
+        alpha = edge_softmax(graph, edge_scores, norm_by=norm_by)  # (E, 1) ou (E, H)
+
+        # 2) Pondération des messages d'arête
+        if alpha.size(-1) == 1:
+            graph.edata["m"] = efeat * alpha  # (E, De)
+        else:
+            # multi-head : on étend efeat sur H, pèse, puis somme sur H
+            # efeat_h : (E, H, De), m : (E, H, De) -> sum over H -> (E, De)
+            efeat_h = efeat.unsqueeze(1).expand(-1, alpha.size(-1), -1)
+            m = efeat_h * alpha.unsqueeze(-1)
+            graph.edata["m"] = m.sum(dim=1)
+
+        # 3) Agrégation vers les nœuds destinataires
+        graph.update_all(fn.copy_e("m", "m"), fn.sum("m", "h_dest"))
+
+        # 4) Concat avec l'état courant des nœuds dst
+        cat_feat = torch.cat((graph.dstdata["h_dest"], dst_nfeat), dim=-1)
+        return cat_feat
+    
+@torch.jit.ignore()
+def aggregate_and_concat_with_attention(
+    efeat: Tensor,
+    dst_nfeat: Tensor,
+    graph: DGLGraph,
+    edge_scores: Tensor,
+    norm_by: str = "dst",
+) -> Tensor:
+    """
+    Version attention : normalise des scores par arête via edge_softmax, pèse
+    les messages d'arête, agrège (somme) puis concatène avec dst_nfeat.
+
+    Paramètres
+    ----------
+    efeat : Tensor
+        Features des arêtes, shape (E, De).
+    dst_nfeat : Tensor
+        Features des nœuds destination, shape (N_dst, Dd).
+    graph : DGLGraph
+        Graphe bipartite/grid->mesh.
+    edge_scores : Tensor
+        Scores d'attention par arête avant softmax. Shape (E,) ou (E, H).
+        Si (E, H), on fait une attention multi-têtes et on agrège par somme
+        sur H après pondération.
+    norm_by : str
+        "dst" (par défaut) ou "src" pour la normalisation dans edge_softmax.
+
+    Retour
+    ------
+    Tensor
+        cat_feat de shape (N_dst, De + Dd) si (E,) ; ou (N_dst, De + Dd) après
+        somme des têtes si (E, H).
+    """
+    with graph.local_scope():
+        # 1) Normalisation softmax sur les arêtes (par dst par défaut)
+        #    edge_softmax accepte (E,) -> (E,1) ou (E,H).
+        if edge_scores.dim() == 1:
+            edge_scores = edge_scores.unsqueeze(-1)  # (E, 1)
+
+        alpha = edge_softmax(graph, edge_scores, norm_by=norm_by)  # (E, 1) ou (E, H)
+
+        # 2) Pondération des messages d'arête
+        if alpha.size(-1) == 1:
+            graph.edata["m"] = efeat * alpha  # (E, De)
+        else:
+            # multi-head : on étend efeat sur H, pèse, puis somme sur H
+            # efeat_h : (E, H, De), m : (E, H, De) -> sum over H -> (E, De)
+            efeat_h = efeat.unsqueeze(1).expand(-1, alpha.size(-1), -1)
+            m = efeat_h * alpha.unsqueeze(-1)
+            graph.edata["m"] = m.sum(dim=1)
+
+        # 3) Agrégation vers les nœuds destinataires
+        graph.update_all(fn.copy_e("m", "m"), fn.sum("m", "h_dest"))
+
+        # 4) Concat avec l'état courant des nœuds dst
+        cat_feat = torch.cat((graph.dstdata["h_dest"], dst_nfeat), dim=-1)
+        return cat_feat

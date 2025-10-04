@@ -22,7 +22,6 @@ import torch
 from .gnn_layers.mesh_processor_block import MeshProcessorBlock
 from .gnn_layers.mesh_processor_gru_block import MeshProcessorGruBlock
 
-
 class GraphCastMeshProcessor(nn.Module):
     """Processor block used in GraphCast operating on a latent space
     represented by hierarchy of icosahedral meshes.

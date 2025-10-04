@@ -688,73 +688,241 @@ def dice_loss(y, y_pred):
     return 1 - np.mean(dice)  # La Dice Loss est 1 - Dice coefficient
 
 def weighted_class_loss_objective(y, pred):
-    """
-    Fonction objective personnalisée pour XGBoost basée sur la perte pondérée des classes.
-    
-    :param y: Vérités terrain (labels réels)
-    :param pred: Prédictions du modèle (logits ou probabilités avant softmax)
-    :return: gradient et hessian
-    """
     num_classes = 5  # Nombre de classes
     epsilon = 1e-6  # Pour éviter les erreurs numériques
     
     # Transformation softmax pour obtenir les probabilités
     prob = np.exp(pred) / np.sum(np.exp(pred), axis=1, keepdims=True)
-    pred_class = np.argmax(prob, axis=1).reshape(-1)
     
     # Initialisation des gradients et hessiens
     gradient = np.zeros_like(pred, dtype=np.float32)
     hessian = np.zeros_like(pred, dtype=np.float32)
     
-    # Calcul de la matrice de pondération par rapport entre les classes
-    dist_matrix = np.abs(np.arange(num_classes).reshape(1, -1) - np.arange(num_classes).reshape(-1, 1))
-    ratio_matrix = 1 / (dist_matrix + 1)  # Inversement proportionnel à la distance entre les classes
-
-    ratio_matrix =  [[0.1,  0.25,    0.5,    0.75,   1.],
-                    [0.25, 0.25,    0.25,    0.5,   0.75],
-                    [0.5,  0.25,    0.5 ,   0.25,   0.5],
-                    [0.75, 0.5,     0.25,   0.75,   0.25],
-                    [1.,   0.75,    0.5,    0.25,    1]]
-
     # Calcul du gradient et du hessien pour chaque échantillon
     for i in range(y.shape[0]):
         true_class = y[i].astype(int)
         
-        ratio_mat_class = ratio_matrix[true_class]
-
         g = prob[i]
         g[true_class] -= 1.0
-        gradient[i] = g * ratio_mat_class
-        hess = 2.0 * prob[i] * (1.0 - prob[i]) * (ratio_mat_class)
+        gradient[i] = g
+        hess = 2.0 * prob[i] * (1.0 - prob[i])
         hess[hess < epsilon] = epsilon
         hessian[i] = hess
 
     return gradient.flatten(), hessian.flatten()
 
 def mse_obj(y, pred):
-    """Multi-class MSE objective used by :func:`mcewk_obj`."""
+    """
+    Multi-class MSE objective (sum of squared errors) for a batch.
 
-    pred = pred.reshape(y.shape[0], -1)
+    Parameters
+    ----------
+    y : array-like, shape (B,)
+        Integer class labels in [0, C-1].
+    pred : array-like, shape (B, C)
+        Predicted scores/probabilities per class.
+
+    Returns
+    -------
+    grad : ndarray, shape (B*C,)
+        Gradient dL/dpred flattened (row-major).
+    hess : ndarray, shape (B*C,)
+        Hessian diagonal (all 2's) flattened.
+    """
+    pred = np.asarray(pred, dtype=float)          # (B, C)
+    y = np.asarray(y, dtype=int).reshape(-1)      # (B,)
+    B, C = pred.shape
+    if y.shape[0] != B:
+        raise ValueError(f"y has length {y.shape[0]} but pred has {B} rows")
+
+    # One-hot encode y -> (B, C)
     y_onehot = np.zeros_like(pred)
-    y_onehot[np.arange(y.shape[0]), y.astype(int)] = 1.0
+    y_onehot[np.arange(B), y] = 1.0
 
-    grad = 2 * (pred - y_onehot)
-    hess = 2 * np.ones_like(pred)
+    # L = sum_{b=1..B} sum_{i=1..C} (pred[b,i] - y_onehot[b,i])^2
+    grad = 2.0 * (pred - y_onehot)               # (B, C)
+    hess = 2.0 * np.ones_like(pred)              # (B, C) (diagonal-only)
 
-    return grad.flatten(), hess.flatten()
+    return grad.ravel(), hess.ravel()
 
+from typing import Optional, Tuple
+
+def weighted_kappa(
+        input: np.ndarray,                # (B, C) : probabilités déjà normalisées
+        target: np.ndarray,               # (B,) indices OU (B,C) one-hot
+        num_classes: int,
+        penalization_type: str = "quadratic",   # 'linear' ou 'quadratic'
+        weight: Optional[np.ndarray] = None,    # (C,) ou None
+        epsilon: float = 1e-10,
+        return_dense_hessian: bool = True,
+        flat_hess: bool = True
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Calcule uniquement :
+        - grad : (B, C)   dL/d input
+        - hess : (B, C, B, C) d²L/d input² (si return_dense_hessian=True)
+
+        input doit être des probabilités (chaque ligne somme à 1).
+        """
+        x = np.asarray(input, dtype=float)
+        B, C = x.shape
+        assert C == num_classes
+
+        # Conversion target -> one-hot
+        if target.ndim == 1:
+            t = np.eye(num_classes)[target]
+        else:
+            t = target.astype(float)
+
+        # Matrice de pénalités W
+        idx = np.arange(num_classes).reshape(-1, 1)
+        if penalization_type == "linear":
+            W = np.abs(idx - idx.T) / (num_classes - 1)
+        elif penalization_type == "quadratic":
+            W = ((idx - idx.T) ** 2) / ((num_classes - 1) ** 2)
+        else:
+            raise ValueError("penalization_type doit être 'linear' ou 'quadratic'")
+
+        if weight is not None:
+            W = W * weight.reshape(1, -1)
+
+        # Quantités auxiliaires
+        hist_b = t.sum(axis=0)               # (C,)
+        s = (W @ hist_b) / float(B)          # (C,)
+        U = t @ W.T                          # (B, C)
+
+        nom = np.sum(x * U)
+        hist_a = x.sum(axis=0)               # (C,)
+        denom = np.sum(hist_a * s)
+        D = denom + epsilon
+
+        # ----- GRADIENT -----
+        grad = (U * D - nom * s.reshape(1, -1)) / (D * D)
+
+        if not return_dense_hessian:
+            return grad, None
+
+        # ----- HESSIENNE -----
+        S = s
+        D2, D3 = D * D, D * D * D
+        A = U * D - nom * S.reshape(1, -1)
+
+        term1 = (U[:, :, None, None] * S.reshape(1, 1, 1, C)) / D2
+        term2 = (U[None, None, :, :] * S.reshape(1, C, 1, 1)) / D2
+        term3 = -2.0 * (A[:, :, None, None] * S.reshape(1, 1, 1, C)) / D3
+
+        hess = term1 - term2 + term3  # (B, C, B, C)
+
+        if flat_hess:
+            hess = hess.ravel()
+        else:
+            hess = hess.reshape(C, C)
+        return grad.ravel(), hess
 
 def mcewk_obj(y, pred, C=0.5):
     """Combined weighted kappa and MSE objective for XGBoost."""
 
     pred = pred.reshape(y.shape[0], -1)
-    grad_wk, hess_wk = weighted_class_loss_objective(y, pred)
+    grad_wk, hess_wk = weighted_kappa(pred, y)
     grad_mse, hess_mse = mse_obj(y, pred)
+
+    print(grad_wk.shape, hess_wk.shape, grad_mse.shape, hess_mse.shape)
 
     grad = C * grad_wk + (1 - C) * grad_mse
     hess = C * hess_wk + (1 - C) * hess_mse
 
     return grad, hess
+
+def bce_ordinal_loss(y_true, y_pred, num_classes: int = 5):
+    """Compute ordinal BCE (all-threshold) loss as a scalar metric.
+
+    Mirrors the PyTorch implementation used for ordinal targets where we
+    convert class probabilities into ``P(y > k)`` for thresholds k.
+
+    Parameters
+    - y_true: array of shape (N,) with integer targets in [0, C-1]
+    - y_pred: array of raw scores/logits flattened or shaped (N, C)
+    - num_classes: number of ordinal classes C
+
+    Returns
+    - float scalar loss
+    """
+    y_true = y_true.astype(int).reshape(-1)
+    pred = y_pred.reshape(y_true.shape[0], -1)
+
+    # Convert logits to probabilities via softmax
+    exp_pred = np.exp(pred - np.max(pred, axis=1, keepdims=True))
+    p = exp_pred / np.sum(exp_pred, axis=1, keepdims=True)  # (N, C)
+
+    # P(y > k) for k in [0, C-2]
+    cumulative = np.cumsum(p, axis=1)
+    q = 1.0 - cumulative[:, :-1]  # (N, C-1)
+
+    eps = 1e-12
+    q = np.clip(q, eps, 1 - eps)
+
+    thresholds = np.arange(num_classes - 1)
+    t = (y_true[:, None] > thresholds[None, :]).astype(float)  # (N, C-1)
+
+    loss = -(t * np.log(q) + (1.0 - t) * np.log(1.0 - q))  # (N, C-1)
+    return float(np.mean(np.mean(loss, axis=1)))
+
+def bce_ordinal_obj(y, pred, num_classes: int = 5):
+    """Ordinal BCE objective for XGBoost (grad/hess).
+
+    We define ``q_k = P(y > k) = 1 - sum_{c<=k} p_c`` with ``p = softmax(logits)``.
+    The loss is the average BCE across thresholds k in [0, C-2].
+
+    Gradient is computed w.r.t. logits using chain rule:
+      - dL/dp accumulated from dL/dq via q's dependence on p
+      - dL/ds = J_softmax^T @ (dL/dp)
+
+    Hessian uses a stable diagonal approximation similar to softmax: 2*p*(1-p).
+    """
+    # reshape predictions to (N, C)
+    pred = pred.reshape(y.shape[0], -1)
+    y_true = y.astype(int).reshape(-1)
+
+    # Softmax to probabilities
+    exp_pred = np.exp(pred - np.max(pred, axis=1, keepdims=True))
+    p = exp_pred / np.sum(exp_pred, axis=1, keepdims=True)  # (N, C)
+
+    # q_k = P(y > k) = 1 - cumulative sum up to k
+    cumulative = np.cumsum(p, axis=1)
+    q = 1.0 - cumulative[:, :-1]  # (N, C-1)
+
+    eps = 1e-6
+    q = np.clip(q, eps, 1 - eps)
+
+    # Binary targets per threshold
+    thresholds = np.arange(p.shape[1] - 1)
+    t = (y_true[:, None] > thresholds[None, :]).astype(float)  # (N, C-1)
+
+    # dL/dq for BCE
+    dL_dq = -(t / q) + ((1.0 - t) / (1.0 - q))  # (N, C-1)
+
+    # Accumulate to dL/dp: for class c, it contributes to all thresholds k < c
+    # Use prefix sum along thresholds axis and shift
+    prefix = np.cumsum(dL_dq, axis=1)  # (N, C-1), prefix[k] = sum_{i<=k} dL_dq[i]
+    dL_dp = np.zeros_like(p)
+    dL_dp[:, 0] = 0.0
+    dL_dp[:, 1:] = prefix  # for class c >= 1, sum over k < c
+
+    # dL/ds via softmax Jacobian: g_c = p_c * (dL/dp_c - sum_j dL/dp_j * p_j)
+    sum_term = np.sum(dL_dp * p, axis=1, keepdims=True)  # (N, 1)
+    grad = p * (dL_dp - sum_term)  # (N, C)
+
+    # Diagonal Hessian approximation (robust and commonly used)
+    hess = 2.0 * p * (1.0 - p)
+
+    return grad.flatten(), np.maximum(hess, eps).flatten()
+
+# Backward-compatible aliases
+def bceloss_obj(y, pred):
+    return bce_ordinal_obj(y, pred, num_classes=5)
+
+def bceloss(y_true, y_pred):
+    return bce_ordinal_loss(y_true, y_pred, num_classes=5)
 
 def softmax(x):
     '''Softmax function with x as input vector.'''
@@ -1085,24 +1253,151 @@ class dice_loss_class(object):
 class mcewk_class(object):
     """CatBoost objective combining weighted kappa and MSE."""
 
-    def __init__(self, C=0.5, num_classes=5):
-        self.C = C
+    @staticmethod
+    def calc_ders_multi(y_pred, y_true, weight):
+
+        C = 0.5
+        num_classes = 5
+
+        #y_pred = y_pred.reshape((-1, self.num_classes))
+        y_true = int(y_true)
+        y_pred = np.exp(y_pred) / np.sum(np.exp(y_pred))
+
+        y_pred = np.asarray([y_pred])
+        y_true = np.asarray([y_true])
+
+        g_wk, h_wk = weighted_kappa(y_pred, y_true, num_classes=num_classes, flat_hess=False)
+        g_mse, h_mse = mse_obj(y_true, y_pred)
+        h_mse = np.diag(h_mse)
+
+        grad = C * g_wk + (1 - C) * g_mse
+        hess = C * h_wk + (1 - C) * h_mse
+
+        return -grad, -hess
+
+class MCEWK_metric:
+    @staticmethod
+    def is_max_optimal():
+        return False
+
+    @staticmethod
+    def evaluate(approxes, target, weight):
+
+        C = 0.5
+        K = 5
+        eps = 1e-10
+        mode = 'quadratic'
+        # approxes : liste de K arrays (N,) de logits bruts
+        
+        target = target.astype(int)
+        A = np.vstack(approxes).T  # (N,K)
+        A -= A.max(axis=1, keepdims=True)
+        P = np.exp(A); P /= P.sum(axis=1, keepdims=True)  # (N,K) proba
+        y = np.asarray(target, int)
+        T = np.eye(K)[y]
+
+        # Matrice de poids W
+        i = np.arange(K)[:, None]; j = np.arange(K)[None, :]
+        if mode == "linear":
+            W = np.abs(i - j) / (K - 1)
+        else:
+            W = ((i - j) ** 2) / ((K - 1) ** 2)
+
+        # num, den (définition de ta WKLoss)
+        U = T @ W.T                         # (N,K)
+        num = (P * U).sum()
+        hist_b = T.sum(0)                   # (K,)
+        S = (W @ hist_b) / float(len(y))    # (K,)
+        den = (P.sum(0) * S).sum()
+
+        kappa = np.mean(num / (den + eps))
+
+        per_class_se = np.power(T - P, 2)
+        per_class_mse = np.mean(per_class_se)
+
+        res = (1 - C) * kappa + C * per_class_mse
+
+        return float(res), float(len(y))
+
+    @staticmethod
+    def get_final_error(error, weight):
+        # moyenne (ici identique car métrique globale)
+        return error
+
+######################################### BCE ORDINAL (CATBOOST) ############################################
+
+class BCEOrdinalCatBoost(object):
+    """CatBoost custom objective for ordinal BCE (all-threshold) classification.
+
+    Implements calc_ders_multi for multi-class setting using an all-threshold
+    transformation q_k = P(y > k) computed from softmax probabilities.
+    """
+
+    def __init__(self, num_classes: int = 5):
         self.num_classes = num_classes
-        self.ratio_matrix = np.array([
-            [0.1, 0.25, 0.5, 0.75, 1.0],
-            [0.25, 0.25, 0.25, 0.5, 0.75],
-            [0.5, 0.25, 0.5, 0.25, 0.5],
-            [0.75, 0.5, 0.25, 0.75, 0.25],
-            [1.0, 0.75, 0.5, 0.25, 1.0],
-        ])
+
+    @staticmethod
+    def _softmax(x):
+        x = np.asarray(x, dtype=float)
+        x = x - np.max(x)
+        e = np.exp(x)
+        s = np.sum(e)
+        return e / s
 
     def __call__(self, y_true, y_pred):
+        # Optional batch interface (not used by CatBoost), kept for parity/testing.
         y_pred = y_pred.reshape(-1, self.num_classes)
-        g_wk, h_wk = weighted_class_loss_objective(y_true, y_pred)
-        g_mse, h_mse = mse_obj(y_true, y_pred)
-        grad = self.C * g_wk + (1 - self.C) * g_mse
-        hess = self.C * h_wk + (1 - self.C) * h_mse
-        return grad, hess
+        grads = []
+        hesses = []
+        for i in range(y_true.shape[0]):
+            g, H = self.calc_ders_multi(y_pred[i].tolist(), int(y_true[i]), 1.0)
+            grads.append(g)
+            # Store only diagonal for compactness in this optional path
+            hesses.append(np.diag(np.array(H)))
+        return np.array(grads).flatten(), np.array(hesses).flatten()
+
+    def calc_ders_multi(self, approx, target, weight):
+        """CatBoost hook: per-sample gradient and Hessian.
+
+        approx: list[float] of logits per class
+        target: int class label in [0, C-1]
+        weight: float sample weight
+        """
+        if weight is None:
+            weight = 1.0
+
+        C = self.num_classes
+        p = self._softmax(approx)  # (C,)
+
+        # q_k = P(y > k) for k in [0, C-2]
+        cumulative = np.cumsum(p)
+        q = 1.0 - cumulative[:-1]
+        eps = 1e-12
+        q = np.clip(q, eps, 1 - eps)
+
+        thresholds = np.arange(C - 1)
+        t = (int(target) > thresholds).astype(float)  # (C-1,)
+
+        # dL/dq for BCE
+        dL_dq = -(t / q) + ((1.0 - t) / (1.0 - q))  # (C-1,)
+
+        # Map to dL/dp via q dependence on p: for class c >= 1, contributes sum_{k < c} dL/dq_k
+        prefix = np.cumsum(dL_dq)  # (C-1,)
+        dL_dp = np.zeros_like(p)
+        dL_dp[1:] = prefix
+
+        # dL/ds via softmax Jacobian J: grad = p * (dL/dp - <dL/dp, p>)
+        sum_term = float(np.dot(dL_dp, p))
+        grad = p * (dL_dp - sum_term)
+
+        # Full Hessian approximation using softmax curvature: H = diag(p) - p p^T
+        H = np.diag(p) - np.outer(p, p)
+
+        # Apply weight
+        grad = (grad * weight).tolist()
+        H = (H * weight).tolist()
+
+        return grad, H
 
     def softmax(self, x):
         exp_x = np.exp(x - np.max(x, axis=1, keepdims=True))
@@ -1268,7 +1563,6 @@ def gpd_multiclass_loss(y_true, y_pred, kappa=0.99, xi=0.5):
     scaled_excess = (y_true * threshold_term) / sigma
     loss = np.mean(((xi + 1) / xi) * np.log(1 + scaled_excess) + np.log(sigma))
     return loss
-
 
 def egpd_loss(y_true, y_pred, alpha=1.0, xi=0.5):
     """
@@ -2015,6 +2309,68 @@ def evaluate_pipeline(dir_train, df_test, pred, y, target_name, name,
 
     return metrics, res
 
+import numpy as np
+
+def auoc_func(conf_matrix: np.ndarray, n_beta: int = 1001, class_values=None) -> float:
+    """
+    AUOC robuste aux lignes vides (classes jamais vraies) et aux labels non consécutifs.
+    - conf_matrix: matrice carrée (KxK) de comptes >= 0
+    - class_values: liste/array de taille K donnant la "valeur" ordinale de chaque classe
+                    (dans le même ordre que la matrice). Si None -> distances |i-j|.
+    """
+    C = np.asarray(conf_matrix, dtype=float)
+    if C.ndim != 2 or C.shape[0] != C.shape[1]:
+        raise ValueError("conf_matrix must be a square 2D array")
+    if not np.isfinite(C).all() or (C < 0).any():
+        raise ValueError("conf_matrix must have finite, non-negative entries")
+
+    K = C.shape[0]
+
+    # Normalisation par ligne p(ŷ | y) en mettant 0 sur les lignes vides
+    row_sums = C.sum(axis=1, keepdims=True)
+    p = np.divide(C, row_sums, out=np.zeros_like(C), where=row_sums != 0)
+
+    # Bénéfice (uniquement la diagonale)
+    benefit = np.zeros_like(p)
+    np.fill_diagonal(benefit, np.diag(p))
+
+    # Matrice de distances ordinale
+    if class_values is None:
+        yy, yhat = np.indices((K, K))
+        D = np.abs(yy - yhat).astype(float)
+    else:
+        v = np.asarray(class_values, dtype=float).reshape(-1)
+        if v.shape[0] != K or not np.isfinite(v).all():
+            raise ValueError("class_values must be finite and match conf_matrix size")
+        D = np.abs(v[:, None] - v[None, :])  # |value_i - value_j|
+
+    penalty = p * D
+
+    neg_benefit_over_K = -benefit / K
+    penalty_over_K = penalty / K
+
+    betas = np.linspace(0.0, 1.0, n_beta)
+    uoc_vals = np.empty_like(betas)
+
+    for idx, beta in enumerate(betas):
+        cell_cost = neg_benefit_over_K + beta * penalty_over_K
+
+        # DP min-path (monotone down/right)
+        dp = np.empty((K, K), dtype=float)
+        dp[0, 0] = cell_cost[0, 0]
+        for j in range(1, K):
+            dp[0, j] = dp[0, j-1] + cell_cost[0, j]
+        for i in range(1, K):
+            dp[i, 0] = dp[i-1, 0] + cell_cost[i, 0]
+        for i in range(1, K):
+            for j in range(1, K):
+                dp[i, j] = min(dp[i-1, j], dp[i, j-1]) + cell_cost[i, j]
+
+        uoc_vals[idx] = 1.0 + dp[-1, -1]  # constante expliquée précédemment
+
+    auoc_value = float(np.trapz(uoc_vals, betas))
+    return auoc_value
+
 def plot_confusion_matrix(y_test, y_pred, labels, model_name, dir_output, figsize=(10, 8), title='Confusion Matrix', filename='confusion_matrix', normalize=None):
     """
     Plots a confusion matrix with annotations and proper formatting.
@@ -2104,23 +2460,34 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
     # Trier les valeurs par 'nbsinister' décroissant
     #df_sorted = df.sort_values(by='nbsinister', ascending=False)
     df_sorted = df
+    if y_pred.ndim > 1:
+        y_pred = y_pred[:, 0]
 
     y_true = df[y_true_col]
     
     iou = iou_score(y_true, y_pred)
-    f1 = f1_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
-    prec = precision_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
-    rec = recall_score((y_true > 0).astype(int), (y_pred > 0).astype(int))
+    f1 = f1_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+    prec = precision_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+    rec = recall_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+    
+    f1_macro = f1_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
+    prec_macro = precision_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
+    rec_macro = recall_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
+    
+    auoc = auoc_func(conf_matrix=confusion_matrix(y_true, y_pred, labels=np.union1d(y_true, y_pred)))
 
     under = under_prediction_score(y_true, y_pred)
     over = over_prediction_score(y_true, y_pred)
 
     # Initialiser un dictionnaire pour les résultats
-    results = {'iou' : iou, 'f1' : f1, 'under' : under, 'over' : over, 'prec' : prec, 'recall' : rec}
+    results = {'iou' : iou, 'f1' : f1, 'under' : under, 'over' : over, 'prec' : prec, 'recall' : rec,
+               'auoc' : auoc, 'f1_macro' : f1_macro, 'prec_macro' : prec_macro, 'rec_macro' : rec_macro}
 
     # Calculer l'IoU et F1 pour chaque département
     IoU_scores = []
     F1_scores = []
+    rec_scores = []
+    prec_scores = []
     
     for i, department in enumerate(df_sorted['departement'].unique()):
         # Extraire les valeurs pour chaque département
@@ -2131,10 +2498,14 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
         
         # Calcul des scores IoU et F1
         IoU = iou_score(y_true, y_pred_department)
-        F1 = f1_score(y_true > 0, y_pred_department > 0)
-        
+        F1 = f1_score(y_true > 0, y_pred_department > 0, zero_division=0)
+        prec = precision_score(y_true > 0, y_pred_department > 0, zero_division=0)
+        rec = recall_score(y_true > 0, y_pred_department > 0, zero_division=0)
+
         IoU_scores.append(IoU)
         F1_scores.append(F1)
+        prec_scores.append(prec)
+        rec_scores.append(rec)
         
     df_sorted_test_area = df_sorted[df_sorted[y_true_col] > 0]
     # Calcul de l'aire maximale possible (cas parfait où toutes les prédictions sont correctes)
@@ -2143,13 +2514,182 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
     # Calcul de l'aire sous la courbe pour l'IoU et le F1
     IoU_area = calculate_area_under_curve(IoU_scores)
     F1_area = calculate_area_under_curve(F1_scores)
-    
+
+    prec_area = calculate_area_under_curve(prec_scores)
+    rec_area = calculate_area_under_curve(rec_scores)
+
     # Normalisation par l'aire maximale
     normalized_IoU = IoU_area / max_area if max_area > 0 else 0
     normalized_F1 = F1_area / max_area if max_area > 0 else 0
+    normalized_rec = rec_area / max_area if max_area > 0 else 0
+    normalized_prec = prec_area / max_area if max_area > 0 else 0
+    
+    y_true = df[y_true_col]
     
     # Stocker les résultats dans le dictionnaire
     results['normalized_iou'] = normalized_IoU
     results['normalized_f1'] = normalized_F1
+
+    results['normalized_prec'] = normalized_prec
+    results['normalized_rec'] = normalized_rec
+
+    for elt in np.unique(y_true):
+        if elt == 0:
+            continue
+
+        mask = (y_true >= elt) | (y_pred >= elt)
+
+        if not np.any(mask):
+            continue
+
+        iou_elt = iou_score(y_true[mask], y_pred[mask])
+        f1_elt = f1_score(y_true[mask] > 0, y_pred[mask] > 0, zero_division=0)
+        prec_elt = precision_score(y_true[mask] > 0, y_pred[mask] > 0, zero_division=0)
+        rec_elt = recall_score(y_true[mask] > 0, y_pred[mask] > 0, zero_division=0)
+
+        f1_macro = f1_score((y_true[mask]).astype(int), (y_pred[mask]).astype(int), zero_division=0, average='macro')
+        prec_macro = precision_score((y_true[mask]).astype(int), (y_pred[mask]).astype(int), zero_division=0, average='macro')
+        rec_macro = recall_score((y_true[mask]).astype(int), (y_pred[mask]).astype(int), zero_division=0, average='macro')
+
+        auoc_elt = auoc_func(confusion_matrix(y_true[mask], y_pred[mask], labels=np.union1d(y_true[mask], y_pred[mask])))
+
+        results[f'iou_elt_sup_{elt}'] = iou_elt
+        results[f'f1_elt_sup_{elt}'] = f1_elt
+        results[f'prec_elt_sup_{elt}'] = prec_elt
+        results[f'rec_elt_sup_{elt}'] = rec_elt
+        
+        results[f'f1_macro_elt_sup_{elt}'] = f1_macro
+        results[f'prec_macro_elt_sup_{elt}'] = prec_macro
+        results[f'rec_macro_elt_sup_{elt}'] = rec_macro
+
+        results[f'auoc_elt_sup_{elt}'] = auoc_elt
     
     return results
+
+def update_metrics_as_arrays(self, tp, metrics_run, set):
+    """
+    Met à jour self.metrics[tp] en stockant des tableaux NumPy.
+    Pour chaque (k, v) dans metrics_run, on alimente la clé f"{k}_val".
+    - v peut être un scalaire ou un array/list -> converti en 1D via np.atleast_1d.
+    """
+    bucket = self.metrics.setdefault(tp, {})
+    for k, v in metrics_run.items():
+        key = f"{k}_{set}"
+        v_arr = np.atleast_1d(v).astype(float)
+
+        if key not in bucket:
+            # Première insertion -> tableau directement
+            bucket[key] = v_arr.copy()
+        else:
+            # Concaténation avec l'existant
+            bucket[key] = np.concatenate([bucket[key], v_arr])
+
+from typing import Dict, Any, Iterable, Optional
+import numpy as np
+
+def add_ic95_to_dict(
+    d: Dict[str, Any],
+    keys: Optional[Iterable[str]] = None,
+    suffix: str = "_ic95",
+    dropna: bool = True,
+    overwrite: bool = True,
+) -> Dict[str, Any]:
+    """
+    Pour chaque clé 'metric' de d (ou sous-ensemble 'keys'), calcule l'IC95
+    via calculate_ic95(d[metric]) et stocke un tuple (lower, upper) sous
+    'metric{suffix}' (ex.: 'f1_ic95').
+
+    Hypothèses:
+    - d[metric] est une séquence numérique (list/tuple/ndarray) de valeurs (runs, sous-samples, etc.)
+    - La fonction calculate_ic95(array_like) existe et renvoie (lower, upper)
+
+    Paramètres
+    ----------
+    d : dict
+        Dictionnaire des métriques => séquences de valeurs.
+    keys : itérable de str, optionnel
+        Si fourni, ne traite que ces clés. Sinon, toutes les clés sauf celles finissant par `suffix`.
+    suffix : str
+        Suffixe pour la clé IC95 (par défaut "_ic95").
+    dropna : bool
+        Si True, ignore les NaN avant le calcul.
+    overwrite : bool
+        Si False, n’écrase pas une clé '{metric}{suffix}' déjà existante.
+
+    Retour
+    ------
+    dict (même objet) enrichi de paires '{metric}{suffix}': (lower, upper).
+    """
+    # Sélection des clés candidates
+    if keys is None:
+        candidates = [k for k in d.keys() if not k.endswith(suffix)]
+    else:
+        candidates = list(keys)
+
+    for k in candidates:
+        vals = d.get(k, None)
+        if vals is None:
+            continue
+
+        # Convertir en tableau 1D de floats
+        arr = np.asarray(vals, dtype=float).ravel()
+        if dropna:
+            arr = arr[~np.isnan(arr)]
+
+        # Besoin d'au moins 2 points pour un IC95 basé sur SD
+        if arr.size < 2:
+            d[f"{k}{suffix}"] = (np.nan, np.nan)
+            continue
+
+        # Appel à la fonction externe calculate_ic95
+        try:
+            lower, upper = calculate_ic95(arr)
+            lower = float(lower)
+            upper = float(upper)
+        except Exception:
+            lower, upper = (np.nan, np.nan)
+
+        out_key = f"{k}{suffix}"
+        if overwrite or out_key not in d:
+            d[out_key] = (lower, upper)
+
+    return d
+
+from typing import Any
+
+def round_floats(obj: Any, ndigits: int = 2, round_keys: bool = False) -> Any:
+    """
+    Arrondit tous les float rencontrés dans une structure Python (dict, list, tuple, set),
+    et renvoie une nouvelle structure du même type.
+    
+    - obj: structure d'entrée (dict, list, tuple, set, scalaires)
+    - ndigits: nombre de décimales (par défaut 2)
+    - round_keys: si True, arrondit aussi les *clés* de type float dans les dicts
+                  (attention aux collisions possibles de clés après arrondi)
+    """
+    # float -> on arrondit
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+
+    # dict -> on traite clés/valeurs
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            new_k = round(k, ndigits) if (round_keys and isinstance(k, float)) else k
+            new_dict[new_k] = round_floats(v, ndigits, round_keys)
+        return new_dict
+
+    # list -> on traite chaque élément
+    if isinstance(obj, list):
+        return [round_floats(x, ndigits, round_keys) for x in obj]
+
+    # tuple -> on traite chaque élément et on recompose un tuple
+    if isinstance(obj, tuple):
+        return tuple(round_floats(x, ndigits, round_keys) for x in obj)
+
+    # set -> on traite chaque élément (attention: l'arrondi peut fusionner des éléments)
+    if isinstance(obj, set):
+        return {round_floats(x, ndigits, round_keys) for x in obj}
+
+    # autre type (int, str, bool, None, etc.) -> inchangé
+    return obj

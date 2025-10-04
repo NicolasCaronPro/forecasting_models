@@ -19,8 +19,8 @@ import torch.nn as nn
 from dgl import DGLGraph
 from torch import Tensor
 
-from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP
-from .utils import aggregate_and_concat
+from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP, MeshGraphMLPAttention, MeshGraphMLPGAT
+from .utils import aggregate_and_concat, aggregate_and_concat_with_attention, EdgeScoreDotProductGAT, EdgeScoreDotProductTransformer
 
 
 class MeshGraphDecoder(nn.Module):
@@ -68,11 +68,27 @@ class MeshGraphDecoder(nn.Module):
         activation_fn: nn.Module = nn.SiLU(),
         norm_type: str = "LayerNorm",
         do_concat_trick: bool = False,
+        attention: str = None
     ):
         super().__init__()
         self.aggregation = aggregation
 
         MLP = MeshGraphEdgeMLPSum if do_concat_trick else MeshGraphEdgeMLPConcat
+        
+        if attention == "Transformer":
+            MLP_PROCESS = MeshGraphMLPAttention
+        elif attention == "GAT":
+            MLP_PROCESS = MeshGraphMLPGAT
+        else:
+            MLP_PROCESS = MeshGraphMLP
+
+        self.attention = attention
+
+        if attention == "GAT":
+            self.attention_score = EdgeScoreDotProductGAT(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
+        elif attention == "Transformer":
+            self.attention_score = EdgeScoreDotProductTransformer(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
+
         # edge MLP
         self.edge_mlp = MLP(
             efeat_dim=input_dim_edges,
@@ -86,7 +102,7 @@ class MeshGraphDecoder(nn.Module):
         )
 
         # dst node MLP
-        self.node_mlp = MeshGraphMLP(
+        self.node_mlp = MLP_PROCESS(
             input_dim=input_dim_dst_nodes + output_dim_edges,
             output_dim=output_dim_dst_nodes,
             hidden_dim=hidden_dim,
@@ -111,17 +127,27 @@ class MeshGraphDecoder(nn.Module):
                 # update edge features
                 efeat = self.edge_mlp(m2g_efeat, (mesh_nfeat[i], grid_nfeat[i]), graph)
                 # aggregate messages (edge features) to obtain updated node features
-                cat_feat = aggregate_and_concat(
-                    efeat, grid_nfeat[i], graph, self.aggregation
-                )
+                if self.attention:
+                    attention_score = self.attention_score(graph, mesh_nfeat[i], grid_nfeat[i], efeat)
+                    cat_feat = aggregate_and_concat_with_attention(
+                        efeat, grid_nfeat[i], graph, attention_score
+                    )
+                else:  
+                    cat_feat = aggregate_and_concat(
+                        efeat, grid_nfeat[i], graph, self.aggregation
+                    )
                 # transformation and residual connection
-                grid_nfeat_new.append(self.node_mlp(cat_feat) + grid_nfeat[i])
+                grid_nfeat_new.append(self.node_mlp(cat_feat, graph) + grid_nfeat[i])
             return torch.stack(grid_nfeat_new)
         else:
             # update edge features
             efeat = self.edge_mlp(m2g_efeat, (mesh_nfeat, grid_nfeat), graph)
             # aggregate messages (edge features) to obtain updated node features
-            cat_feat = aggregate_and_concat(efeat, grid_nfeat, graph, self.aggregation)
+            if self.aggregation:
+                attention_score = self.attention_score(graph, m2g_efeat, grid_nfeat, efeat)
+                cat_feat = aggregate_and_concat_with_attention(efeat, grid_nfeat, graph, attention_score)
+            else:
+                cat_feat = aggregate_and_concat(efeat, grid_nfeat, graph, self.aggregation)
             # transformation and residual connection
-            dst_feat = self.node_mlp(cat_feat) + grid_nfeat
+            dst_feat = self.node_mlp(cat_feat, graph) + grid_nfeat
             return dst_feat

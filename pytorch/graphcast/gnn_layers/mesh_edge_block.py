@@ -55,11 +55,16 @@ class MeshEdgeBlock(nn.Module):
         hidden_layers: int = 1,
         activation_fn: nn.Module = nn.SiLU(),
         norm_type: str = "LayerNorm",
-        do_concat_trick: bool = False,
+        do_concat_trick: str = "sum",
     ):
         super().__init__()
 
-        MLP = MeshGraphEdgeMLPSum if do_concat_trick else MeshGraphEdgeMLPConcat
+        if do_concat_trick == 'sum':
+            MLP = MeshGraphEdgeMLPSum
+        elif do_concat_trick == 'concat':
+            MLP = MeshGraphEdgeMLPConcat
+        elif do_concat_trick == "attention":
+            pass
 
         self.edge_mlp = MLP(
             efeat_dim=input_dim_edges,

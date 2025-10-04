@@ -14,7 +14,6 @@ from .graph_cast_mesh_processor import GraphCastMeshProcessor
 
 logger = logging.getLogger(__name__)
 
-
 class GraphCastNet(torch.nn.Module):
     def __init__(
         self,
@@ -29,6 +28,7 @@ class GraphCastNet(torch.nn.Module):
         norm_type: str = "LayerNorm",
         do_concat_trick: bool = False,
         has_time_dim: bool = False,
+        attention: bool = False
     ):
         super(GraphCastNet, self).__init__()
 
@@ -62,6 +62,7 @@ class GraphCastNet(torch.nn.Module):
             activation_fn=activation_fn,
             norm_type=norm_type,
             do_concat_trick=do_concat_trick,
+            attention=attention
         )
 
         # icosahedron processor
@@ -126,6 +127,7 @@ class GraphCastNet(torch.nn.Module):
             activation_fn=activation_fn,
             norm_type=norm_type,
             do_concat_trick=do_concat_trick,
+            attention=attention
         )
 
         # final MLP

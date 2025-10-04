@@ -69,9 +69,9 @@ class MLPLayer(torch.nn.Module):
 class NetMLP(torch.nn.Module):
     def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False):
         super(NetMLP, self).__init__()
-        self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim, device)
-        self.layer3 = MLPLayer(hidden_dim, hidden_dim, device)
-        self.layer4 = MLPLayer(hidden_dim, end_channels, device)
+        self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
+        self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
+        self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
         self.layer2 = MLPLayer(end_channels, output_channels, device)
         self.task_type = task_type
         self.n_sequences = n_sequences
@@ -87,10 +87,12 @@ class NetMLP(torch.nn.Module):
         logits = self.layer2(x)
         if self.task_type == 'classification':
             output = self.soft(logits)
+        else:
+            output = logits
             
         return output, logits, hidden
     
-#####################################################""""
+#####################################################
 
 class GAT(torch.nn.Module):
     def __init__(self, n_sequences, in_dim,
@@ -1342,11 +1344,8 @@ class GRU(torch.nn.Module):
         x = self.dropout(x)
 
         # Activation and output
-        #x = self.act_func(x)
         x = self.act_func(self.linear1(x))
-        #x = self.dropout(x)
         hidden = self.act_func(self.linear2(x))
-        #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
         return output, logits, hidden
@@ -1593,7 +1592,7 @@ class GraphCastGRU(torch.nn.Module):
         hidden_layers: int = 1,
         hidden_dim: int = 512,
         aggregation: str = "sum",
-        norm_type: str = "LayerNorm",
+        norm_type: str = "BatchNorm",
         out_channels: int = 4,
         task_type: str = "classification",
         do_concat_trick: bool = False,
@@ -1626,7 +1625,9 @@ class GraphCastGRU(torch.nn.Module):
         )
         self.gru_size = input_dim_grid_nodes
         self.num_gru_layers = num_gru_layers
-
+        self.norm = torch.nn.BatchNorm1d(self.gru_size)
+        self.dropout = torch.nn.Dropout(0.03)
+        
         # ------------------------------------------------------------------
         # GraphCast core network (unchanged)
         # ------------------------------------------------------------------
@@ -1677,7 +1678,140 @@ class GraphCastGRU(torch.nn.Module):
 
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
         # Keep the last hidden state for each sequence
-        gru_last = gru_out[:, -1, :]  # (B*N, hidden == input_dim_grid_nodes)
+        gru_last = self.norm(gru_out[:, -1, :])
+        gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
+        
+        X_graphcast = gru_last[None,: ,:]
+
+        # GraphCast processing
+        x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
+
+        # Head
+        x = self.act_func(self.linear1(x))
+        hidden = self.act_func(self.linear2(x))
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden
+    
+class GraphCastGRUWithAttention(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        # --- GRU specific parameters ---
+        in_channels: int = 16,
+        num_gru_layers: int = 1,
+        # --- GraphCast parameters (unchanged) ---
+        input_dim_grid_nodes: int = 10,
+        input_dim_mesh_nodes: int = 3,
+        input_dim_edges: int = 4,
+        end_channels: int = 64,
+        lin_channels: int = 64,
+        output_dim_grid_nodes: int = 1,
+        processor_layers: int = 4,
+        hidden_layers: int = 1,
+        hidden_dim: int = 512,
+        aggregation: str = "sum",
+        norm_type: str = "BatchNorm",
+        out_channels: int = 4,
+        task_type: str = "classification",
+        do_concat_trick: bool = False,
+        has_time_dim: bool = False,
+        n_sequences: int = 1,
+        act_func: str = "ReLU",
+        is_graph_or_node: bool = False,
+        return_hidden: bool = False,
+        attention : bool = True
+    ):
+        """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
+
+        Args:
+            in_channels: Dimension of the temporal features fed to the GRU (== input_size).
+            num_gru_layers: Number of stacked GRU layers.
+            input_dim_grid_nodes: Size of the embedding produced by the GRU for each node.  Must
+                match *hidden_size* of the GRU.
+            All other parameters are identical to the original GraphCastGRU.
+        """
+        super().__init__()
+        print(f'attention : {attention}')
+        # ------------------------------------------------------------------
+        # GRU — encodes the temporal axis and outputs an embedding per node
+        # ------------------------------------------------------------------
+        self.gru = torch.nn.GRU(
+            input_size=in_channels,
+            hidden_size=input_dim_grid_nodes,
+            num_layers=num_gru_layers,
+            dropout=0.03 if num_gru_layers > 1 else 0.0,
+            batch_first=True,
+        )
+        self.gru_size = input_dim_grid_nodes
+        self.num_gru_layers = num_gru_layers
+        self.norm = torch.nn.BatchNorm1d(self.gru_size)
+        self.dropout = torch.nn.Dropout(0.03)
+        
+        # ------------------------------------------------------------------
+        # GraphCast core network (unchanged)
+        # ------------------------------------------------------------------
+        self.net = GraphCastNet(
+            input_dim_grid_nodes,
+            input_dim_mesh_nodes,
+            input_dim_edges,
+            output_dim_grid_nodes,
+            processor_layers,
+            hidden_layers,
+            hidden_dim,
+            aggregation,
+            norm_type,
+            do_concat_trick,
+            has_time_dim,
+            attention=attention
+        )
+
+        # ------------------------------------------------------------------
+        # Output head
+        # ------------------------------------------------------------------
+        self.linear1 = torch.nn.Linear(output_dim_grid_nodes, lin_channels)
+        self.linear2 = torch.nn.Linear(lin_channels, end_channels)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels)
+
+        self.is_graph_or_node = is_graph_or_node == "graph"
+
+        self.act_func = getattr(torch.nn, act_func)()
+        self.return_hidden = return_hidden
+
+        if task_type == "classification":
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == "binary":
+            self.output_activation = torch.nn.Sigmoid()
+        else:  # regression or custom
+            self.output_activation = torch.nn.Identity()
+
+    # ----------------------------------------------------------------------
+    # Forward pass
+    # ----------------------------------------------------------------------
+    def forward(self, X, graph, graph2mesh, mesh2graph):
+        """Args:
+            X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
+        """
+        # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
+        B, C_in, T = X.shape
+        X_for_gru = X.permute(0, 2, 1)
+        h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
+
+        """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
+        gru_out = gru_out.permute(0, 2, 1)
+        # Keep the last hidden state for each sequence
+        gru_last = self.norm(gru_out)
+        gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
+
+        gru_last = gru_out.permute(2, 0, 1)
+
+        X_graphcast = gru_last"""
+
+        gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
+        # Keep the last hidden state for each sequence
+        gru_last = self.norm(gru_out[:, -1, :])
+        gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
+        
         X_graphcast = gru_last[None,: ,:]
 
         # GraphCast processing
