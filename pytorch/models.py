@@ -77,6 +77,10 @@ class NetMLP(torch.nn.Module):
         self.n_sequences = n_sequences
         self.soft = torch.nn.Softmax(dim=1)
         self.return_hidden = return_hidden
+        self.device = device
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
 
     def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
@@ -89,8 +93,38 @@ class NetMLP(torch.nn.Module):
             output = self.soft(logits)
         else:
             output = logits
-            
+
+        self._decoder_input = hidden
+
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params):
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
     
 #####################################################
 
@@ -1281,7 +1315,10 @@ class GRU(torch.nn.Module):
         self.task_type = task_type
         self.is_graph_or_node = False
         self.gru_size = gru_size
-        
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
+
         # GRU layer
         self.gru = torch.nn.GRU(
             input_size=in_channels,
@@ -1348,7 +1385,36 @@ class GRU(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
+        self._decoder_input = hidden
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params):
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
@@ -1363,6 +1429,9 @@ class LSTM(torch.nn.Module):
         self.task_type = task_type
         self.is_graph_or_node = False
         self.lstm_size = lstm_size
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
 
         # LSTM block
         self.lstm = torch.nn.LSTM(
@@ -1434,7 +1503,36 @@ class LSTM(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
+        self._decoder_input = hidden
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params):
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False):
@@ -1469,8 +1567,12 @@ class DilatedCNN(torch.nn.Module):
 
         # Activation function
         self.act_func = getattr(torch.nn, act_func)()
-        
+
         self.return_hidden = return_hidden
+        self.device = device
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1501,7 +1603,36 @@ class DilatedCNN(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
+        self._decoder_input = hidden
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params):
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1656,6 +1787,9 @@ class GraphCastGRU(torch.nn.Module):
 
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1691,7 +1825,36 @@ class GraphCastGRU(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
+        self._decoder_input = hidden
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params):
+        device = decodeur_params.get('device', next(self.parameters()).device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
     
 class GraphCastGRUWithAttention(torch.nn.Module):
     def __init__(
