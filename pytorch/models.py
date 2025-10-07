@@ -24,7 +24,7 @@ import math
 
 ##################################### SIMPLE GRAPH #####################################
 class NetGCN(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type, return_hidden=False):
+    def __init__(self, in_dim, hidden_dim, hidden_dim_2, output_channels, end_channels, n_sequences, graph_or_node, device, task_type, return_hidden=False, horizon=0):
         super(NetGCN, self).__init__()
         self.layer1 = GraphConv(in_dim * n_sequences, hidden_dim).to(device)
         self.layer2 = GraphConv(hidden_dim, hidden_dim_2).to(device)
@@ -34,6 +34,7 @@ class NetGCN(torch.nn.Module):
         self.task_type = task_type
         self.soft = torch.nn.Softmax(dim=1)
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         self.output_layer = OutputLayer(
             in_channels=hidden_dim_2,
@@ -67,7 +68,7 @@ class MLPLayer(torch.nn.Module):
         return self.mlp(x)
     
 class NetMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False):
+    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0):
         super(NetMLP, self).__init__()
         self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
         self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
@@ -83,8 +84,10 @@ class NetMLP(torch.nn.Module):
         self._decoder_input = None
         self.output_channels = output_channels
         self.in_dim = in_dim
+        self.horizon = horizon
 
-        self.define_decodeur()
+        if self.horizon > 0:
+            self.define_decodeur()
 
     def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
@@ -103,15 +106,17 @@ class NetMLP(torch.nn.Module):
         return output, logits, hidden
     
     def define_decodeur(self):
+        output_dim = self.output_channels * (self.horizon if self.horizon > 0 else 1)
         self.decode1 = torch.nn.Linear(self.end_channels + self.in_dim + self.output_channels, 256)
-        self.decode2 = torch.nn.Linear(256, self.output_channels)
+        self.decode2 = torch.nn.Linear(256, output_dim)
+        self._decoder_output_dim = output_dim
 
     def forward_decodeur(self, z, y_prev=None, X_futur=None):
         B = z.shape[0]
         if y_prev is None:
-            y_prev = torch.zeros((B, self.output_channels))
+            y_prev = torch.zeros((B, getattr(self, "_decoder_output_dim", self.output_channels)), device=z.device)
         if X_futur is None:
-            X_futur = torch.zeros((B, self.in_dim))
+            X_futur = torch.zeros((B, self.in_dim), device=z.device)
 
         x = torch.cat((z, y_prev, X_futur))
         x = self.decode1(x)
@@ -132,15 +137,16 @@ class GAT(torch.nn.Module):
                  hidden_channels,
                  end_channels,
                  heads,
-                 dropout, 
+                 dropout,
                  bias,
                  device,
                  act_func,
                  task_type,
                  out_channels,
                  graph_or_node='node',
-                 return_hidden=False):
-        
+                 return_hidden=False,
+                 horizon=0):
+
         super(GAT, self).__init__()
 
         num_of_layers = len(hidden_channels) - 1
@@ -150,6 +156,7 @@ class GAT(torch.nn.Module):
         self.dropout_layers = torch.nn.ModuleList()
         self.return_hidden = return_hidden
         self.out_channels = out_channels
+        self.horizon = horizon
 
         # Couche d'entrée linéaire pour projeter les dimensions d'entrée
         self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0] * heads[0], weight_initializer='glorot').to(device)
@@ -238,14 +245,15 @@ class GCN(torch.nn.Module):
     def __init__(self, n_sequences, in_dim,
                  hidden_channels,
                  end_channels,
-                 dropout, 
+                 dropout,
                  bias,
                  device,
                  act_func,
                  task_type,
                  out_channels,
                  graph_or_node='node',
-                 return_hidden=False):
+                 return_hidden=False,
+                 horizon=0):
         
         super(GCN, self).__init__()
         
@@ -256,6 +264,7 @@ class GCN(torch.nn.Module):
         self.dropout_layers = torch.nn.ModuleList()
         self.return_hidden = return_hidden
         self.out_channels = out_channels
+        self.horizon = horizon
 
         self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0], weight_initializer='glorot').to(device)
 
@@ -394,14 +403,15 @@ class SpatioTemporalLayer(torch.nn.Module):
         return x
 
 class DSTGCN(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False, horizon=0):
         super(DSTGCN, self).__init__()
-        
+
         self.return_hidden = return_hidden
         self.device = device
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
         self.out_channels = out_channels
+        self.horizon = horizon
         
         # Initial layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
@@ -509,14 +519,15 @@ class SpatioTemporalLayerGAT(torch.nn.Module):
         return x
 
 class DSTGAT(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, heads, out_channels, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, end_channels, dilation_channels, dilations, dropout, act_func, device, task_type, heads, out_channels, graph_or_node='node', return_hidden=False, horizon=0):
         super(DSTGAT, self).__init__()
-        
+
         self.return_hidden = return_hidden
         self.device = device
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
         self.out_channels = out_channels
+        self.horizon = horizon
         
         # Initial layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
@@ -670,13 +681,14 @@ class SandwichLayer(torch.nn.Module):
         return x
 
 class STGAT(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, heads, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, heads, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False, horizon=0):
         super(STGAT, self).__init__()
 
         self.return_hidden = return_hidden
         self.device = device
         self.is_graph_or_node = graph_or_node == 'graph'
         self.n_sequences = n_sequences
+        self.horizon = horizon
 
         self.input = Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
 
@@ -784,13 +796,14 @@ class SandwichLayerGCN(torch.nn.Module):
         return x
 
 class STGCN(torch.nn.Module):
-    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False):
+    def __init__(self, n_sequences, in_channels, hidden_channels, end_channels, dropout, act_func, device, task_type, out_channels, graph_or_node='node', return_hidden=False, horizon=0):
         super(STGCN, self).__init__()
-        
+
         self.return_hidden = return_hidden
         self.device = device
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
+        self.horizon = horizon
 
         # Initial input projection layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
@@ -845,7 +858,7 @@ class STGCN(torch.nn.Module):
 
 class ST_GATLSTM(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels_list, end_channels, n_sequences, device, act_func, heads,
-                 dropout, num_layers, task_type, concat, graph_or_node='node', return_hidden=False, out_channels=None):
+                 dropout, num_layers, task_type, concat, graph_or_node='node', return_hidden=False, out_channels=None, horizon=0):
         super(ST_GATLSTM, self).__init__()
 
         self.return_hidden = return_hidden
@@ -855,6 +868,7 @@ class ST_GATLSTM(torch.nn.Module):
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
         self.concat = concat
+        self.horizon = horizon
 
         # LSTM layers with different hidden channels per layer
         self.lstm_layers = torch.nn.ModuleList()
@@ -937,6 +951,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
         num_lstm_layers=1,
         use_layernorm=False,
         dropout=0.03,
+        horizon=0,
     ):
         super(Sep_LSTM_GNN, self).__init__()
 
@@ -945,6 +960,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
         self.temporal_idx = temporal_idx
         self.is_graph_or_node = False
         self.device = device
+        self.horizon = horizon
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1067,6 +1083,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         num_lstm_layers=1,
         use_layernorm=False,
         dropout=0.03,
+        horizon=0,
     ):
         super(Sep_GRU_GNN, self).__init__()
 
@@ -1076,6 +1093,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         self.is_graph_or_node = False
         self.device = device
         self.return_hidden = False
+        self.horizon = horizon
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1199,15 +1217,17 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         use_layernorm=False,
         dropout=0.03,
         return_hidden=False,
+        horizon=0,
     ):
         super(LSTM_GNN_Feedback, self).__init__()
-        
+
         self.lstm_hidden = lstm_hidden
         self.device = device
         self.static_idx = static_idx
         self.temporal_idx = temporal_idx
         self.task_type = task_type
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         # LSTMCell: traite séquentiellement les pas de temps
         self.lstm_cell = torch.nn.LSTMCell(
@@ -1304,7 +1324,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
 class GRU(torch.nn.Module):
     def __init__(self, in_channels, gru_size, hidden_channels, end_channels, n_sequences, device,
                  act_func='ReLU', task_type='regression', dropout=0.0, num_layers=1,
-                 return_hidden=False, out_channels=None, use_layernorm=False):
+                 return_hidden=False, out_channels=None, use_layernorm=False, horizon=0):
         super(GRU, self).__init__()
 
         self.device = device
@@ -1317,6 +1337,8 @@ class GRU(torch.nn.Module):
         self.end_channels = end_channels
         self.decoder = None
         self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
 
         # GRU layer
         self.gru = torch.nn.GRU(
@@ -1351,6 +1373,9 @@ class GRU(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid().to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
+
+        if self.horizon > 0:
+            self.define_decodeur()
 
     def forward(self, X, edge_index=None, graphs=None):
         """
@@ -1387,7 +1412,18 @@ class GRU(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params):
+    def define_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.out_channels is None:
+                raise ValueError("out_channels must be specified to automatically define the decoder.")
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
         device = decodeur_params.get('device', self.device)
         hidden_dim = decodeur_params['hidden_dim']
         output_dim = decodeur_params['output_dim']
@@ -1399,6 +1435,7 @@ class GRU(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
         ).to(device)
+        self._decoder_output_dim = output_dim
 
     def forward_decodeur(self, y_prev=None, X_futur=None):
         if self.decoder is None:
@@ -1418,7 +1455,7 @@ class GRU(torch.nn.Module):
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
                  act_func='ReLU', task_type='regression', dropout=0.03, num_layers=1,
-                 return_hidden=False, out_channels=None, use_layernorm=False):
+                 return_hidden=False, out_channels=None, use_layernorm=False, horizon=0):
         super(LSTM, self).__init__()
 
         self.device = device
@@ -1431,6 +1468,8 @@ class LSTM(torch.nn.Module):
         self.end_channels = end_channels
         self.decoder = None
         self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
 
         # LSTM block
         self.lstm = torch.nn.LSTM(
@@ -1465,6 +1504,9 @@ class LSTM(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid().to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)
+
+        if self.horizon > 0:
+            self.define_decodeur()
 
     def forward(self, X, edge_index=None, graphs=None):
         """
@@ -1505,7 +1547,18 @@ class LSTM(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params):
+    def define_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.out_channels is None:
+                raise ValueError("out_channels must be specified to automatically define the decoder.")
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
         device = decodeur_params.get('device', self.device)
         hidden_dim = decodeur_params['hidden_dim']
         output_dim = decodeur_params['output_dim']
@@ -1517,6 +1570,7 @@ class LSTM(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
         ).to(device)
+        self._decoder_output_dim = output_dim
 
     def forward_decodeur(self, y_prev=None, X_futur=None):
         if self.decoder is None:
@@ -1534,7 +1588,7 @@ class LSTM(torch.nn.Module):
         return self.decoder(decoder_input)
         
 class DilatedCNN(torch.nn.Module):
-    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False):
+    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0):
         super(DilatedCNN, self).__init__()
 
         # Initialisation des listes pour les convolutions et les BatchNorm
@@ -1572,6 +1626,8 @@ class DilatedCNN(torch.nn.Module):
         self.end_channels = end_channels
         self.decoder = None
         self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1580,6 +1636,9 @@ class DilatedCNN(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid().to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
+
+        if self.horizon > 0:
+            self.define_decodeur()
 
     def forward(self, x, edges=None):
         # Couche d'entrée
@@ -1605,7 +1664,16 @@ class DilatedCNN(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params):
+    def define_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
         device = decodeur_params.get('device', self.device)
         hidden_dim = decodeur_params['hidden_dim']
         output_dim = decodeur_params['output_dim']
@@ -1617,6 +1685,7 @@ class DilatedCNN(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
         ).to(device)
+        self._decoder_output_dim = output_dim
 
     def forward_decodeur(self, y_prev=None, X_futur=None):
         if self.decoder is None:
@@ -1653,7 +1722,8 @@ class GraphCast(torch.nn.Module):
         n_sequences = 1,
         act_func='ReLU',
         is_graph_or_node=False,
-        return_hidden=False):
+        return_hidden=False,
+        horizon=0):
         super(GraphCast, self).__init__()
 
         self.net = GraphCastNet(
@@ -1678,6 +1748,7 @@ class GraphCast(torch.nn.Module):
         
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
+        self.horizon = horizon
         
         # Output activation depending on task
         if task_type == 'classification':
@@ -1731,6 +1802,7 @@ class GraphCastGRU(torch.nn.Module):
         act_func: str = "ReLU",
         is_graph_or_node: bool = False,
         return_hidden: bool = False,
+        horizon: int = 0,
     ):
         """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1789,6 +1861,8 @@ class GraphCastGRU(torch.nn.Module):
         self.end_channels = end_channels
         self.decoder = None
         self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1796,6 +1870,9 @@ class GraphCastGRU(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid()
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
+
+        if self.horizon > 0:
+            self.define_decodeur()
 
     # ----------------------------------------------------------------------
     # Forward pass
@@ -1827,7 +1904,16 @@ class GraphCastGRU(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params):
+    def define_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': next(self.parameters()).device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
         device = decodeur_params.get('device', next(self.parameters()).device)
         hidden_dim = decodeur_params['hidden_dim']
         output_dim = decodeur_params['output_dim']
@@ -1839,6 +1925,7 @@ class GraphCastGRU(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
         ).to(device)
+        self._decoder_output_dim = output_dim
 
     def forward_decodeur(self, y_prev=None, X_futur=None):
         if self.decoder is None:
@@ -1882,7 +1969,8 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         act_func: str = "ReLU",
         is_graph_or_node: bool = False,
         return_hidden: bool = False,
-        attention : bool = True
+        attention : bool = True,
+        horizon: int = 0,
     ):
         """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1939,6 +2027,11 @@ class GraphCastGRUWithAttention(torch.nn.Module):
 
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
+        self.end_channels = end_channels
+        self.decoder = None
+        self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1946,6 +2039,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid()
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
+
+        if self.horizon > 0:
+            self.define_decodeur()
 
     # ----------------------------------------------------------------------
     # Forward pass
@@ -1984,7 +2080,46 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
+        self._decoder_input = hidden
         return output, logits, hidden
+
+    def define_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': next(self.parameters()).device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
+        device = decodeur_params.get('device', next(self.parameters()).device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+        self._decoder_output_dim = output_dim
+
+    def forward_decodeur(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,
@@ -2069,10 +2204,10 @@ class GraphCastGRUWithAttention(torch.nn.Module):
 class MultiScaleGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
-        graph_or_node, task_type, num_sequence=1, out_channels=5, return_hidden=False
+        graph_or_node, task_type, num_sequence=1, out_channels=5, return_hidden=False, horizon=0
     ):
         super(MultiScaleGraph, self).__init__()
-        
+
         self.num_output_scale = num_output_scale
         self.out_channels = out_channels
         self.is_graph_or_node = graph_or_node == 'graph'
@@ -2080,6 +2215,7 @@ class MultiScaleGraph(torch.nn.Module):
         self.device = device
         self.features_per_scale = features_per_scale
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         ### Embedding Layer (for scale 0 only)
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -2196,7 +2332,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
     def __init__(
         self, input_channels, features_per_scale, device, num_output_scale,
         graph_or_node='graph', task_type='classification',
-        num_sequence=1, out_channels=5, num_heads=4, return_hidden=False
+        num_sequence=1, out_channels=5, num_heads=4, return_hidden=False, horizon=0
     ):
         super(MultiScaleAttentionGraph, self).__init__()
 
@@ -2207,6 +2343,7 @@ class MultiScaleAttentionGraph(torch.nn.Module):
         self.device = device
         self.features_per_scale = features_per_scale
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         # Embedding Layer for scale 0
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -2334,12 +2471,14 @@ class TransformerNet(torch.nn.Module):
             out_channels=2,
             task_type='binary',
             return_hidden=False,
+            horizon=0,
     ):
 
         super().__init__()
         assert d_model % nhead == 0, "nheads must divide evenly into d_model"
-        
+
         self.graph_or_node = graph_or_node == 'graph'
+        self.horizon = horizon
 
         # self.emb = torch.nn.Embedding(input_dim, d_model)
         self.channel_attention = channel_attention
@@ -2440,12 +2579,14 @@ class TransformerNetCutClient(torch.nn.Module):
             dim_feedforward=512,
             num_layers=4,
             dropout=0.1,
-            graph_or_node='node'):
+            graph_or_node='node',
+            horizon=0):
 
         super().__init__()
         assert d_model % nhead == 0, "nheads must divide evenly into d_model"
-        
+
         self.graph_or_node = graph_or_node == 'graph'
+        self.horizon = horizon
 
         # self.emb = torch.nn.Embedding(input_dim, d_model)
 
@@ -2491,14 +2632,16 @@ class TransformerNetCutServer(torch.nn.Module):
             task_type='binary',
             out_channels=2,
             return_hidden=False,
-            graph_or_node='node'):
-        
+            graph_or_node='node',
+            horizon=0):
+
         super().__init__()
 
         self.lin_channel = torch.nn.Linear(seq_len, d_model)
         self.channel_attention = channel_attention
 
         self.graph_or_node = graph_or_node == 'graph'
+        self.horizon = horizon
         
         encoder_layer_channel = torch.nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -2566,7 +2709,7 @@ class TransformerNetCutServer(torch.nn.Module):
 class BayesianMLP(torch.nn.Module):
     """Minimal Bayesian MLP implemented with blitz."""
     def __init__(self, in_dim, hidden_dim, out_channels, task_type='regression',
-                 device='cpu', graph_or_node='node', return_hidden=False):
+                 device='cpu', graph_or_node='node', return_hidden=False, horizon=0):
         super().__init__()
         self.fc1 = BayesianLinear(in_dim, hidden_dim)
         self.fc2 = BayesianLinear(hidden_dim, out_channels)
@@ -2574,6 +2717,7 @@ class BayesianMLP(torch.nn.Module):
 
         self.graph_or_node = graph_or_node
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1)
