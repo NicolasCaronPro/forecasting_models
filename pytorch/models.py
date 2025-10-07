@@ -35,6 +35,7 @@ class NetGCN(torch.nn.Module):
         self.soft = torch.nn.Softmax(dim=1)
         self.return_hidden = return_hidden
         self.horizon = horizon
+        self.end_channels = end_channels
 
         self.output_layer = OutputLayer(
             in_channels=hidden_dim_2,
@@ -46,7 +47,10 @@ class NetGCN(torch.nn.Module):
             out_channels=output_channels
         )
 
-    def forward(self, features, g):
+    def forward(self, features, g, z_prev=None):
+
+        if z_prev is None:
+            z_prev = torch.zeros((features.shape[0], self.end_channels, self.n_sequences), device=features.device, dtype=features.dtype)
 
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
 
@@ -157,6 +161,8 @@ class GAT(torch.nn.Module):
         self.return_hidden = return_hidden
         self.out_channels = out_channels
         self.horizon = horizon
+        self.n_sequences = n_sequences
+        self.end_channels = end_channels
 
         # Couche d'entrée linéaire pour projeter les dimensions d'entrée
         self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0] * heads[0], weight_initializer='glorot').to(device)
@@ -207,9 +213,12 @@ class GAT(torch.nn.Module):
             out_channels=self.out_channels
         )
 
-    def forward(self, X, edge_index, graphs=None):
+    def forward(self, X, edge_index, graphs=None, z_prev=None):
         edge_index = edge_index[:2]
-        
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+
         X = X[:, :, -1]
         x = self.input(X)  # Projeter les dimensions d'entrée
         for i, gat_layer in enumerate(self.gat_layers):
@@ -265,6 +274,8 @@ class GCN(torch.nn.Module):
         self.return_hidden = return_hidden
         self.out_channels = out_channels
         self.horizon = horizon
+        self.n_sequences = n_sequences
+        self.end_channels = end_channels
 
         self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0], weight_initializer='glorot').to(device)
 
@@ -310,10 +321,13 @@ class GCN(torch.nn.Module):
             out_channels=self.out_channels
         )
 
-    def forward(self, X, edge_index, graphs=None):
+    def forward(self, X, edge_index, graphs=None, z_prev=None):
 
         edge_index = edge_index[:2]
-        
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+
         X = X[:, :, -1]
 
         x = self.input(X)
@@ -412,6 +426,8 @@ class DSTGCN(torch.nn.Module):
         self.is_graph_or_node = graph_or_node == 'graph'
         self.out_channels = out_channels
         self.horizon = horizon
+        self.end_channels = end_channels
+        self.end_channels = end_channels
         
         # Initial layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=dilation_channels[0], kernel_size=1, device=device)
@@ -437,9 +453,12 @@ class DSTGCN(torch.nn.Module):
                                   task_type=task_type,
                                   out_channels=self.out_channels)
         
-    def forward(self, X, graphs, graphs_id=None):
+    def forward(self, X, graphs, graphs_id=None, z_prev=None):
         # Initial projection
         x = self.input(X)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Apply each SpatioTemporalLayer
         for layer in self.layers:
@@ -563,9 +582,12 @@ class DSTGAT(torch.nn.Module):
                                   task_type=task_type,
                                   out_channels=self.out_channels)
         
-    def forward(self, X, graph, graphs_id=None):
+    def forward(self, X, graph, graphs_id=None, z_prev=None):
         # Initial projection
         x = self.input(X)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Apply each SpatioTemporalLayer
         for layer in self.layers:
@@ -689,6 +711,7 @@ class STGAT(torch.nn.Module):
         self.is_graph_or_node = graph_or_node == 'graph'
         self.n_sequences = n_sequences
         self.horizon = horizon
+        self.end_channels = end_channels
 
         self.input = Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
 
@@ -714,10 +737,13 @@ class STGAT(torch.nn.Module):
                                   task_type=task_type,
                                   out_channels=out_channels)
         
-    def forward(self, X, graphs, graphs_id=None):
-        
+    def forward(self, X, graphs, graphs_id=None, z_prev=None):
+
         # Initial input projection
         x = self.input(X)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Apply each SandwichLayerGCN
         for layer in self.layers:
@@ -804,6 +830,7 @@ class STGCN(torch.nn.Module):
         self.n_sequences = n_sequences
         self.is_graph_or_node = graph_or_node == 'graph'
         self.horizon = horizon
+        self.end_channels = end_channels
 
         # Initial input projection layer
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels[0], kernel_size=1, device=device)
@@ -829,12 +856,15 @@ class STGCN(torch.nn.Module):
                                   task_type=task_type,
                                   out_channels=out_channels)
 
-    def forward(self, X, graphs, graphs_id=None):
+    def forward(self, X, graphs, graphs_id=None, z_prev=None):
 
         graphs = graphs.to(X.device)
 
         # Initial input projection
         x = self.input(X)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Apply each SandwichLayerGCN
         for layer in self.layers:
@@ -869,6 +899,7 @@ class ST_GATLSTM(torch.nn.Module):
         self.is_graph_or_node = graph_or_node == 'graph'
         self.concat = concat
         self.horizon = horizon
+        self.end_channels = end_channels
 
         # LSTM layers with different hidden channels per layer
         self.lstm_layers = torch.nn.ModuleList()
@@ -891,11 +922,14 @@ class ST_GATLSTM(torch.nn.Module):
                                   n_steps=n_sequences, device=device, act_func=act_func, 
                                   task_type=task_type, out_channels=out_channels)
 
-    def forward(self, X, graphs, graphs_ids=None):
+    def forward(self, X, graphs, graphs_ids=None, z_prev=None):
         batch_size = X.size(0)
 
         # Rearrange dimensions for LSTM input
         x = X.permute(0, 2, 1)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Initialisation des états cachés et des cellules pour chaque couche
         h0 = torch.zeros(1, batch_size, self.hidden_channels_list[0]).to(self.device)
@@ -961,6 +995,8 @@ class Sep_LSTM_GNN(torch.nn.Module):
         self.is_graph_or_node = False
         self.device = device
         self.horizon = horizon
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1020,9 +1056,12 @@ class Sep_LSTM_GNN(torch.nn.Module):
 
         return x_static, x_temporal, static_idx, temporal_idx
     
-    def forward(self, x, graph):
+    def forward(self, x, graph, z_prev=None):
         # x: (B, X, T)
         B, X, T = x.shape
+
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
 
         # Séparation statique/temporelle
         if self.static_idx is None:
@@ -1094,6 +1133,8 @@ class Sep_GRU_GNN(torch.nn.Module):
         self.device = device
         self.return_hidden = False
         self.horizon = horizon
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
 
         # LSTM
         input_size = len(temporal_idx)
@@ -1154,9 +1195,12 @@ class Sep_GRU_GNN(torch.nn.Module):
 
         return x_static, x_temporal, static_idx, temporal_idx
     
-    def forward(self, x, graph):
+    def forward(self, x, graph, z_prev=None):
         # x: (B, X, T)
         B, X, T = x.shape
+
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
 
         # Séparation statique/temporelle
         if self.static_idx is None:
@@ -1228,6 +1272,8 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         self.task_type = task_type
         self.return_hidden = return_hidden
         self.horizon = horizon
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
 
         # LSTMCell: traite séquentiellement les pas de temps
         self.lstm_cell = torch.nn.LSTMCell(
@@ -1275,9 +1321,12 @@ class LSTM_GNN_Feedback(torch.nn.Module):
 
         return x_static, x_temporal, static_idx, temporal_idx
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, z_prev=None):
         # x: (B, X, T)
         B, X, T = x.shape
+
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
 
         # Séparation des variables
         if self.static_idx is None:
@@ -1335,6 +1384,7 @@ class GRU(torch.nn.Module):
         self.is_graph_or_node = False
         self.gru_size = gru_size
         self.end_channels = end_channels
+        self.n_sequences = n_sequences
         self.decoder = None
         self._decoder_input = None
         self.horizon = horizon
@@ -1377,7 +1427,7 @@ class GRU(torch.nn.Module):
         if self.horizon > 0:
             self.define_decodeur()
 
-    def forward(self, X, edge_index=None, graphs=None):
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
             X: Tensor of shape (batch_size, features, sequence_length)
@@ -1387,6 +1437,9 @@ class GRU(torch.nn.Module):
             (optionally) hidden_repr: The hidden state before final layer
         """
         batch_size = X.size(0)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # Reshape to (batch, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1466,6 +1519,7 @@ class LSTM(torch.nn.Module):
         self.is_graph_or_node = False
         self.lstm_size = lstm_size
         self.end_channels = end_channels
+        self.n_sequences = n_sequences
         self.decoder = None
         self._decoder_input = None
         self.horizon = horizon
@@ -1508,7 +1562,7 @@ class LSTM(torch.nn.Module):
         if self.horizon > 0:
             self.define_decodeur()
 
-    def forward(self, X, edge_index=None, graphs=None):
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
             X: Tensor of shape (batch_size, features, sequence_length)
@@ -1518,6 +1572,9 @@ class LSTM(torch.nn.Module):
             (optionally) hidden_repr: The hidden state before final layer
         """
         batch_size = X.size(0)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         # (batch_size, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1628,6 +1685,7 @@ class DilatedCNN(torch.nn.Module):
         self._decoder_input = None
         self.horizon = horizon
         self.out_channels = out_channels
+        self.n_sequences = n_sequences
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1640,8 +1698,11 @@ class DilatedCNN(torch.nn.Module):
         if self.horizon > 0:
             self.define_decodeur()
 
-    def forward(self, x, edges=None):
+    def forward(self, x, edges=None, z_prev=None):
         # Couche d'entrée
+
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
 
         # Couches convolutives dilatées avec BatchNorm, activation et dropout
         for cnn_layer, batch_norm in zip(self.cnn_layer_list, self.batch_norm_list):
@@ -1749,6 +1810,8 @@ class GraphCast(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.horizon = horizon
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
         
         # Output activation depending on task
         if task_type == 'classification':
@@ -1758,11 +1821,15 @@ class GraphCast(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity()  # For regression or custom handling
 
-    def forward(self, X, graph, graph2mesh, mesh2graph):
+    def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
         #X = X.view(X.shape[0], -1)
         #print(X.device)
         #print(X.shape)
         X = X.permute(2, 0, 1)
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[1], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+
         x = self.net(X, graph, graph2mesh, mesh2graph)[-1]
         
         # Activation and output
@@ -1863,6 +1930,7 @@ class GraphCastGRU(torch.nn.Module):
         self._decoder_input = None
         self.horizon = horizon
         self.out_channels = out_channels
+        self.n_sequences = n_sequences
 
         if task_type == "classification":
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -1877,13 +1945,15 @@ class GraphCastGRU(torch.nn.Module):
     # ----------------------------------------------------------------------
     # Forward pass
     # ----------------------------------------------------------------------
-    def forward(self, X, graph, graph2mesh, mesh2graph):
+    def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
         X_for_gru = X.permute(0, 2, 1)
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -2046,13 +2116,15 @@ class GraphCastGRUWithAttention(torch.nn.Module):
     # ----------------------------------------------------------------------
     # Forward pass
     # ----------------------------------------------------------------------
-    def forward(self, X, graph, graph2mesh, mesh2graph):
+    def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
         X_for_gru = X.permute(0, 2, 1)
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -2216,6 +2288,8 @@ class MultiScaleGraph(torch.nn.Module):
         self.features_per_scale = features_per_scale
         self.return_hidden = return_hidden
         self.horizon = horizon
+        self.n_sequences = num_sequence
+        self.end_channels = features_per_scale[-1]
 
         ### Embedding Layer (for scale 0 only)
         self.embedding = nn.Linear(input_channels * num_sequence, features_per_scale[0]).to(device)
@@ -2244,9 +2318,12 @@ class MultiScaleGraph(torch.nn.Module):
             for i in range(self.num_output_scale)
         ])
 
-    def forward(self, X, graph_scale_list: list, increase_scale: list, decrease_scale: list):
+    def forward(self, X, graph_scale_list: list, increase_scale: list, decrease_scale: list, z_prev=None):
         assert self.num_output_scale == len(graph_scale_list)
         batch_size = X.shape[0]
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         X = X.view(batch_size, -1)
 
@@ -2372,9 +2449,12 @@ class MultiScaleAttentionGraph(torch.nn.Module):
             for i in range(self.num_output_scale)
         ])
 
-    def forward(self, X, graph_scale_list, increase_scale, decrease_scale):
+    def forward(self, X, graph_scale_list, increase_scale, decrease_scale, z_prev=None):
         assert self.num_output_scale == len(graph_scale_list)
         batch_size = X.shape[0]
+
+        if z_prev is None:
+            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         X = X.view(batch_size, -1)
 
@@ -2525,6 +2605,8 @@ class TransformerNet(torch.nn.Module):
 
         self.d_model = d_model
         self.return_hidden = return_hidden
+        self.end_channels = d_model
+        self.n_sequences = seq_len
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -2537,7 +2619,10 @@ class TransformerNet(torch.nn.Module):
     def resh(self, x, y):
         return x.unsqueeze(1).expand(y.size(0), -1)
 
-    def forward(self, x_, edge_index=None):
+    def forward(self, x_, edge_index=None, z_prev=None):
+        if z_prev is None:
+            z_prev = torch.zeros((x_.shape[0], self.end_channels, self.n_sequences), device=x_.device, dtype=x_.dtype)
+
         x_ = x_.permute(2, 0, 1)
 
         x = torch.tanh(self.lin_time(x_))
@@ -2608,10 +2693,16 @@ class TransformerNetCutClient(torch.nn.Module):
             num_layers=num_layers,
         )
 
+        self.end_channels = d_model
+        self.n_sequences = seq_len
+
     def resh(self, x, y):
         return x.unsqueeze(1).expand(y.size(0), -1)
 
-    def forward(self, x_, edge_index=None):
+    def forward(self, x_, edge_index=None, z_prev=None):
+        if z_prev is None:
+            z_prev = torch.zeros((x_.shape[0], self.end_channels, self.n_sequences), device=x_.device, dtype=x_.dtype)
+
         x_ = x_.permute(2, 0, 1)
         x = torch.tanh(self.lin_time(x_))
         hidden = x
@@ -2667,6 +2758,8 @@ class TransformerNetCutServer(torch.nn.Module):
 
         self.d_model = d_model
         self.return_hidden = return_hidden
+        self.end_channels = d_model
+        self.n_sequences = seq_len
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -2676,7 +2769,10 @@ class TransformerNetCutServer(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity()  # For regression or custom handling
 
-    def forward(self, x_):
+    def forward(self, x_, z_prev=None):
+        if z_prev is None:
+            z_prev = torch.zeros((x_.shape[0], self.end_channels, self.n_sequences), device=x_.device, dtype=x_.dtype)
+
         if self.channel_attention:
             y = torch.transpose(x_, 0, 2)
 
@@ -2718,6 +2814,8 @@ class BayesianMLP(torch.nn.Module):
         self.graph_or_node = graph_or_node
         self.return_hidden = return_hidden
         self.horizon = horizon
+        self.end_channels = hidden_dim
+        self.n_sequences = 1
 
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1)
@@ -2726,7 +2824,10 @@ class BayesianMLP(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity()
 
-    def forward(self, x, edge_index=None):
+    def forward(self, x, edge_index=None, z_prev=None):
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
+
         x = x[:, :, -1]
         hidden = torch.relu(self.fc1(x))
         logits = self.fc2(hidden)
