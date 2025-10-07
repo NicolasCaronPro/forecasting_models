@@ -17,13 +17,14 @@ import torch
 from torch.nn import ReLU, Identity
 
 class Zhang(torch.nn.Module):
-    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device, n_sequences, return_hidden=False, out_channels=None, task_type='classification'):
+    def __init__(self, in_channels, conv_channels, fc_channels, dropout, device, n_sequences, return_hidden=False, out_channels=None, task_type='classification', horizon=0):
         super(Zhang, self).__init__()
         torch.manual_seed(42)
 
         self.input_batch_norm = torch.nn.BatchNorm2d(in_channels).to(device)
 
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
@@ -127,14 +128,15 @@ class Bottleneck(nn.Module):
 class ResNet(torch.nn.Module):
     def __init__(self, in_channels, conv_channels, fc_channels, dropout, device,
                  n_sequences, avgpooling=1, return_hidden=False,
-                 out_channels=None, task_type='classification'):
-        
+                 out_channels=None, task_type='classification', horizon=0):
+
         super(ResNet, self).__init__()
         torch.manual_seed(42)
-        
+
         self.input_batch_norm = torch.nn.BatchNorm2d(in_channels).to(device)
 
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
@@ -199,7 +201,7 @@ class ResNet(torch.nn.Module):
 ########################### ConvLTSM ####################################    
 
 class CONVLSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_dim, end_channels, size, n_sequences, device, act_func, dropout, out_channels=None, task_type='classification', return_hidden=False):
+    def __init__(self, in_channels, hidden_dim, end_channels, size, n_sequences, device, act_func, dropout, out_channels=None, task_type='classification', return_hidden=False, horizon=0):
         super(CONVLSTM, self).__init__()
 
         self.input_batch_norm = torch.nn.BatchNorm3d(in_channels).to(device)
@@ -222,6 +224,7 @@ class CONVLSTM(torch.nn.Module):
 
         self.task_type = task_type
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
     def forward(self, X, edge_index=None):
         # edge Index is used for api facility but it is ignore
@@ -241,7 +244,7 @@ class CONVLSTM(torch.nn.Module):
 ########################### ST-GATCONVLSTM ####################################    
 
 class ST_GATCONVLSTM(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, end_channels, n_sequences, device, act_func, return_hidden=False):
+    def __init__(self, in_channels, hidden_channels, end_channels, n_sequences, device, act_func, return_hidden=False, horizon=0):
         super(ST_GATCONVLSTM, self).__init__()
         
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels, kernel_size=1).to(device)
@@ -250,6 +253,7 @@ class ST_GATCONVLSTM(torch.nn.Module):
         # TO DO
 
         self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels, n_steps=n_sequences, device=device, act_func=act_func)
+        self.horizon = horizon
 
     def forward(self, X, edge_index=None):
         x = self.input(X)
@@ -262,7 +266,7 @@ class ST_GATCONVLSTM(torch.nn.Module):
 ########################### ST-GATCONV2D ####################################
 
 class ST_GATCONV2D(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, end_channels, n_sequences, device, act_func, return_hidden=False):
+    def __init__(self, in_channels, hidden_channels, end_channels, n_sequences, device, act_func, return_hidden=False, horizon=0):
         super(ST_GATCONV2D, self).__init__()
 
         self.input = torch.nn.Conv1d(in_channels=in_channels, out_channels=hidden_channels, kernel_size=1).to(device)
@@ -271,6 +275,7 @@ class ST_GATCONV2D(torch.nn.Module):
         # TO DO
         
         self.output = OutputLayer(in_channels=hidden_channels, end_channels=end_channels, n_steps=n_sequences, device=device, act_func=act_func)
+        self.horizon = horizon
         self.return_hidden = return_hidden
 
     def forward(self, X, edge_index=None):
@@ -354,7 +359,7 @@ class OutConv(torch.nn.Module):
         return self.conv(x)
 
 class UNet(torch.nn.Module):
-    def __init__(self, n_channels, out_channels, conv_channels, bilinear=False, return_hidden=False):
+    def __init__(self, n_channels, out_channels, conv_channels, bilinear=False, return_hidden=False, horizon=0):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.out_channels = out_channels
@@ -373,6 +378,7 @@ class UNet(torch.nn.Module):
         self.outc = OutConv(conv_channels[0], out_channels)
         self.is_graph_or_node = False
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
     def forward(self, x, edge_index=None, graph=None):
         if len(x.shape) == 5:
@@ -400,7 +406,7 @@ class UNet(torch.nn.Module):
 #################################### ULSTM #############################################
 
 class ULSTM(torch.nn.Module):
-    def __init__(self, n_channels, n_classes, n_sequences, num_lstm_layers, features, bilinear=False, return_hidden=False):
+    def __init__(self, n_channels, n_classes, n_sequences, num_lstm_layers, features, bilinear=False, return_hidden=False, horizon=0):
         super(ULSTM, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
@@ -427,6 +433,7 @@ class ULSTM(torch.nn.Module):
 
         self.outc = OutConv(features[0], n_classes)
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
     def forward(self, x, edge_index=None):
 
@@ -455,7 +462,7 @@ class ULSTM(torch.nn.Module):
 
 class ConvGraphNet(torch.nn.Module):
     def __init__(self, cnn_model, gnn_model,
-                 output_layer_in_channels, output_layer_end_channels, n_sequence, binary, device, act_func, return_hidden=False):
+                 output_layer_in_channels, output_layer_end_channels, n_sequence, binary, device, act_func, return_hidden=False, horizon=0):
         super(ConvGraphNet, self).__init__()
         torch.manual_seed(42)
 
@@ -465,6 +472,7 @@ class ConvGraphNet(torch.nn.Module):
         self.output = OutputLayer(in_channels=output_layer_in_channels, end_channels=output_layer_end_channels,
                                   n_steps=n_sequence, binary=binary, device=device, act_func=act_func)
         self.return_hidden = return_hidden
+        self.horizon = horizon
     
     def forward(self, gnn_X, cnn_X, edge_index):
 
@@ -489,12 +497,14 @@ class ResGCN(torch.nn.Module):
                  binary,
                  device,
                  n_sequences,
-                 return_hidden=False):
-        
+                 return_hidden=False,
+                 horizon=0):
+
         super(ResGCN, self).__init__()
         torch.manual_seed(42)
 
         self.return_hidden = return_hidden
+        self.horizon = horizon
 
         self.input = torch.nn.Conv2d(in_channels=in_channels, out_channels=conv_channels[0], kernel_size=(1,1)).to(device)
 
