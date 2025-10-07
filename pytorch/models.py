@@ -81,6 +81,10 @@ class NetMLP(torch.nn.Module):
         self.end_channels = end_channels
         self.decoder = None
         self._decoder_input = None
+        self.output_channels = output_channels
+        self.in_dim = in_dim
+
+        self.define_decodeur()
 
     def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
@@ -97,34 +101,29 @@ class NetMLP(torch.nn.Module):
         self._decoder_input = hidden
 
         return output, logits, hidden
+    
+    def define_decodeur(self):
+        self.decode1 = torch.nn.Linear(self.end_channels + self.in_dim + self.output_channels, 256)
+        self.decode2 = torch.nn.Linear(256, self.output_channels)
 
-    def define_decodeur(self, decodeur_params):
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
+    def forward_decodeur(self, z, y_prev=None, X_futur=None):
+        B = z.shape[0]
+        if y_prev is None:
+            y_prev = torch.zeros((B, self.output_channels))
+        if X_futur is None:
+            X_futur = torch.zeros((B, self.in_dim))
 
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
+        x = torch.cat((z, y_prev, X_futur))
+        x = self.decode1(x)
+        hidden = F.relu(x)
+        logits = self.decode2(hidden)
 
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
+        if self.task_type == 'classification':
+            output = self.soft(logits)
         else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+            output = logits
 
-        return self.decoder(decoder_input)
+        return output, logits, hidden
     
 #####################################################
 

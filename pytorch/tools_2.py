@@ -154,7 +154,7 @@ def shapley_additive_explanation_neural_network(model, df_set, outname, dir_outp
     return top_features_
 
 
-def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, task_type, device, num_lstm_layers, out_channels, custom_model_params=None):
+def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, task_type, device, num_lstm_layers, out_channels, custom_model_params=None, horizon=0):
     """
     Renvoie un tuple contenant le modèle spécifié et les paramètres utilisés pour sa création.
     
@@ -205,7 +205,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         'task_type': task_type,
         'device': device,
         'num_lstm_layers': num_lstm_layers,
-        'out_channels': out_channels,  # Added the out_channels parameter
+        'out_channels': out_channels,  # Added the out_channels parameter,
+        'horizon': horizon
     }
 
     if model_name == 'GAT':
@@ -222,7 +223,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'n_sequences': k_days + 1,
             'task_type': task_type,
             'graph_or_node': graph_or_node,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -243,8 +245,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'n_sequences': k_days + 1,
             'task_type': task_type,
             'graph_or_node': graph_or_node,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': 0
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -264,7 +266,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type': task_type,
             'graph_or_node': graph_or_node,
             'return_hidden': False,
-            'n_sequences': k_days + 1
+            'n_sequences': k_days + 1,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -285,7 +288,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'act_func': act_func,
             'task_type': task_type,
             'return_hidden': False,
-            'dropout': dropout
+            'dropout': dropout,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -305,7 +309,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'act_func': act_func,
             'task_type': task_type,
             'return_hidden': False,
-            'dropout': dropout
+            'dropout': dropout,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -324,7 +329,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node' : graph_or_node,
             'task_type' : task_type,
             'out_channels' : out_channels,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -342,7 +348,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'num_layers' : 4,
             'dropout' : 0.1,
             'graph_or_node' : graph_or_node,
-
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -363,7 +369,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'out_channels' : out_channels,
             'graph_or_node' : graph_or_node,
             'return_hidden': False
-
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -383,8 +389,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'dropout': dropout,
             'out_channels': out_channels,
             'task_type': task_type,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -404,8 +410,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'act_func': act_func,
             'n_sequences': k_days + 1,
             'task_type': task_type,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -432,8 +438,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'static_idx': custom_model_params['static_idx'],
             'temporal_idx': custom_model_params['temporal_idx'],
             'num_lstm_layers': 2,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
             #'num_layers': num_lstm_layers,
         }
          
@@ -473,8 +479,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'static_idx': custom_model_params['static_idx'],
             'temporal_idx': custom_model_params['temporal_idx'],
             'num_lstm_layers': num_lstm_layers,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
             #'num_layers': num_lstm_layers,
         }
          
@@ -511,8 +517,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'static_idx': custom_model_params['static_idx'],
             'temporal_idx': custom_model_params['temporal_idx'],
             'num_lstm_layers': num_lstm_layers,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
             #'num_layers': num_lstm_layers,
         }
         
@@ -537,8 +543,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type': task_type,
             'num_layers' : num_lstm_layers,
             'concat':False,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -559,8 +565,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'act_func': act_func,
             'n_sequences': k_days + 1,
             'task_type': task_type,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -580,8 +586,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'n_sequences': k_days + 1,
             'task_type': task_type,
             'graph_or_node': graph_or_node,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -599,6 +605,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
                 'n_sequences': k_days + 1,
                 'return_hidden': False,
                 'task_type': task_type,
+                'horizon': horizon
         }
 
         # Mettre à jour avec des paramètres personnalisés si nécessaire
@@ -621,6 +628,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
                 'return_hidden': False,
                 'avgpooling': 1,
                 'task_type': task_type,
+            'horizon': horizon
         }
 
         # Mettre à jour avec des paramètres personnalisés si nécessaire
@@ -643,7 +651,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'dropout': 0.3,                   # Taux de dropout (ex. : 30%)
             'out_channels': out_channels,                # Nombre de classes en sortie
             'task_type': task_type,     # Type de tâche ('classification' ou 'régression')
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
         }
 
         # Mettre à jour avec des paramètres personnalisés si nécessaire
@@ -686,7 +695,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'has_time_dim' : True,
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
 
         }
         if custom_model_params is not None:
@@ -717,8 +727,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'has_time_dim' : True,
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -749,7 +759,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
             'return_hidden': False,
-            'attention' : "Transformer"
+            'attention' : "Transformer",
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -780,7 +791,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
             'return_hidden': False,
-            'attention' : "GAT"
+            'attention' : "GAT",
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -798,8 +810,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node' : graph_or_node,
             'task_type':task_type,
             'device':device,
-            'return_hidden': False
-
+            'return_hidden': False,
+            'horizon': horizon
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -816,7 +828,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node' : graph_or_node,
             'task_type':task_type,
             'device':device,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
 
 
         }
@@ -836,7 +849,9 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node': graph_or_node,
             'n_sequences' : k_days + 1,
             'device' : device,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
+
 
           
         }
@@ -854,7 +869,9 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
           'output_channels' : out_channels,          
             'n_sequences' : k_days + 1,
             'device' : device,
-            'return_hidden': False
+            'return_hidden': False,
+            'horizon': horizon
+
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -870,6 +887,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'device': device,
             'graph_or_node': graph_or_node,
             'return_hidden': False,
+            'horizon': horizon
+
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
