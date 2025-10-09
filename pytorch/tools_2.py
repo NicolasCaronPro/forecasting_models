@@ -368,7 +368,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type' : task_type,
             'out_channels' : out_channels,
             'graph_or_node' : graph_or_node,
-            'return_hidden': False
+            'return_hidden': False,
             'horizon': horizon
         }
         if custom_model_params is not None:

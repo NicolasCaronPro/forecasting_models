@@ -111,6 +111,9 @@ class MeshGraphDecoder(nn.Module):
             norm_type=norm_type,
         )
 
+        if attention == "GAT":
+            self.node_mlp.op = 'Decoder'
+
     @torch.jit.ignore()
     def forward(
         self,
@@ -132,12 +135,16 @@ class MeshGraphDecoder(nn.Module):
                     cat_feat = aggregate_and_concat_with_attention(
                         efeat, grid_nfeat[i], graph, attention_score
                     )
-                else:  
+                else:
                     cat_feat = aggregate_and_concat(
                         efeat, grid_nfeat[i], graph, self.aggregation
                     )
                 # transformation and residual connection
-                grid_nfeat_new.append(self.node_mlp(cat_feat, graph) + grid_nfeat[i])
+                if self.attention == 'GAT':
+                    inputs = (mesh_nfeat[i], cat_feat)
+                else:
+                    inputs = cat_feat
+                grid_nfeat_new.append(self.node_mlp(inputs, graph) + grid_nfeat[i])
             return torch.stack(grid_nfeat_new)
         else:
             # update edge features
@@ -149,5 +156,9 @@ class MeshGraphDecoder(nn.Module):
             else:
                 cat_feat = aggregate_and_concat(efeat, grid_nfeat, graph, self.aggregation)
             # transformation and residual connection
-            dst_feat = self.node_mlp(cat_feat, graph) + grid_nfeat
+            if self.attention == 'GAT':
+                inputs = (cat_feat, grid_nfeat[i])
+            else:
+                inputs = grid_nfeat
+            dst_feat = self.node_mlp(inputs, graph) + grid_nfeat
             return dst_feat

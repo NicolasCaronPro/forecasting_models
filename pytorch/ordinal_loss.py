@@ -857,10 +857,10 @@ class GeneralizedWassersteinDiceLoss(torch.nn.Module):
 
     def __init__(self,
         background: int = 0,           # index of background class
+        M = None,
         ignore_index = None,
         use_logits: bool = True,
-        eps: float = 1e-6,
-        type_pen: str ='over'):
+        eps: float = 1e-6):
         super().__init__()
 
         """self.M = torch.tensor([ [0, 1,      2,      3,      4],
@@ -868,26 +868,120 @@ class GeneralizedWassersteinDiceLoss(torch.nn.Module):
                                 [2, 1.0,    0,      0.25,   0.33],
                                 [3, 1.25,   0.75,   0,      0.33],
                                 [4, 1.75,      1.0,    0.75,   0]])"""
-        if type_pen == 'under':
-            self.M = torch.tensor([ [0, 1,      2,      3,      4],
+        if M is None:
+            """self.M = torch.tensor([ [0, 1,      2,      3,      4],
                                     [1, 0,      0.25,    0.33,   0.5],
-                                    [2, 1.25,    0,      0.25,   0.33],
-                                    [3, 1.5,   1.0,   0,      0.33],
-                                    [4, 2,      1.5,    1.0,   0]])
-        elif type_pen == 'over':
-             self.M = torch.tensor([ [0, 1,      2,      3,      4],
-                                    [1, 0,      0.25,    0.33,   0.5],
-                                    [2, 1.25,    0,      0.25,   0.33],
-                                    [3, 1.5,   1.0,   0,      0.33],
-                                    [4, 2,      1.5,    1.0,   0]]).T
+                                    [2, 1.0,    0,      0.25,   0.33],
+                                    [3, 1.25,   1.0,   0,      0.33],
+                                    [4, 1.5,      1.25,    0.5,   0]])"""
+            
+            """self.M = torch.tensor([ [0, 1.5,      2.5,      3.5,      4.5],
+                                    [0.75, 0,      0.25,    0.33,   0.5],
+                                    [1.5, 1.0,    0,      0.25,   0.33],
+                                    [2, 1.25,   1.0,   0,      0.33],
+                                    [3.5, 1.5,      1.25,    1.0,   0]])"""
+            
+            self.M = torch.tensor([[0.00, 0.75, 1.50, 2.00, 3.50],
+                        [0.75, 0.00, 1.00, 1.25, 1.50],
+                        [1.50, 1.00, 0.00, 1.00, 1.25],
+                        [2.00, 1.25, 1.00, 0.00, 1.00],
+                        [3.50, 1.50, 1.25, 1.00, 0.00]])
         else:
-            raise ValueError(f'Unknow value of type_pen {type_pen}, should be over or under')
+            self.M = M
                                 
         self.background = background
         self.ignore_index = ignore_index
         self.use_logits = use_logits
         self.eps = eps
 
+    def get_confusion_matrix(self,
+        logits: torch.Tensor,   # (N, C, ...)  logits ou proba
+        target: torch.Tensor,   # (N, ...)     entiers dans [0..C-1]
+    ) -> torch.Tensor:
+        """
+        Renvoie une matrice de confusion (C x C) où M[t, p] compte le nb d'exemples
+        de classe vraie t prédits p. Compatible avec un masque ignore_index.
+        """
+        C = int(self.M.size(0))
+
+        # Prédictions (argmax sur la dim classes)
+        if self.use_logits:
+            preds = torch.softmax(logits, dim=1).argmax(dim=1)
+        else:
+            preds = logits.argmax(dim=1)
+
+        y = target
+
+        # Masque ignore_index si fourni
+        if self.ignore_index is not None:
+            mask = (y != self.ignore_index)
+            preds = preds[mask]
+            y = y[mask]
+
+        # Aplatir
+        y = y.reshape(-1).to(torch.int64)
+        preds = preds.reshape(-1).to(torch.int64)
+
+        # Sécurités sur le domaine des labels
+        valid = (y >= 0) & (y < C) & (preds >= 0) & (preds < C)
+        if valid.numel() == 0 or valid.sum() == 0:
+            return torch.zeros((C, C), dtype=torch.long, device=logits.device)
+
+        y = y[valid]
+        preds = preds[valid]
+
+        # Comptage via bincount
+        cm = torch.zeros((C, C), dtype=torch.long, device=logits.device)
+        idx = y * C + preds                         # linéarisation (t, p)
+        counts = torch.bincount(idx, minlength=C*C) # taille C*C
+        cm += counts.view(C, C)
+
+        return cm
+    
+    def update_after_batch(self, logits, target):
+        self.confusion_matrix_update(logits, target)
+    
+    def confusion_matrix_update(self,
+        logits: torch.Tensor,   # (N, C, ...)  logits ou proba
+        target: torch.Tensor,   # (N, ...)     entiers dans [0..C-1]
+        alpha: float = 0.05,
+        normalize: bool = True,
+    ) -> torch.Tensor:
+        """
+        Met à jour self.M à partir de la matrice de confusion.
+        Pour chaque case (i,j) avec i!=j, on ajoute alpha * max(conf_row[i,j], conf_col[i,j]).
+        - conf_row : confusion normalisée par lignes (sous-prédictions)
+        - conf_col : confusion normalisée par colonnes (sur-prédictions)
+        La diagonale est maintenue à 0.
+        """
+        # 1) Confusion brute
+        conf = self.get_confusion_matrix(logits, target).to(self.M.device).to(torch.float32)
+        C = conf.size(0)
+
+        if normalize:
+            # normalisations robustes
+            row_sum = conf.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            col_sum = conf.sum(dim=0, keepdim=True).clamp_min(1e-12)
+            conf_row = conf / row_sum      # probas conditionnelles P(pred=j | true=i)
+            conf_col = conf / col_sum      # probas conditionnelles P(true=i | pred=j)
+        else:
+            conf_row = conf
+            conf_col = conf
+
+        # 2) Pour chaque cellule, prendre le max entre (ligne) et (colonne)
+        per_cell = torch.maximum(conf_row, conf_col).to(self.M.dtype)
+
+        # 3) On ignore les prédictions correctes (diagonale à 0)
+        per_cell = per_cell.clone()
+        per_cell.fill_diagonal_(0)
+
+        # 4) Update matriciel
+        self.M = self.M.to(per_cell.device, per_cell.dtype)
+        self.M = self.M + alpha * per_cell
+        self.M.fill_diagonal_(0)
+
+        return conf
+    
     def forward(self,
         logits: torch.Tensor,          # (N, C, H, W)  logits or probs
         target: torch.Tensor,          # (N, H, W)      int labels in [0..C-1]
@@ -945,3 +1039,82 @@ class GeneralizedWassersteinDiceLoss(torch.nn.Module):
         score = num / den
         loss = 1.0 - score
         return loss
+
+    def plot_params(self,
+            log,
+            dir_output,
+            class_names=None,      # liste de noms de classes (longueur C) ou None
+            title="",
+            figsize=(6, 5),
+            annotate=False,        # si True, écrit les valeurs dans chaque case
+            cmap="viridis",        # palette matplotlib
+            vmin=None, vmax=None,  # bornes de la colorbar (auto si None)
+            savepath=None,         # chemin pour sauvegarder l'image (png, pdf, ...)
+            ):            # appelle plt.show() si True
+        """
+        Affiche l'attribut self.M (C x C) en heatmap.
+
+        - self.M[i,j] = coût de confondre la classe i avec j.
+        - class_names (optionnel) : étiquettes des axes.
+        - annotate : écrire la valeur numérique dans chaque cellule.
+        - savepath : si fourni, sauvegarde la figure.
+        - show : si True, affiche la figure (utile en notebook). 
+                Si tu intègres ça dans un script, tu peux mettre show=False
+                et gérer l'affichage en dehors.
+        """
+        # Sécurise et convertit vers numpy (CPU)
+        M = self.M
+        if isinstance(M, torch.Tensor):
+            M = M.detach().to("cpu").numpy()
+        else:
+            M = np.asarray(M)
+
+        C = M.shape[0]
+        if class_names is not None:
+            assert len(class_names) == C, "class_names doit avoir C éléments."
+
+        fig, ax = plt.subplots(figsize=figsize)
+        im = ax.imshow(M, cmap=cmap, aspect="equal", vmin=vmin, vmax=vmax)
+
+        # Axes et titres
+        ax.set_title(title)
+        ax.set_xlabel("Prédit")
+        ax.set_ylabel("Vérité terrain")
+
+        # Ticks + labels
+        ax.set_xticks(np.arange(C))
+        ax.set_yticks(np.arange(C))
+        if class_names is not None:
+            ax.set_xticklabels(class_names, rotation=45, ha="right")
+            ax.set_yticklabels(class_names)
+        else:
+            ax.set_xticklabels(np.arange(C))
+            ax.set_yticklabels(np.arange(C))
+
+        # Grille légère pour la lisibilité
+        ax.set_xticks(np.arange(-.5, C, 1), minor=True)
+        ax.set_yticks(np.arange(-.5, C, 1), minor=True)
+        ax.grid(which="minor", linestyle=":", linewidth=0.5)
+        ax.tick_params(top=False, bottom=True, left=True, right=False)
+
+        # Colorbar
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel("Coût", rotation=90, labelpad=10)
+
+        # Annotations (facultatif)
+        if annotate:
+            # Choix d’une couleur de texte lisible selon l’intensité
+            thresh = (np.nanmax(M) + np.nanmin(M)) / 2.0
+            for i in range(C):
+                for j in range(C):
+                    val = M[i, j]
+                    ax.text(j, i, f"{val:.2f}",
+                            ha="center", va="center",
+                            color="white" if val > thresh else "black",
+                            fontsize=9)
+
+        fig.tight_layout()
+
+        fig.savefig(dir_output / 'M.png', dpi=200, bbox_inches="tight")
+
+        return fig, ax
