@@ -1458,7 +1458,7 @@ class GRU(torch.nn.Module):
             x = torch.cat((X, z_prev), dim=1)
 
         # Reshape to (batch, seq_len, features)
-        x = X.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
 
         # Initial hidden state
         h0 = torch.zeros(self.num_layers, batch_size, self.gru_size).to(self.device)
@@ -1598,7 +1598,7 @@ class LSTM(torch.nn.Module):
             x = torch.cat((X, z_prev), dim=1)
 
         # (batch_size, seq_len, features)
-        x = X.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
 
         # Initial hidden and cell states
         h0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
@@ -1981,7 +1981,6 @@ class GraphCastGRU(torch.nn.Module):
 
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
@@ -1993,6 +1992,7 @@ class GraphCastGRU(torch.nn.Module):
 
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
+        X_for_gru = x.permute(0, 2, 1)
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
         # Keep the last hidden state for each sequence
         gru_last = self.norm(gru_out[:, -1, :])
@@ -2104,6 +2104,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.num_gru_layers = num_gru_layers
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         self.dropout = torch.nn.Dropout(0.03)
+        self.n_sequences = n_sequences
         
         # ------------------------------------------------------------------
         # GraphCast core network (unchanged)
@@ -2159,7 +2160,6 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         """
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
@@ -2171,6 +2171,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
 
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
+        X_for_gru = x.permute(0, 2, 1)
         """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
         gru_out = gru_out.permute(0, 2, 1)
         # Keep the last hidden state for each sequence
