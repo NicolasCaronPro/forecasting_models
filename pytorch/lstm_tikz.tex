@@ -11,19 +11,19 @@
         $C_{in} = \texttt{in\_channels}$\\
         $T = \texttt{n\_sequences}$};
 
-    % GRU block
-    \node[block, right=2.9cm of input, fill=orange!15] (gru) {Stacked GRU\\
+    % LSTM block
+    \node[block, right=2.9cm of input, fill=orange!15] (lstm) {Stacked LSTM\\
         $\texttt{num\_layers}$\\
-        hidden size $= \texttt{gr}$\\
+        hidden size $= \texttt{ls}$\\
         inter-layer dropout $= \texttt{dropout}$};
 
-    \draw[arrow] (input) -- (gru);
+    \draw[arrow] (input) -- (lstm);
 
     % Last timestep extraction
-    \node[block, right=2.9cm of gru, fill=orange!10] (last) {Last time step extraction\\
-        $h_T \in \mathbb{R}^{B \times gr}$};
+    \node[block, right=2.9cm of lstm, fill=orange!10] (last) {Last time step extraction\\
+        $h_T \in \mathbb{R}^{B \times ls}$};
 
-    \draw[arrow] (gru) -- node[above]{temporal output} (last);
+    \draw[arrow] (lstm) -- node[above]{temporal output} (last);
 
     % Normalization & dropout
     \node[block, below=1.7cm of last, fill=green!12] (norm) {Normalization (BatchNorm1d by default)\\then dropout $p=\texttt{dropout}$};
@@ -31,7 +31,7 @@
     \draw[arrow] (last) -- (norm);
 
     % Linear layers and activations
-    \node[block, below=1.7cm of norm, fill=purple!10] (linear1) {Linear layer\\$\mathbb{R}^{gr} \rightarrow \mathbb{R}^{hd}$\\
+    \node[block, below=1.7cm of norm, fill=purple!10] (linear1) {Linear layer\\$\mathbb{R}^{ls} \rightarrow \mathbb{R}^{hd}$\\
         activation $\texttt{act\_func}$};
 
     \draw[arrow] (norm) -- (linear1);
@@ -52,7 +52,7 @@
             \begin{itemize}
                 \item $\texttt{in\_channels} = C_{in}$ (input dimension)
                 \item $\texttt{n\_sequences} = 11$
-                \item $\texttt{gr} = 128$, $\texttt{num\_layers} = 2$
+                \item $\texttt{ls} = 128$, $\texttt{num\_layers} = \texttt{num\_lstm\_layers}$ (default 1)
                 \item $\texttt{hd} = 256$, $\texttt{ec} = 64$
                 \item $\texttt{out\_channels} = 5$
                 \item $\texttt{dropout} = 0.03$
