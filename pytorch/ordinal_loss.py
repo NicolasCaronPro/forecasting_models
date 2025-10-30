@@ -27,7 +27,7 @@ class BCELoss(torch.nn.Module):
         self,
         y_pred: torch.Tensor,
         y_true: torch.Tensor,
-        sample_weights: Optional[torch.Tensor] = None,
+        sample_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute the BCE loss for ordinal targets.
 
@@ -69,11 +69,12 @@ class BCELoss(torch.nn.Module):
         # Average loss over thresholds for each sample
         loss = loss_per_thresh.mean(dim=1)
 
-        if sample_weights is not None:
-            weighted_loss = loss * sample_weights
-            return torch.sum(weighted_loss) / torch.sum(sample_weights)
-        else:
-            return torch.mean(loss)
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss.device)
+            weighted_loss = loss * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return torch.mean(loss)
 
 class ForegroundDiceLoss(nn.Module):
     """
@@ -93,7 +94,12 @@ class ForegroundDiceLoss(nn.Module):
         else:
             self.w = None
 
-    def forward(self, probs, target):
+    def forward(
+        self,
+        probs,
+        target,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         logits: (N, C, H, W)  -- logits multiclasse
         target: (N, H, W)     -- entiers dans [0..C-1], 0 = background
@@ -135,8 +141,14 @@ class ForegroundDiceLoss(nn.Module):
         else:
             dice_per_n = dice_c.mean(dim=1)                         # (N,)
 
-        loss = 1.0 - dice_per_n.mean()
-        return loss
+        loss_per_sample = 1.0 - dice_per_n
+
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            weighted_loss = loss_per_sample * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss_per_sample.mean()
 
 class DiceLoss(torch.nn.Module):
     def __init__(self, num_classes=5, smooth=1e-6):
@@ -175,7 +187,13 @@ class DiceLoss(torch.nn.Module):
 
         return dice_coef
 
-    def dice_loss(self, y_pred, y_true, smooth=1e-6):
+    def dice_loss(
+        self,
+        y_pred,
+        y_true,
+        smooth=1e-6,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Calcul de la Dice Loss pour chaque classe.
 
@@ -188,10 +206,21 @@ class DiceLoss(torch.nn.Module):
             torch.Tensor: La valeur de la Dice Loss.
         """
         dice_coef = self.dice_coefficient(y_true, y_pred, smooth)  # (N,)
-        dice_loss = 1 - torch.mean(dice_coef)  # Moyenne sur tous les échantillons
-        return dice_loss
+        loss_per_sample = 1 - dice_coef
 
-    def forward(self, y_pred, y_true):
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            weighted_loss = loss_per_sample * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss_per_sample.mean()
+
+    def forward(
+        self,
+        y_pred,
+        y_true,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Calcul de la Dice Loss.
 
@@ -200,7 +229,7 @@ class DiceLoss(torch.nn.Module):
         
         :return: La Dice Loss.
         """
-        return self.dice_loss(y_true, y_pred)
+        return self.dice_loss(y_pred, y_true, sample_weight=sample_weight)
     
 class DiceLoss2(torch.nn.Module):
     """Dice Loss PyTorch
@@ -219,11 +248,18 @@ class DiceLoss2(torch.nn.Module):
         if weight is not None:
             weight = torch.Tensor(weight)
             self.weight = weight / torch.sum(weight) # Normalized weight
+        else:
+            self.weight = None
         self.smooth = 1e-5
 
         self.ignore_index = ignore_index
 
-    def forward(self, predict, target):
+    def forward(
+        self,
+        predict,
+        target,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         N, C = predict.size()[:2]
 
         # Si 'predict' sont des logits, décommente:
@@ -254,8 +290,19 @@ class DiceLoss2(torch.nn.Module):
         union        = predict.pow(2).sum(dim=2) + target_onehot.sum(dim=2)  # (N,C)
         dice_coef    = (2 * intersection + self.smooth) / (union + self.smooth)
 
-        dice_loss = 1 - dice_coef.mean()   # moyenne sur N et C
-        return dice_loss
+        if self.weight is not None:
+            dice_per_sample = (dice_coef * self.weight.view(1, -1)).sum(dim=1)
+        else:
+            dice_per_sample = dice_coef.mean(dim=1)
+
+        loss_per_sample = 1 - dice_per_sample
+
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            weighted_loss = loss_per_sample * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss_per_sample.mean()
 
 class CDWCELoss(torch.nn.Module):
     """Class Distance Weighted Cross-Entropy Loss proposed in :footcite:t:`polat2022class`.
@@ -282,7 +329,12 @@ class CDWCELoss(torch.nn.Module):
         if self.weight_ is not None:
             self.normalised_weight_ = self.weight_ / self.weight_.sum()
 
-    def forward(self, y_pred, y_true):
+    def forward(
+        self,
+        y_pred,
+        y_true,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         if y_true.dim() > 1:
             y_true_indices = y_true.argmax(dim=1, keepdim=True)
         else:
@@ -306,14 +358,19 @@ class CDWCELoss(torch.nn.Module):
                 self.normalised_weight_ = self.normalised_weight_.to(loss.device)
 
             tiled_class_weight = self.normalised_weight_.view(1, -1).expand(N, J)
-            sample_weights = torch.gather(
+            class_weight_factors = torch.gather(
                 tiled_class_weight, dim=1, index=y_true_indices
             )
-            loss = loss * sample_weights
+            loss = loss * class_weight_factors
 
-        loss = loss.sum()
+        loss_per_sample = loss.sum(dim=1)
 
-        return -loss / N
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            weighted_loss = loss_per_sample * sample_weight
+            return -torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return -loss_per_sample.mean()
 
 class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     """
@@ -391,7 +448,12 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         )
         self.mce = MCELoss(self.num_classes, weight=weight, use_logits=self.use_logits)
 
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Parameters
         ----------
@@ -411,8 +473,8 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         else:
             C = self.C
 
-        wk_result = self.wk(y_pred, y_true)
-        mce_result = self.mce(y_pred, y_true)
+        wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
+        mce_result = self.mce(y_pred, y_true, sample_weight=sample_weight)
 
         return C * wk_result + (1 - C) * mce_result
     
@@ -494,7 +556,12 @@ class DiceAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         )
         self.dice = DiceLoss2()
 
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Parameters
         ----------
@@ -514,8 +581,8 @@ class DiceAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         else:
             C = self.C
 
-        wk_result = self.wk(y_pred, y_true)
-        dice_result = self.dice(y_pred, y_true)
+        wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
+        dice_result = self.dice(y_pred, y_true, sample_weight=sample_weight)
 
         return C * wk_result + (1 - C) * dice_result
     
@@ -597,7 +664,12 @@ class ForegroundDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         )
         self.dice = ForegroundDiceLoss()
         
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Parameters
         ----------
@@ -617,8 +689,8 @@ class ForegroundDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         else:
             C = self.C
 
-        wk_result = self.wk(y_pred, y_true)
-        dice_result = self.dice(y_pred, y_true)
+        wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
+        dice_result = self.dice(y_pred, y_true, sample_weight=sample_weight)
 
         return C * wk_result + (1 - C) * dice_result
     
@@ -679,7 +751,12 @@ class OrdinalDiceLoss(torch.nn.Module):
         self.use_logits = use_logits
         self.exclude_background = exclude_background
 
-    def forward(self, predict: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        predict: torch.Tensor,
+        target: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         predict: (N, C, H, W) logits ou probabilités
         target : (N, H, W) entiers dans [0..C-1], 0 = background
@@ -746,8 +823,14 @@ class OrdinalDiceLoss(torch.nn.Module):
 
         # Moyenne sur classes puis batch
         dice_n = dice_nc.mean(dim=1)                                   # (N,)
-        loss = 1.0 - dice_n.mean()
-        return loss
+        loss_per_sample = 1.0 - dice_n
+
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            weighted_loss = loss_per_sample * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss_per_sample.mean()
 
 class OrdinalDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
 
@@ -1020,9 +1103,11 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
 
         return conf
 
-    def forward(self,
+    def forward(
+        self,
         logits: torch.Tensor,          # (N, C, H, W)  logits or probs
         target: torch.Tensor,          # (N, H, W)      int labels in [0..C-1]
+        sample_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Generalized Wasserstein Dice Loss (GWDL) as in Fidon et al.
@@ -1039,44 +1124,54 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
         probs = F.softmax(logits, dim=1) if self.use_logits else logits
         probs = probs.clamp_min(0.0)
 
-        # flatten spatial, build validity mask
-        P = probs.permute(0, 1).reshape(-1, C)  # (N*H*W, C)
-        y = target.reshape(-1)                        # (N*H*W,)
+        probs = probs.view(N, C, -1)
+        targets = target.view(N, -1)
+
         if self.ignore_index is not None:
-            valcluster_ids = (y != self.ignore_index)
+            valid_mask = targets != self.ignore_index
         else:
-            valcluster_ids = torch.ones_like(y, dtype=torch.bool)
+            valid_mask = torch.ones_like(targets, dtype=torch.bool)
 
-        if valcluster_ids.sum() == 0:
-            # no valid pixels -> no contribution
-            return logits.new_tensor(0.0)
-        
-        P = P[valcluster_ids]          # (V, C)
-        y = y[valcluster_ids]          # (V,)
+        loss_per_sample = torch.zeros(N, device=logits.device, dtype=probs.dtype)
+        valid_sample = valid_mask.any(dim=1)
 
-        # per-pixel Wasserstein error: delta_i = <self.M[y_i, :], P_i[:]>
-        # gather rows of self.M by true labels
-        self.M = self.M.to(P.device, P.dtype)
-        self.M_y = self.M.index_select(0, y)       # (V, C)
-        delta = (self.M_y * P).sum(dim=1)     # (V,)
+        self.M = self.M.to(probs.device, probs.dtype)
+        w_bg = self.M[:, self.background]
 
-        # total error
-        total_error = delta.sum()        # scalar
+        for idx in range(N):
+            if not valid_sample[idx]:
+                continue
 
-        # weights vs background: w_i = self.M[y_i, background]
-        w_bg = self.M[:, self.background]          # (C,)
-        w = w_bg.index_select(0, y)      # (V,)
+            mask = valid_mask[idx]
+            P_i = probs[idx, :, mask]  # (C, V)
+            y_i = targets[idx, mask].to(torch.int64)  # (V,)
 
-        # "semantic TPs" term (weighted), following the canonical GWDL numerator
-        # TP_weighted = sum_i w_i * (w_i - delta_i)
-        tp_weighted = (w * (w - delta)).sum()
+            P_i = P_i.transpose(0, 1)  # (V, C)
+            M_y = self.M.index_select(0, y_i)  # (V, C)
+            delta = (M_y * P_i).sum(dim=1)
 
-        # Wasserstein-Dice score and loss
-        num = 2.0 * tp_weighted
-        den = num + total_error + self.eps
-        score = num / den
-        loss = 1.0 - score
-        return loss
+            total_error = delta.sum()
+
+            w = w_bg.index_select(0, y_i)
+            tp_weighted = (w * (w - delta)).sum()
+
+            num = 2.0 * tp_weighted
+            den = num + total_error + self.eps
+            score = num / den
+            loss_per_sample[idx] = 1.0 - score
+
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss_per_sample.device)
+            effective_weight = sample_weight * valid_sample.to(sample_weight.dtype)
+            if torch.sum(effective_weight) == 0:
+                return loss_per_sample.new_tensor(0.0)
+            weighted_loss = loss_per_sample * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(effective_weight)
+
+        if valid_sample.any():
+            return loss_per_sample[valid_sample].mean()
+
+        return loss_per_sample.new_tensor(0.0)
 
     def plot_params(self,
                 log,

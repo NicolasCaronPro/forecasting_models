@@ -104,7 +104,12 @@ class WKLoss(nn.Module):
             tiled_weight = self.weight.repeat((self.num_classes, 1)).to(input.device)
             self.weights_ *= tiled_weight
 
-    def forward(self, input, target):
+    def forward(
+        self,
+        input,
+        target,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Forward pass for the Weighted Kappa loss.
 
@@ -164,18 +169,29 @@ class WKLoss(nn.Module):
         if self.use_logits:
             input = torch.nn.functional.softmax(input, dim=1)
 
-        hist_rater_a = torch.sum(input, 0)
-        hist_rater_b = torch.sum(target, 0)
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1, 1).to(input.device, input.dtype)
+            weighted_input = input * sample_weight
+            weighted_target = target * sample_weight
+            hist_rater_a = torch.sum(weighted_input, 0)
+            hist_rater_b = torch.sum(weighted_target, 0)
+            conf_mat = torch.matmul(input.T, weighted_target)
+            normalizer = torch.sum(sample_weight)
+        else:
+            hist_rater_a = torch.sum(input, 0)
+            hist_rater_b = torch.sum(target, 0)
 
-        conf_mat = torch.matmul(input.T, target)
+            conf_mat = torch.matmul(input.T, target)
 
-        bsize = input.size(0)
+            normalizer = torch.tensor(
+                float(input.size(0)), device=input.device, dtype=input.dtype
+            )
         nom = torch.sum(self.weights_ * conf_mat)
         expected_probs = torch.matmul(
             torch.reshape(hist_rater_a, [num_classes, 1]),
             torch.reshape(hist_rater_b, [1, num_classes]),
         )
-        denom = torch.sum(self.weights_ * expected_probs / bsize)
+        denom = torch.sum(self.weights_ * expected_probs / normalizer.clamp_min(1e-12))
 
         return nom / (denom + self.epsilon)
 
@@ -254,7 +270,12 @@ class MCELoss(torch.nn.modules.loss._WeightedLoss):
 
         self.use_logits = use_logits
 
-    def compute_per_class_mse(self, input: torch.Tensor, target: torch.Tensor):
+    def compute_per_class_mse(
+        self,
+        input: torch.Tensor,
+        target: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Computes the mean squared error (MSE) for each class independently.
 
@@ -292,12 +313,25 @@ class MCELoss(torch.nn.modules.loss._WeightedLoss):
             tiled_weight = torch.tile(self.weight, (per_class_se.shape[0], 1))
             per_class_se = per_class_se * tiled_weight
 
-        # Compute the mean squared error for each class
-        per_class_mse = torch.mean(per_class_se, dim=0)
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1, 1).to(per_class_se.device, per_class_se.dtype)
+            weighted_se = per_class_se * sample_weight
+            weight_sum = torch.sum(sample_weight)
+            if weight_sum <= 0:
+                return torch.zeros(per_class_se.shape[1], device=per_class_se.device, dtype=per_class_se.dtype)
+            per_class_mse = torch.sum(weighted_se, dim=0) / weight_sum
+        else:
+            # Compute the mean squared error for each class
+            per_class_mse = torch.mean(per_class_se, dim=0)
 
         return per_class_mse
 
-    def forward(self, input: torch.Tensor, target: torch.Tensor):
+    def forward(
+        self,
+        input: torch.Tensor,
+        target: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         """
         Parameters
         ----------
@@ -317,8 +351,13 @@ class MCELoss(torch.nn.modules.loss._WeightedLoss):
         """
 
         target_oh = torch.nn.functional.one_hot(target, num_classes=self.num_classes)
+        target_oh = target_oh.to(input.dtype)
 
-        per_class_mse = self.compute_per_class_mse(input, target_oh)
+        per_class_mse = self.compute_per_class_mse(
+            input,
+            target_oh,
+            sample_weight=sample_weight,
+        )
 
         if self.reduction == "mean":
             reduced_mse = torch.mean(per_class_mse)

@@ -1143,8 +1143,13 @@ class dEGPDLossTrunc(nn.Module):
         return torch.clamp(p, min=self.eps, max=1.0)  # clamp sup
 
     # ---------- NLL TRONQUÉE ----------
-    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
-                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        y: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+        from_logits: bool = True,
+    ) -> torch.Tensor:
         sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
         sigma = self._decode_sigma(sigma_raw, from_logits, None)
         kappa, xi = self._pos_params()
@@ -1153,9 +1158,12 @@ class dEGPDLossTrunc(nn.Module):
         p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
 
         nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
-        if weight is not None:
-            nll = nll * weight
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(nll.device, nll.dtype)
+            nll = nll * sample_weight
         if self.reduction == "mean":
+            if sample_weight is not None:
+                return nll.sum() / sample_weight.sum().clamp_min(self.eps)
             return nll.mean()
         if self.reduction == "sum":
             return nll.sum()
@@ -1516,8 +1524,13 @@ class PredictdEGPDLossTrunc(nn.Module):
         return torch.clamp(p, min=self.eps, max=1.0)
 
     # ---------- NLL TRONQUÉE ----------
-    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
-                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        y: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+        from_logits: bool = True,
+    ) -> torch.Tensor:
         """
         inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
         """
@@ -1535,9 +1548,12 @@ class PredictdEGPDLossTrunc(nn.Module):
         p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
 
         nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
-        if weight is not None:
-            nll = nll * weight
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(nll.device, nll.dtype)
+            nll = nll * sample_weight
         if self.reduction == "mean":
+            if sample_weight is not None:
+                return nll.sum() / sample_weight.sum().clamp_min(self.eps)
             return nll.mean()
         if self.reduction == "sum":
             return nll.sum()
