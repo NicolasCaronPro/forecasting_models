@@ -98,11 +98,20 @@ class NetMLP(torch.nn.Module):
         if self.horizon > 0:
             if z_prev is None:
                 z_prev = torch.zeros((features.shape[0], self.end_channels * self.n_sequences))
+<<<<<<< HEAD
 
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
         
         if self.horizon > 0:
             features = torch.cat((features, z_prev), dim=1)
+=======
+            else:
+                z_prev = z_prev.view(features.shape[0], self.end_channels * self.n_sequences)
+
+        features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
+        
+        features = torch.cat((features, z_prev), dim=1)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
 
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
@@ -1434,6 +1443,12 @@ class GRU(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
+<<<<<<< HEAD
+=======
+        if self.horizon > 0:
+            self.define_horizon_decodeur()
+
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
@@ -1451,10 +1466,14 @@ class GRU(torch.nn.Module):
             z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
         
         if self.horizon > 0:
+<<<<<<< HEAD
             X = torch.cat((X, z_prev), dim=1)
+=======
+            x = torch.cat((X, z_prev), dim=1)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
 
         # Reshape to (batch, seq_len, features)
-        x = X.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
 
         # Initial hidden state
         h0 = torch.zeros(self.num_layers, batch_size, self.gru_size).to(self.device)
@@ -1476,6 +1495,49 @@ class GRU(torch.nn.Module):
         output = self.output_activation(logits)
         return output, logits, hidden
 
+<<<<<<< HEAD
+=======
+    def define_horizon_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.out_channels is None:
+                raise ValueError("out_channels must be specified to automatically define the decoder.")
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+        self._decoder_output_dim = output_dim
+
+    def forward_horizon(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
+
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
                  act_func='ReLU', task_type='regression', dropout=0.03, num_layers=1,
@@ -1530,6 +1592,12 @@ class LSTM(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)
 
+<<<<<<< HEAD
+=======
+        if self.horizon > 0:
+            self.define_horizon_decodeur()
+
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
@@ -1547,10 +1615,14 @@ class LSTM(torch.nn.Module):
             z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
         
         if self.horizon > 0:
+<<<<<<< HEAD
             X = torch.cat((X, z_prev), dim=1)
+=======
+            x = torch.cat((X, z_prev), dim=1)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
 
         # (batch_size, seq_len, features)
-        x = X.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
 
         # Initial hidden and cell states
         h0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
@@ -1575,6 +1647,49 @@ class LSTM(torch.nn.Module):
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
         return output, logits, hidden
+<<<<<<< HEAD
+=======
+
+    def define_horizon_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.out_channels is None:
+                raise ValueError("out_channels must be specified to automatically define the decoder.")
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+        self._decoder_output_dim = output_dim
+
+    def forward_horizon(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0):
@@ -1628,11 +1743,21 @@ class DilatedCNN(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
+<<<<<<< HEAD
+=======
+        if self.horizon > 0:
+            self.define_horizon_decodeur()
+
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
     def forward(self, x, edges=None, z_prev=None):
         # Couche d'entrée
 
         if z_prev is None:
+<<<<<<< HEAD
             z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
+=======
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         else:
             z_prev = z_prev.view(x.shape[0], self.end_channels, self.n_sequences)
         
@@ -1658,6 +1783,47 @@ class DilatedCNN(torch.nn.Module):
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
         return output, logits, hidden
+<<<<<<< HEAD
+=======
+
+    def define_horizon_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': self.device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
+        device = decodeur_params.get('device', self.device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+        self._decoder_output_dim = output_dim
+
+    def forward_horizon(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1782,7 +1948,11 @@ class GraphCastGRU(torch.nn.Module):
         # GRU — encodes the temporal axis and outputs an embedding per node
         # ------------------------------------------------------------------
         self.gru = torch.nn.GRU(
+<<<<<<< HEAD
             input_size=in_channels + end_channels if horizon > 0 else in_channels,
+=======
+            input_size=in_channels +end_channels if horizon > 0 else in_channels,
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
             hidden_size=input_dim_grid_nodes,
             num_layers=num_gru_layers,
             dropout=0.03 if num_gru_layers > 1 else 0.0,
@@ -1853,14 +2023,22 @@ class GraphCastGRU(torch.nn.Module):
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
         else:
             z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+<<<<<<< HEAD
 
         if self.horizon > 0:            
             X = torch.cat((X, z_prev), dim=1)
 
         X_for_gru = X.permute(0, 2, 1)
         
+=======
+        
+        if self.horizon > 0:
+            x = torch.cat((X, z_prev), dim=1)
+
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
+        X_for_gru = x.permute(0, 2, 1)
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
         # Keep the last hidden state for each sequence
         gru_last = self.norm(gru_out[:, -1, :])
@@ -2035,12 +2213,17 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
         
         if self.horizon > 0:
+<<<<<<< HEAD
             X = torch.cat((X, z_prev), dim=1)
 
         X_for_gru = X.permute(0, 2, 1)
+=======
+            x = torch.cat((X, z_prev), dim=1)
+>>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
 
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
+        X_for_gru = x.permute(0, 2, 1)
         """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
         gru_out = gru_out.permute(0, 2, 1)
         # Keep the last hidden state for each sequence
