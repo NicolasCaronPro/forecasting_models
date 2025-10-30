@@ -73,6 +73,8 @@ def calculate_ks(data, score_col, event_col, thresholds, dir_output):
 
     return ks_results_df, optimal_thresholds
 
+import torch
+
 def iou_score(y_true, y_pred):
     """
     Calcule les scores (aire commune, union, sous-prédiction, sur-prédiction) entre deux signaux.
@@ -85,7 +87,13 @@ def iou_score(y_true, y_pred):
     Returns:
         dict: Dictionnaire contenant les scores calculés.
     """
-
+    
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.detach().cpu().numpy()
+        
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.detach().cpu().numpy()
+        
     if isinstance(y_pred, DMatrix):
         y_pred = np.copy(y_pred.get_data().toarray())
 

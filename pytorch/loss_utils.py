@@ -97,7 +97,7 @@ class WKLoss(nn.Module):
             self.weights_ = torch.square((repeat_op - repeat_op.T)) / (
                 (self.num_classes - 1) ** 2
             )
-
+            
         # Apply class weight
         if self.weight is not None:
             # Repeat weight num_classes times in columns

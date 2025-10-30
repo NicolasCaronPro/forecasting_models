@@ -4,6 +4,7 @@ from forecasting_models.pytorch.ordinal_loss import *
 import math
 from pathlib import Path
 import numpy as np
+from typing import Any
 
 def cdf_egpd_family1(y, sigma, xi, kappa, eps: float = 1e-12):
     """
@@ -82,415 +83,106 @@ def cdf_egpd_family1(y, sigma, xi, kappa, eps: float = 1e-12):
     F = torch.where(is_zero, F_exp, F_nz)
     return F
 
-###################################### Valeurs Extrêmes ##########################################
-
-class BulkTailNLLLoss(nn.Module):
-    """
-    Mixture Negative Log-Likelihood pour :
-      - Bulk : LogNormal(mu_bulk, sigma_bulk)
-      - Tail : eGPD (G(y) = H(y)^kappa)
-    Tous les paramètres sont appris dans la loss.
-    """
-
-    def __init__(self,
-                 init_mu_bulk: float = 0.0,
-                 init_pi_tail: float = 0.1,
-                 kappa: float = 0.831,
-                 xi: float = 0.161,
-                 eps: float = 1e-8,
-                 reduction: str = "mean",
-                 force_positive: bool = False):
-        super().__init__()
-
-        # Paramètres du bulk (log-normal)
-        self.mu_bulk = nn.Parameter(torch.tensor(init_mu_bulk, dtype=torch.float32))
-
-        # Paramètres de la tail (scale GPD)
-        self.pi_tail = nn.Parameter(torch.tensor(init_pi_tail, dtype=torch.float32))  # sigmoid pour [0,1]
-
-        # Paramètres eGPD
-        self.kappa = nn.Parameter(torch.tensor(kappa, dtype=torch.float32))
-        self.xi = nn.Parameter(torch.tensor(xi, dtype=torch.float32))
-
-        self.eps = eps
-        self.reduction = reduction
-        self.force_positive = force_positive
-
-    def forward(self, sigma_pos: torch.Tensor, y_pos: torch.Tensor, weight : torch.Tensor = None) -> torch.Tensor:
-        # Contrainte des paramètres positifs
-        sigma_bulk = sigma_pos + self.eps
-        sigma_tail = sigma_pos + self.eps
-        pi_tail = torch.sigmoid(self.pi_tail)  # entre 0 et 1
-
-        if self.force_positive:
-            kappa = F.softplus(self.kappa)
-            xi = F.softplus(self.xi)
-        else:
-            kappa = self.kappa
-            xi = self.xi
-
-        # --- Bulk log-likelihood (LogNormal) ---
-        log_y = torch.log(y_pos.clamp_min(self.eps))
-        log_pdf_bulk = -torch.log(y_pos * sigma_bulk * (2 * torch.pi) ** 0.5) \
-                       - (log_y - self.mu_bulk) ** 2 / (2 * sigma_bulk ** 2)
-
-        # --- Tail log-likelihood (eGPD) ---
-        z = 1.0 + xi * (y_pos / sigma_tail)
-        z = z.clamp_min(1.0 + 1e-12)
-        h = (1.0 / sigma_tail) * torch.pow(z, -1.0 / xi - 1.0)
-        log_h = torch.log(h)
-
-        a = 1.0 - torch.pow(z, -1.0 / xi)
-        a = a.clamp(max=1.0 - 1e-12)
-        log_H = torch.log(a)
-
-        log_g_tail = torch.log(kappa) + log_h + (kappa - 1.0) * log_H
-
-        # --- Mixture log-likelihood ---
-        max_log = torch.maximum(log_pdf_bulk, log_g_tail)  # pour stabilité numérique
-        log_mix = torch.log(
-            (1 - pi_tail) * torch.exp(log_pdf_bulk - max_log) +
-            pi_tail * torch.exp(log_g_tail - max_log)
-        ) + max_log
-
-        nll = -log_mix
-
-        if self.reduction == "mean":
-            return nll.mean()
-        elif self.reduction == "sum":
-            return nll.sum()
-        return nll
-
-    def get_learnable_parameters(self):
-        return {
-            "mu_bulk": self.mu_bulk,
-            "pi_tail": self.pi_tail,
-            "kappa": self.kappa,
-            "xi": self.xi
-        }
-    
-    def get_attributes(self):
-        """Retourne les valeurs contraintes (positives) des paramètres."""
-        return {
-            "mu_bulk": self.mu_bulk.item(),
-            "pi_tail": torch.sigmoid(self.pi_tail).item(),
-            "kappa": F.softplus(self.kappa).item(),
-            "xi": F.softplus(self.xi).item()
-        }
-
-    def plot_params(self, logs, dir_output):
-        """
-        Trace l'évolution des paramètres au cours des epochs.
-        
-        logs : liste de dicts {epoch: int, param: float, ...} 
-               ou dict {'epoch': [...], 'param': [...]}
-        dir_output : chemin pour sauvegarder les figures
-        """
-        import os
-        os.makedirs(dir_output, exist_ok=True)
-
-        params = ["mu_bulk", "pi_tail", "kappa", "xi"]
-
-        epochs = [log["epoch"] for log in logs]
-        for param in params:
-            values = [log[param] for log in logs]
-            plt.figure(figsize=(8,5))
-            plt.plot(epochs, values, marker='o')
-            plt.xlabel("Epoch")
-            plt.ylabel(param)
-            plt.title(f"Evolution de {param} au cours des epochs")
-            plt.grid(True, linestyle='--', alpha=0.4)
-            plt.tight_layout()
-            plt.savefig(os.path.join(dir_output, f"{param}_over_epochs.png"))
-            plt.close()
-
-class BulkTailEGPDNLLLossClusterIDs(nn.Module):
-    """
-    Mixture Bulk + Tail avec eGPD par cluster et option hiérarchique.
-
-    Bulk : log-normal (mu_bulk, sigma_bulk)
-    Tail : eGPD (sigma_tail, kappa, xi)
-
-    Paramètres globaux + delta par cluster pour pooling partiel :
-      - add_global=False : paramètres par cluster uniquement
-      - add_global=True  : global + delta par cluster (partial pooling)
-    """
-    def __init__(
-        self,
-        NC: int,
-        kappa_init: float = 0.831,
-        xi_init: float = 0.161,
-        mu_bulk_init: float = 0.0,
-        pi_tail_init: float = 0.1,
-        eps: float = 1e-8,
-        reduction: str = "mean",
-        force_positive: bool = False,
-        xi_min: float = 1e-12,
-        add_global: bool = False,
-    ):
-        super().__init__()
-        self.n_clusters = NC
-        self.eps = eps
-        self.reduction = reduction
-        self.force_positive = force_positive
-        self.xi_min = xi_min
-        self.add_global = add_global
-
-        if not add_global:
-            # Paramètres par cluster
-            self.mu_bulk_raw = nn.Parameter(torch.full((NC,), mu_bulk_init))
-            self.pi_tail_raw = nn.Parameter(torch.full((NC,), pi_tail_init))
-            self.kappa_raw = nn.Parameter(torch.full((NC,), kappa_init))
-            self.xi_raw = nn.Parameter(torch.full((NC,), xi_init))
-        else:
-            # Paramètres globaux + delta par cluster
-            self.mu_bulk_global = nn.Parameter(torch.tensor(mu_bulk_init))
-            self.mu_bulk_delta = nn.Parameter(torch.zeros(NC))
-
-            self.pi_tail_global = nn.Parameter(torch.tensor(pi_tail_init))
-            self.pi_tail_delta = nn.Parameter(torch.zeros(NC))
-
-            self.kappa_global = nn.Parameter(torch.tensor(kappa_init))
-            self.kappa_delta = nn.Parameter(torch.zeros(NC))
-
-            self.xi_global = nn.Parameter(torch.tensor(xi_init))
-            self.xi_delta = nn.Parameter(torch.zeros(NC))
-
-    def _select_raw_params(self, cluster_ids: torch.Tensor):
-        # Bulk
-        if not self.add_global:
-            mu_bulk = self.mu_bulk_raw[cluster_ids]
-            pi_tail = torch.sigmoid(self.pi_tail_raw[cluster_ids])
-            kappa_raw = self.kappa_raw[cluster_ids]
-            xi_raw = self.xi_raw[cluster_ids]
-        else:
-            mu_bulk = self.mu_bulk_global + self.mu_bulk_delta[cluster_ids]
-            pi_tail = torch.sigmoid(self.pi_tail_global + self.pi_tail_delta[cluster_ids])
-            kappa_raw = self.kappa_global + self.kappa_delta[cluster_ids]
-            xi_raw = self.xi_global + self.xi_delta[cluster_ids]
-        return mu_bulk, pi_tail, kappa_raw, xi_raw
-
-    def forward(self, sigma_pos: torch.Tensor, y_pos: torch.Tensor, cluster_ids: torch.Tensor, weight : torch.Tensor = None) -> torch.Tensor:
-        sigma_bulk = sigma_pos + self.eps
-        sigma_tail = sigma_pos + self.eps
-
-        mu_bulk, pi_tail, kappa_raw, xi_raw = self._select_raw_params(cluster_ids)
-
-        if self.force_positive:
-            kappa = F.softplus(kappa_raw)
-            xi = F.softplus(xi_raw) + self.xi_min
-        else:
-            kappa = kappa_raw
-            xi = xi_raw
-
-        # --- Bulk log-likelihood (LogNormal) ---
-        log_y = torch.log(y_pos.clamp_min(self.eps))
-        log_pdf_bulk = -torch.log(y_pos * sigma_bulk * (2 * torch.pi) ** 0.5) \
-                       - (log_y - mu_bulk) ** 2 / (2 * sigma_bulk ** 2)
-
-        # --- Tail log-likelihood (eGPD) ---
-        z = (1.0 + xi * (y_pos / sigma_tail)).clamp_min(1.0 + 1e-12)
-        log_h = torch.log((1.0 / sigma_tail) * torch.pow(z, -1.0 / xi - 1.0))
-        a = (1.0 - torch.pow(z, -1.0 / xi)).clamp(max=1.0 - 1e-12)
-        log_H = torch.log(a)
-        log_g_tail = torch.log(kappa) + log_h + (kappa - 1.0) * log_H
-
-        # --- Mixture log-likelihood ---
-        max_log = torch.maximum(log_pdf_bulk, log_g_tail)
-        log_mix = torch.log((1 - pi_tail) * torch.exp(log_pdf_bulk - max_log) +
-                            pi_tail * torch.exp(log_g_tail - max_log)) + max_log
-
-        nll = -log_mix
-
-        if self.reduction == "mean":
-            return nll.mean()
-        elif self.reduction == "sum":
-            return nll.sum()
-        return nll
-
-    # ---------- Utilitaires ----------
-    def get_learnable_parameters(self):
-        if not self.add_global:
-            return {
-                "mu_bulk": self.mu_bulk_raw,
-                "pi_tail": self.pi_tail_raw,
-                "kappa": self.kappa_raw,
-                "xi": self.xi_raw
-            }
-        else:
-            return {
-                "mu_bulk_global": self.mu_bulk_global,
-                "mu_bulk_delta": self.mu_bulk_delta,
-                "pi_tail_global": self.pi_tail_global,
-                "pi_tail_delta": self.pi_tail_delta,
-                "kappa_global": self.kappa_global,
-                "xi_global": self.xi_global,
-                "kappa_delta": self.kappa_delta,
-                "xi_delta": self.xi_delta
-            }
-
-    def get_attribute(self):
-        if not self.add_global:
-            mu_bulk = self.mu_bulk_raw.detach()
-            pi_tail = torch.sigmoid(self.pi_tail_raw).detach()
-            if self.force_positive:
-                kappa = F.softplus(self.kappa_raw).detach()
-                xi = (F.softplus(self.xi_raw) + self.xi_min).detach()
-            else:
-                kappa = self.kappa_raw.detach()
-                xi = self.xi_raw.detach()
-            return [
-                ('mu_bulk', mu_bulk),
-                ('pi_tail', pi_tail),
-                ('kappa', kappa),
-                ('xi', xi)
-            ]
-        else:
-            mu_bulk_full = self.mu_bulk_global + self.mu_bulk_delta
-            pi_tail_full = torch.sigmoid(self.pi_tail_global + self.pi_tail_delta)
-            kappa_full = F.softplus(self.kappa_global + self.kappa_delta) if self.force_positive else self.kappa_global + self.kappa_delta
-            xi_full = (F.softplus(self.xi_global + self.xi_delta) + self.xi_min) if self.force_positive else self.xi_global + self.xi_delta
-
-            return [
-                ('mu_bulk_global', self.mu_bulk_global.detach()),
-                ('mu_bulk_per_cluster', mu_bulk_full.detach()),
-                ('pi_tail_global', self.pi_tail_global.detach()),
-                ('pi_tail_per_cluster', pi_tail_full.detach()),
-                ('kappa_global', F.softplus(self.kappa_global).detach() if self.force_positive else self.kappa_global.detach()),
-                ('xi_global', (F.softplus(self.xi_global) + self.xi_min).detach() if self.force_positive else self.xi_global.detach()),
-                ('kappa_per_cluster', kappa_full.detach()),
-                ('xi_per_cluster', xi_full.detach())
-            ]
-
-    # ---------- Plot ----------
-    def plot_params(self, logs, dir_output, cluster_names=None, dpi=120):
-        dir_output = Path(dir_output)
-        dir_output.mkdir(parents=True, exist_ok=True)
-
-        epochs = [int(log["epoch"]) for log in logs]
-        C = self.n_clusters
-
-        # Convert logs en arrays
-        def to_np(x):
-            if isinstance(x, torch.Tensor):
-                x = x.detach().cpu().numpy()
-            return np.asarray(x)
-
-        mu_bulk_list = [log.get("mu_bulk_per_cluster", log.get("mu_bulk")) for log in logs]
-        pi_tail_list = [log.get("pi_tail_per_cluster", log.get("pi_tail")) for log in logs]
-        kappa_list = [log.get("kappa_per_cluster", log.get("kappa")) for log in logs]
-        xi_list = [log.get("xi_per_cluster", log.get("xi")) for log in logs]
-
-        mu_bulk_arr = np.stack([to_np(x) for x in mu_bulk_list], axis=0)
-        pi_tail_arr = np.stack([to_np(x) for x in pi_tail_list], axis=0)
-        kappa_arr = np.stack([to_np(x) for x in kappa_list], axis=0)
-        xi_arr = np.stack([to_np(x) for x in xi_list], axis=0)
-
-        if cluster_names is None:
-            cluster_names = [f"cl{c}" for c in range(C)]
-        elif len(cluster_names) != C:
-            raise ValueError("cluster_names doit correspondre à n_clusters")
-
-        for c in range(C):
-            name = cluster_names[c]
-            plt.figure(figsize=(8,5))
-            plt.plot(epochs, mu_bulk_arr[:, c], marker='o', label=r'$\mu_{bulk}$')
-            plt.plot(epochs, pi_tail_arr[:, c], marker='x', label=r'$\pi_{tail}$')
-            plt.plot(epochs, kappa_arr[:, c], marker='d', label=r'$\kappa$')
-            plt.plot(epochs, xi_arr[:, c], marker='v', label=r'$\xi$')
-            plt.xlabel("Epoch")
-            plt.ylabel("Value")
-            plt.title(f"Cluster {name} parameters over epochs")
-            plt.grid(True, linestyle='--', alpha=0.4)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(dir_output / f"bulk_tail_params_{name}.png", dpi=dpi)
-            plt.close()
-
-        if self.add_global:
-            kappa_global_arr = np.asarray([to_np(log["kappa_global"]) for log in logs])
-            xi_global_arr = np.asarray([to_np(log["xi_global"]) for log in logs])
-            mu_bulk_global_arr = np.asarray([to_np(log["mu_bulk_global"]) for log in logs])
-            pi_tail_global_arr = np.asarray([to_np(log["pi_tail_global"]) for log in logs])
-
-            plt.figure(figsize=(8,5))
-            plt.plot(epochs, mu_bulk_global_arr, marker='o', label=r'$\mu_{bulk}^{global}$')
-            plt.plot(epochs, pi_tail_global_arr, marker='x', label=r'$\pi_{tail}^{global}$')
-            plt.plot(epochs, kappa_global_arr, marker='d', label=r'$\kappa^{global}$')
-            plt.plot(epochs, xi_global_arr, marker='v', label=r'$\xi^{global}$')
-            plt.xlabel("Epoch")
-            plt.ylabel("Value")
-            plt.title("Global parameters over epochs")
-            plt.grid(True, linestyle='--', alpha=0.4)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(dir_output / "bulk_tail_params_global.png", dpi=dpi)
-            plt.close()
-
 class EGPDNLLLoss(torch.nn.Module):
-    """Negative log-likelihood for the eGPD (first family) when ``y > 0``.
-    This loss assumes the parametrisation ``G(y) = H(y)^kappa`` where ``H`` is
-    the CDF of the Generalised Pareto Distribution.  The parameters ``kappa``
-    and ``xi`` are learnt scalars constrained to be positive via ``softplus``.
-    """
-
-    def __init__(self, kappa: float = 0.831, xi: float = 0.161, eps: float = 1e-8, reduction: str = "mean", force_positive = True):
-        super(EGPDNLLLoss, self).__init__()
+    def __init__(self, kappa: float = 0.831, xi: float = 0.161,
+                 eps: float = 1e-8, reduction: str = "mean",
+                 force_positive: bool = True,
+                 area_exponent: float = 1.0,   # =1.0 si tu modèles BA ; =0.5 si sqrt(BA)
+                 num_classes = 5,
+                 ):
+        super().__init__()
         self.kappa = torch.nn.Parameter(torch.tensor(kappa))
-        self.xi = torch.nn.Parameter(torch.tensor(xi))
-        
-        #self.kappa = torch.nn.parameter.Parameter(0,831, requires_grad=False)
-        #self.xi = torch.nn.parameter.Parameter(0,161, requires_grad=False)
-        # Register positive scalar buffers (moved automatically across devices)
-        # Defaults set near prior values; pass via ctor to override.
-        #self.register_buffer('xi', torch.tensor(float(xi), dtype=torch.float32))
-        #self.register_buffer('kappa', torch.tensor(float(kappa), dtype=torch.float32))
+        self.xi    = torch.nn.Parameter(torch.tensor(xi))
         self.eps = eps
         self.reduction = reduction
         self.force_positive = force_positive
+        self.area_exponent = area_exponent  # contrôle l’offset d’échelle via a**alpha
+        self.num_classes = num_classes
 
-    def forward(self, sigma_pos: torch.Tensor, y_pos: torch.Tensor, weight : torch.Tensor = None) -> torch.Tensor:
-        """Compute the eGPD negative log-likelihood.
-
-        Parameters
-        ----------
-        y_pos : torch.Tensor
-            Observations strictly greater than zero.
-        sigma_pos : torch.Tensor
-            Positive scale parameter predicted by the network.
-        Returns
-        -------
-        torch.Tensor
-            The reduced negative log-likelihood according to ``reduction``.
-        """
+    def _pos_params(self):
         if self.force_positive:
-            kappa = F.softplus(self.kappa)
-            xi = F.softplus(self.xi)
-        else:
-            kappa = self.kappa
-            xi = self.xi
+            return F.softplus(self.kappa), F.softplus(self.xi)
+        return self.kappa, self.xi
 
-        sigma = sigma_pos.clamp_min(self.eps)
+    @torch.no_grad()
+    def _egpd_icdf(self, u: torch.Tensor, sigma: torch.Tensor,
+                   kappa: torch.Tensor, xi: torch.Tensor, eps: float):
+        # eGPD inverse CDF (conditionnelle), stable numériquement
+        u = torch.clamp(u, eps, 1.0 - eps)
+        v = u ** (1.0 / torch.clamp(kappa, min=eps))
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0 = xi_safe.abs() < 1e-6
+        y_near0 = -sigma * torch.log1p(-(v))
+        y_xi = (sigma / xi_safe) * ((1.0 - v).clamp(min=eps) ** (-xi_safe) - 1.0)
+        y = torch.where(near0, y_near0, y_xi)
+        return y.clamp_min(0.0)
 
-        z = 1.0 + xi * (y_pos / sigma)
-        z = z.clamp_min(1.0 + 1e-12)
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool,
+                      area = None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        if area is not None:
+            # applique l’offset d’échelle : sigma <- sigma * a**alpha
+            sigma = sigma * torch.clamp(area, min=self.eps) ** self.area_exponent
+        return sigma
 
-        h = (1 / sigma) * torch.pow(z, -1.0 / xi - 1.0)
-        log_h = torch.log(h)
+    # ---------- Entraînement : NLL eGPD (conditionnelle, sur y>0) ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True,
+                area = None) -> torch.Tensor:
+        """
+        inputs: (...,) sigma_raw (ta tête de réseau pour l’échelle)
+        y:      cible > 0 (la BA chez toi, car pas de sqrt)
+        area:   surface a(s) optionnelle pour l’offset d’échelle
+        """
+        inputs = inputs[:, 0]
+        sigma = self._decode_sigma(inputs, from_logits, area)
+        kappa, xi = self._pos_params()
 
-        a = 1.0 - torch.pow(z, -1.0/xi)
-        a = a.clamp(max=1.0 - 1e-12)
-        
-        log_H = torch.log(a)
+        pos = (y > 0)
+        # z = 1 + xi * y / sigma ; calculé seulement où pos
+        z = 1.0 + xi * (y / sigma)
+        z = torch.where(pos, z.clamp_min(1.0 + 1e-12), torch.ones_like(z))
 
-        log_g = torch.log(kappa) + log_h + (kappa - 1.0) * log_H
-        
-        nll = -log_g
+        # H(y) = 1 - z^{-1/xi} ; h(y) = (1/sigma) * z^{-1/xi - 1}
+        log_h = torch.where(pos, -torch.log(sigma) + (-1.0 / xi - 1.0) * torch.log(z), torch.zeros_like(y))
+        H = torch.where(pos, 1.0 - torch.pow(z, -1.0 / xi), torch.zeros_like(y))
+        H = torch.where(pos, H.clamp(max=1.0 - 1e-12), H)
+
+        # log g(y) = log kappa + log h(y) + (kappa - 1) * log H(y)
+        log_g = torch.where(pos, torch.log(kappa) + log_h + (kappa - 1.0) * torch.log(H.clamp_min(self.eps)),
+                            torch.zeros_like(y))
+
+        nll = torch.where(pos, -(log_g), torch.zeros_like(y))
+        if weight is not None:
+            nll = nll * weight
+
         if self.reduction == "mean":
             return nll.mean()
-        elif self.reduction == "sum":
+        if self.reduction == "sum":
             return nll.sum()
         return nll
+
+    @torch.no_grad()
+    def transform(self,
+                inputs: torch.Tensor, dir_output, from_logits: bool = True,
+                area = None,
+                u: float = 0.5,
+                ):
+        """
+        Renvoie le quantile conditionnel de la variable que tu modèles.
+        - Si tu modèles BA directement (pas de sqrt), c’est un quantile de BA.
+        - Si un jour tu repasses à sqrt(BA), passe area_exponent=0.5 et
+          élève au carré pour retourner un quantile d’aire.
+        """
+        inputs = inputs[:, 0]
+        sigma = self._decode_sigma(inputs, from_logits, area)
+        kappa, xi = self._pos_params()
+        if not torch.is_tensor(u):
+            u = torch.tensor(u, dtype=sigma.dtype, device=sigma.device)
+        y_q = self._egpd_icdf(u, sigma, kappa, xi, self.eps)
+        self.plot_final_pdf(inputs, dir_output)
+        return y_q
     
     def get_learnable_parameters(self):
         return {"kappa" : self.kappa, "xi" : self.xi}
@@ -535,48 +227,458 @@ class EGPDNLLLoss(torch.nn.Module):
         plt.tight_layout()
         plt.savefig(dir_output / 'egpd_xi_over_epochs.png')
         plt.close()
+        
+    @torch.no_grad()
+    def plot_final_pdf(self,
+                    sigma: torch.Tensor,        # tenseur des échelles (décodées) du batch
+                    dir_output,                 # dossier de sortie (str | Path)
+                    num_points: int = 1000,     # points pour la grille
+                    which_sigmas: int = 3,      # nb de courbes sigma à tracer (min/med/max)
+                    u_max: float = 0.999):      # quantile haut pour fixer l'axe Y
+        """
+        Trace la densité eGPD conditionnelle sur l'échelle BA (modèle direct BA):
+        g(y) = kappa * h(y) * H(y)^{kappa-1},
+        avec H(y) = 1 - (1 + xi*y/sigma)^(-1/xi) et h(y) = (1/sigma)*(1 + xi*y/sigma)^(-1/xi - 1).
 
-class EGPDNLLLossClusterIDs(nn.Module):
+        - 'sigma' doit être le tenseur d'échelles DÉCODÉES (après softplus et éventuel offset area).
+        Ex: sigma = self._decode_sigma(inputs, from_logits=True, area=area)
+        - Enregistre un PNG 'egpd_pdf_ba.png' dans dir_output.
+        """
+        # Prépare sortie
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        # Récupère paramètres positifs
+        kappa, xi = self._pos_params()
+        kappa = torch.clamp(kappa, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+
+        # Sélectionne quelques sigmas représentatives (min/med/max)
+        sig = sigma.detach().flatten()
+        if sig.numel() == 0:
+            return
+        sig_sorted, _ = torch.sort(sig)
+        idxs = torch.linspace(0, sig_sorted.numel()-1, steps=min(which_sigmas, sig_sorted.numel())).round().long()
+        sig_list = sig_sorted[idxs].tolist()
+
+        # Détermine la borne supérieure de l'axe BA via l'ICDF(eGPD) au quantile u_max pour la plus grande sigma
+        s_ref = torch.tensor(max(sig_list), device=sigma.device, dtype=sigma.dtype)
+        y_max = self._egpd_icdf(torch.tensor(float(u_max), device=sigma.device, dtype=sigma.dtype),
+                                s_ref, kappa, xi_safe, self.eps).item()
+        # Sécurité si xi ~ 0 ou si la borne est trop petite
+        y_max = max(y_max, float(s_ref.item()) * 6.0)
+        y_max = float(y_max)
+
+        # Grille BA (éviter 0 strict)
+        y_grid = torch.linspace(0.0, y_max, num_points, device=sigma.device, dtype=sigma.dtype)
+
+        # Fonction densité (BA direct)
+        def egpd_pdf_ba(y: torch.Tensor, s: torch.Tensor, kap: torch.Tensor, xis: torch.Tensor) -> torch.Tensor:
+            # z = 1 + xi * y / sigma
+            z = 1.0 + xis * (y / torch.clamp(s, min=self.eps))
+            z = torch.clamp(z, min=1.0 + 1e-12)
+
+            # H(y), h(y)
+            H = 1.0 - torch.pow(z, -1.0 / torch.clamp(xis, min=1e-12))
+            H = torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+            h = (1.0 / torch.clamp(s, min=self.eps)) * torch.pow(z, (-1.0 / torch.clamp(xis, min=1e-12)) - 1.0)
+
+            g = torch.clamp(kap, min=self.eps) * h * torch.pow(H, torch.clamp(kap, min=self.eps) - 1.0)
+            return g
+
+        # Tracé
+        plt.figure(figsize=(7, 5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            pdf_vals = egpd_pdf_ba(y_grid, s_t, kappa, xi_safe)
+            plt.plot(y_grid.cpu().numpy(), pdf_vals.cpu().numpy(), label=f"sigma={float(s):.3f}")
+
+        plt.xlabel("BA")
+        plt.ylabel("Conditional PDF g(BA)")
+        plt.title(f"eGPD PDF on BA  (kappa={float(kappa):.3f}, xi={float(xi_safe):.3f})")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(dir_output / "egpd_pdf_ba.png", dpi=200)
+        plt.close()
+    
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+class EGPDNLLLossSqrt(torch.nn.Module):
     """
-    eGPD NLL (first family, y>0) avec paramètres par cluster, et optionnellement
+    eGPD NLL (famille 1) APPRISE sur Y = sqrt(BA) pour les échantillons positifs (y > 0).
+    - Entraînement (forward): NLL eGPD sur sqrt(y).
+    - Inférence (transform): sélection via seuil de PDF (p_thresh) sur sqrt(BA), puis carré pour BA.
+    """
+
+    def __init__(self, kappa: float = 0.831, xi: float = 0.161,
+                 eps: float = 1e-8, reduction: str = "mean",
+                 force_positive: bool = True,
+                 area_exponent: float = 0.5,  # =0.5 comme dans l'article (sqrt(BA))
+                 num_classes=5):
+        super().__init__()
+        self.kappa = torch.nn.Parameter(torch.tensor(kappa), requires_grad=True)
+        self.xi    = torch.nn.Parameter(torch.tensor(xi),    requires_grad=True)
+        self.eps = eps
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.area_exponent = area_exponent
+        self.num_classes = num_classes
+
+    # ---------- contraintes de positivité ----------
+    def _pos_params(self):
+        if self.force_positive:
+            return F.softplus(self.kappa), F.softplus(self.xi)
+        return self.kappa, self.xi
+
+    # ---------- inverse-CDF eGPD sur l'échelle sqrt(BA) ----------
+    @torch.no_grad()
+    def _egpd_icdf(self, u: torch.Tensor, sigma: torch.Tensor,
+                   kappa: torch.Tensor, xi: torch.Tensor, eps: float):
+        u = torch.clamp(u, eps, 1.0 - eps)
+        v = u ** (1.0 / torch.clamp(kappa, min=eps))
+        xi_safe = torch.clamp(xi, min=-1e-6, max=1e6)
+        near0 = xi_safe.abs() < 1e-6
+        y_near0 = -sigma * torch.log1p(-v)                                   # xi ~ 0
+        y_xi    = (sigma / xi_safe) * ((1.0 - v).clamp(min=eps) ** (-xi_safe) - 1.0)
+        y = torch.where(near0, y_near0, y_xi)
+        return y.clamp_min(0.0)  # sqrt(BA)
+
+    # ---------- pdf eGPD sur l'échelle sqrt(BA) ----------
+    def _egpd_pdf_sqrt(self, y_sqrt: torch.Tensor, sigma: torch.Tensor,
+                       kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y_sqrt = torch.clamp(y_sqrt, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        z = 1.0 + xi * (y_sqrt / sigma)
+        z = torch.clamp(z, min=1.0 + 1e-12)
+        H = 1.0 - torch.pow(z, -1.0 / xi)
+        H = torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+        h = (1.0 / sigma) * torch.pow(z, (-1.0 / xi) - 1.0)
+        kpos = torch.clamp(kappa, min=self.eps)
+        g = kpos * h * torch.pow(H, kpos - 1.0)
+        return g
+
+    # ---------- décodage sigma (+ offset surface éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, area=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        if area is not None:
+            sigma = sigma * torch.clamp(area, min=self.eps) ** self.area_exponent
+        return sigma
+
+    # ---------- Entraînement : NLL eGPD sur Y = sqrt(BA) ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor, areas,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        inputs = inputs[:, 0]
+        sigma = self._decode_sigma(inputs, from_logits, areas)
+        kappa, xi = self._pos_params()
+
+        pos = (y > 0)
+        y_sqrt = torch.zeros_like(y)
+        y_sqrt = torch.where(pos, torch.sqrt(torch.clamp(y, min=self.eps)), y_sqrt)
+
+        z = 1.0 + xi * (y_sqrt / sigma)
+        z = torch.where(pos, z.clamp_min(1.0 + 1e-12), torch.ones_like(z))
+
+        log_h = torch.where(pos, -torch.log(sigma) + (-1.0 / xi - 1.0) * torch.log(z),
+                            torch.zeros_like(y))
+        H = torch.where(pos, 1.0 - torch.pow(z, -1.0 / xi), torch.zeros_like(y))
+        H = torch.where(pos, H.clamp(max=1.0 - 1e-12), H)
+
+        kpos = torch.clamp(kappa, min=self.eps)
+        log_g = torch.where(pos,
+                            torch.log(kpos) + log_h +
+                            (kpos - 1.0) * torch.log(H.clamp_min(self.eps)),
+                            torch.zeros_like(y))
+
+        nll = torch.where(pos, -(log_g), torch.zeros_like(y))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- CDF eGPD sur sqrt(BA) ----------
+    def _egpd_cdf_sqrt(self, y_sqrt: torch.Tensor, sigma: torch.Tensor,
+                       kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y_sqrt = torch.clamp(y_sqrt, min=0.0)
+        sigma  = torch.clamp(sigma,  min=self.eps)
+        z = 1.0 + xi * (y_sqrt / sigma)
+        z = torch.clamp(z, min=1.0 + 1e-12)
+        xi_safe = torch.clamp(xi, min=-1e-6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+        H_xi  = 1.0 - torch.pow(z, -1.0 / xi_safe)
+        H_0   = 1.0 - torch.exp(-y_sqrt / sigma)
+        H     = torch.where(near0, H_0, H_xi)
+        H     = torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+        kpos = torch.clamp(kappa, min=self.eps)
+        return torch.pow(H, kpos)
+
+    # ---------- NEW: sélection par seuil de PDF (bord min/max) ----------
+    @torch.no_grad()
+    def _y_from_pdf_threshold(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                              p_thresh: float = 1e-3, pick: str = "min",
+                              num_points: int = 2000, u_max: float = 0.999):
+        """
+        Cherche un y (sur sqrt(BA)) tel que PDF(y) >= p_thresh.
+        - pick="min": bord gauche de l'ensemble {y: g(y) >= p_thresh}
+        - pick="max": bord droit
+        Repli: mode (argmax PDF) si aucun point ne dépasse p_thresh.
+        Retourne un tenseur (N,) si sigma est batch, sinon scalaire tensor.
+        """
+        assert p_thresh > 0, "p_thresh must be > 0"
+        assert pick in ("min", "max")
+
+        if sigma.ndim == 0:
+            sigma = sigma.view(1)
+        dev, dt = sigma.device, sigma.dtype
+
+        # borne supérieure via quantile u_max
+        u = torch.full((sigma.size(0),), float(u_max), device=dev, dtype=dt)
+        y_max = self._egpd_icdf(u, sigma, kappa, xi, self.eps).clamp_min(sigma * 6.0)
+        ymax_global = y_max.max().item()
+        y_grid = torch.linspace(0.0, ymax_global, num_points, device=dev, dtype=dt)  # (G,)
+
+        # PDF sur la grille
+        G = torch.stack([self._egpd_pdf_sqrt(y_grid, s, kappa, xi) for s in sigma], dim=0)  # (N,G)
+
+        mask = (G >= p_thresh)
+        ys = y_grid.unsqueeze(0).expand_as(G)
+
+        if pick == "min":
+            large = torch.full_like(ys, float('inf'))
+            cand = torch.where(mask, ys, large)
+            y_sel = cand.min(dim=1).values
+            # repli: mode
+            need = torch.isinf(y_sel)
+            if need.any():
+                y_mode = y_grid[G.argmax(dim=1)]
+                y_sel[need] = y_mode[need]
+        else:
+            negi = torch.full_like(ys, float('-inf'))
+            cand = torch.where(mask, ys, negi)
+            y_sel = cand.max(dim=1).values
+            need = torch.isinf(y_sel)
+            if need.any():
+                y_mode = y_grid[G.argmax(dim=1)]
+                y_sel[need] = y_mode[need]
+
+        return y_sel  # sur sqrt(BA)
+
+    # ---------- Inférence : seuil PDF -> sqrt(BA) -> BA, + plots ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, areas, dir_output, from_logits: bool = True,
+                  p_thresh: float = 0.5, pick: str = "min"):
+        """
+        Retourne une PRÉDICTION EN BA :
+        - trouve y_hat (sur sqrt(BA)) comme bord min/max où PDF(y) >= p_thresh,
+        - retourne BA_pred = y_hat**2.
+        Si dir_output est fourni, trace PDF/CDF/PPF via plot_final().
+        """
+        inputs = inputs[:, 0]
+        sigma = self._decode_sigma(inputs, from_logits, areas)
+        kappa, xi = self._pos_params()
+
+        y_sqrt_sel = self._y_from_pdf_threshold(
+            sigma, kappa, xi,
+            p_thresh=float(p_thresh),
+            pick=pick,
+            num_points=2000,
+            u_max=0.999
+        )
+        ba_pred = y_sqrt_sel ** 2
+
+        if dir_output is not None:
+            self.plot_final(sigma, dir_output)
+
+        return ba_pred
+
+    # ---------- Plot PDF, CDF & PPF (sqrt et BA) + MAX(sigma) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, dir_output,
+                   num_points: int = 1000, which_sigmas: int = 'max'):
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        kappa, xi = self._pos_params()
+
+        sig = sigma.detach().flatten()
+        if sig.numel() == 0:
+            return
+        sig_sorted, _ = torch.sort(sig)
+        sig_max_val = float(sig_sorted.max().item())
+        if which_sigmas == 'mean':
+            sig_list = [sig_sorted.mean()]
+        elif which_sigmas == 'max':
+            sig_list = [sig_sorted.max()]
+        else:
+            idxs = torch.linspace(0, sig_sorted.numel()-1,
+                                  steps=min(which_sigmas, sig_sorted.numel())).round().long()
+            sig_list = sig_sorted[idxs].tolist()
+
+        # grille en sqrt(BA) basée sur le quantile 0.999 pour la plus grande sigma
+        s_ref = torch.tensor(max([float(s) for s in sig_list]), device=sigma.device, dtype=sigma.dtype)
+        y_max = self._egpd_icdf(torch.tensor(0.999, device=sigma.device, dtype=sigma.dtype),
+                                s_ref, kappa, xi, self.eps).item()
+        y_max = max(y_max, float(s_ref.item()) * 6.0)
+        y_grid = torch.linspace(0.0, y_max, num_points, device=sigma.device, dtype=sigma.dtype)
+
+        # 1) PDF sqrt(BA)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            pdf_y = self._egpd_pdf_sqrt(y_grid, s_t, kappa, xi)
+            plt.plot(y_grid.cpu().numpy(), pdf_y.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("y = sqrt(BA)")
+        plt.ylabel("Conditional PDF g_Y(y)")
+        plt.title(f"eGPD PDF on sqrt(BA)  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_pdf_default_sqrt.png", dpi=200); plt.close()
+
+        # 2) CDF sqrt(BA)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            cdf_y = self._egpd_cdf_sqrt(y_grid, s_t, kappa, xi)
+            plt.plot(y_grid.cpu().numpy(), cdf_y.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("y = sqrt(BA)")
+        plt.ylabel("CDF  G_Y(y)")
+        plt.title(f"eGPD CDF on sqrt(BA)  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_cdf_sqrt.png", dpi=200); plt.close()
+
+        # 3) PDF BA
+        z_max = (y_max ** 2)
+        z_grid = torch.linspace(1e-12, z_max, num_points, device=sigma.device, dtype=sigma.dtype)
+        y_from_z = torch.sqrt(z_grid)
+
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            g_y = self._egpd_pdf_sqrt(y_from_z, s_t, kappa, xi)
+            f_z = g_y / (2.0 * torch.clamp(y_from_z, min=1e-12))
+            plt.plot(z_grid.cpu().numpy(), f_z.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("BA")
+        plt.ylabel("Conditional PDF on BA,  f_Z(z)")
+        plt.title(f"Final PDF on BA via Z=Y^2  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_pdf_ba.png", dpi=200); plt.close()
+
+        # 4) CDF BA
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            F_z = self._egpd_cdf_sqrt(y_from_z, s_t, kappa, xi)
+            plt.plot(z_grid.cpu().numpy(), F_z.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("BA")
+        plt.ylabel("CDF  F_Z(z) = G_Y(sqrt(z))")
+        plt.title(f"CDF on BA via Z=Y^2  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_cdf_ba.png", dpi=200); plt.close()
+
+        # 5) PPF sqrt(BA)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, num_points, device=sigma.device, dtype=sigma.dtype)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            q_u = self._egpd_icdf(u_grid, s_t, kappa, xi, self.eps)
+            plt.plot(u_grid.cpu().numpy(), q_u.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel("q_u (on sqrt(BA))")
+        plt.title(f"PPF on sqrt(BA)  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_ppf_sqrt.png", dpi=200); plt.close()
+
+        # 6) PPF BA
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(float(s), device=sigma.device, dtype=sigma.dtype)
+            q_u = self._egpd_icdf(u_grid, s_t, kappa, xi, self.eps)
+            q_ba = q_u ** 2
+            plt.plot(u_grid.cpu().numpy(), q_ba.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel("q_u^2 (on BA)")
+        plt.title(f"PPF on BA  (kappa={float(kappa):.3f}, xi={float(xi):.3f}, max sigma={sig_max_val:.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / "egpd_ppf_ba.png", dpi=200); plt.close()
+
+    # ---------- Accès params ----------
+    def get_learnable_parameters(self):
+        return {"kappa": self.kappa, "xi": self.xi}
+
+    def get_attribute(self):
+        if self.force_positive:
+            return [('kappa', F.softplus(self.kappa)), ('xi', F.softplus(self.xi))]
+        else:
+            return [('kappa', self.kappa), ('xi', self.xi)]
+
+    def plot_params(self, egpd_logs, dir_output):
+        kappas = [egpd_log["kappa"] for egpd_log in egpd_logs]
+        xis    = [egpd_log["xi"] for egpd_log in egpd_logs]
+        epochs = [egpd_log["epoch"] for egpd_log in egpd_logs]
+        egpd_to_save = {"epoch": epochs, "kappa": kappas, "xi": xis}
+        save_object(egpd_to_save, 'egpd_kappa_xi.pkl', dir_output)
+        plt.figure(figsize=(8, 5)); plt.plot(epochs, kappas, marker='o')
+        plt.xlabel('Epoch'); plt.ylabel('kappa'); plt.title('EGPD kappa over epochs')
+        plt.grid(True, linestyle='--', alpha=0.4); plt.tight_layout()
+        plt.savefig(dir_output / 'egpd_kappa_over_epochs.png'); plt.close()
+        plt.figure(figsize=(8, 5)); plt.plot(epochs, xis, marker='o')
+        plt.xlabel('Epoch'); plt.ylabel('xi'); plt.title('EGPD xi over epochs')
+        plt.grid(True, linestyle='--', alpha=0.4); plt.tight_layout()
+        plt.savefig(dir_output / 'egpd_xi_over_epochs.png'); plt.close()
+
+class EGPDNLLLossSqrtClusterIDs(nn.Module):
+    """
+    eGPD NLL (famille 1) APPRISE sur Y = sqrt(BA) pour y>0,
+    avec paramètres kappa/xi dépendant des clusters et optionnellement
     un terme GLOBAL (partial pooling) si `add_global=True`.
 
-    Paramétrisation: G(y) = H(y)^kappa, H = CDF de la GPD.
+    - Entraînement (forward): on applique sqrt à la cible (BA -> sqrt(BA))
+      et on maximise la NLL eGPD sur sqrt(BA), pour y>0.
+    - Inférence (transform): on calcule un quantile conditionnel sur sqrt(BA),
+      puis on LE CARRE pour obtenir une prédiction en BA.
 
-    - add_global=False  -> uniquement des paramètres par cluster:
-        * kappa_raw: (C,), xi_raw: (C,)
+    Paramétrisation:
+      G(y) = H(y)^kappa, où H est la CDF de la GPD(sigma, xi) sur sqrt(BA).
 
-    - add_global=True   -> hiérarchique (global + delta par cluster):
-        * kappa_global, xi_global : scalaires
-        * kappa_delta,  xi_delta  : (C,) déviations par cluster (init 0)
-        * kappa_raw[cluster] = kappa_global + kappa_delta[cluster]
-          xi_raw[cluster]    = xi_global    + xi_delta[cluster]
-
-    Le `forward(...)` prend toujours `cluster_ids: (N,)` (un cluster par sample).
+    Entrées:
+      - areas: (N,) optionnel — facteur multiplicatif d’échelle pour sigma
+      - clusters_ids: (N,) long — sélection de kappa, xi par sample
     """
 
     def __init__(
         self,
-        NC: int,
-        id : int,
+        NC: int,                          # nb de clusters
+        id: int = None,
         kappa_init: float = 0.831,
         xi_init: float = 0.161,
         eps: float = 1e-8,
         reduction: str = "mean",
-        force_positive: bool = False,
-        xi_min: float = 1e-12,
-        G: bool = False,
-        num_classes: int=5,
+        force_positive: bool = False,     # impose kappa>0, xi>0 via softplus
+        xi_min: float = 0.0,              # petit plancher additionnel sur xi si force_positive
+        G: bool = False,         # = G
+        area_exponent: float = 0.5,       # 0.5 pour sqrt(BA)
+        num_classes: int = 5,
     ):
         super().__init__()
         self.n_clusters     = NC
+        self.id             = id
         self.eps            = eps
         self.reduction      = reduction
         self.force_positive = force_positive
         self.xi_min         = xi_min
         self.add_global     = G
-        self.id = id
-        self.num_classes = num_classes
+        self.area_exponent  = area_exponent
+        self.num_classes    = num_classes
+        
+        # stocker la dernière série de clusters_ids vus (facultatif, pour inspection)
+        self.clusters_ids = None
 
         if not G:
             # --- Variante "clusters uniquement" ---
@@ -589,60 +691,247 @@ class EGPDNLLLossClusterIDs(nn.Module):
             self.kappa_delta  = nn.Parameter(torch.zeros(NC))
             self.xi_delta     = nn.Parameter(torch.zeros(NC))
 
-    def _select_raw_params(self, cluster_ids: torch.Tensor):
-        """
-        Retourne (kappa_raw_sel, xi_raw_sel) de taille (N,)
-        selon le mode (clusters only) ou (global + delta).
-        """
+    # ---------- sélecteur de (kappa_raw, xi_raw) par sample ----------
+    def _select_raw_params(self, clusters_ids: torch.Tensor):
         if not self.add_global:
-            kappa_raw_sel = self.kappa_raw[cluster_ids]                 # (N,)
-            xi_raw_sel    = self.xi_raw[cluster_ids]                    # (N,)
+            kappa_raw_sel = self.kappa_raw[clusters_ids]                 # (N,)
+            xi_raw_sel    = self.xi_raw[clusters_ids]                    # (N,)
         else:
-            kappa_raw_sel = self.kappa_global + self.kappa_delta[cluster_ids]  # (N,)
-            xi_raw_sel    = self.xi_global    + self.xi_delta[cluster_ids]     # (N,)
+            kappa_raw_sel = self.kappa_global + self.kappa_delta[clusters_ids]  # (N,)
+            xi_raw_sel    = self.xi_global    + self.xi_delta[clusters_ids]     # (N,)
         return kappa_raw_sel, xi_raw_sel
-    
-    def forward(
-        self,
-        sigma_pos: torch.Tensor,     # (N,) échelle prédite (peut être brute; voir note)
-        y_pos: torch.Tensor,         # (N,) y>0
-        cluster_ids: torch.Tensor,   # (N,) long
-        weight: torch.Tensor = None  # (N,) optionnel
-    ) -> torch.Tensor:
 
-        # Sélectionne kappa, xi "bruts" par sample
-        kappa_raw_sel, xi_raw_sel = self._select_raw_params(cluster_ids.long())
-
-        # Contraintes de positivité (appliquées APRÈS la combinaison global+delta le cas échéant)
+    # ---------- contrainte de positivité (appliquée après sélection) ----------
+    def _positivize(self, kappa_raw_sel: torch.Tensor, xi_raw_sel: torch.Tensor):
         if self.force_positive:
-            kappa = F.softplus(kappa_raw_sel)                # (N,)
-            xi    = F.softplus(xi_raw_sel) + self.xi_min     # (N,)
+            kappa = F.softplus(kappa_raw_sel)                   # >0
+            xi    = F.softplus(xi_raw_sel) + float(self.xi_min) # > xi_min
         else:
             kappa = kappa_raw_sel
             xi    = xi_raw_sel
+        return kappa, xi
 
-        # Échelle (assainissement numérique)
-        sigma = sigma_pos.clamp_min(self.eps)
-        # Si votre réseau ne garantit pas sigma>0, préférez:
-        # sigma = F.softplus(sigma_pos).clamp_min(self.eps)
+    # ---------- inverse-CDF eGPD sur l'échelle sqrt(BA) ----------
+    @torch.no_grad()
+    def _egpd_icdf(self, u: torch.Tensor, sigma: torch.Tensor,
+                   kappa: torch.Tensor, xi: torch.Tensor, eps: float):
+        """
+        Quantile conditionnel eGPD (sur sqrt(BA)) pour u in (0,1):
+          v = u^(1/kappa)
+          xi != 0: y = (sigma/xi) * ((1 - v)^(-xi) - 1)
+          xi -> 0: y = -sigma * log(1 - v)
+        """
+        u = torch.clamp(u, eps, 1.0 - eps)
+        v = u ** (1.0 / torch.clamp(kappa, min=eps))
+        xi_safe = torch.clamp(xi, min=-1e-6, max=1e6)  # protéger xi≈0 et bornes
+        near0 = xi_safe.abs() < 1e-6
 
-        # eGPD (famille 1), y>0
-        z = (1.0 + xi * (y_pos / sigma)).clamp_min(1.0 + 1e-12)
-        log_h = torch.log((1.0 / sigma) * torch.pow(z, -1.0 / xi - 1.0))
-        a = (1.0 - torch.pow(z, -1.0 / xi)).clamp(max=1.0 - 1e-12)
-        log_H = torch.log(a)
+        y_near0 = -sigma * torch.log1p(-v)                                   # xi ~ 0
+        y_xi    = (sigma / xi_safe) * ((1.0 - v).clamp(min=eps) ** (-xi_safe) - 1.0)  # xi != 0
+        y = torch.where(near0, y_near0, y_xi)
+        return y.clamp_min(0.0)  # sur sqrt(BA)
 
-        log_g = torch.log(kappa) + log_h + (kappa - 1.0) * log_H
-        nll = -log_g  # (N,)
+    # ---------- pdf eGPD sur l'échelle sqrt(BA) ----------
+    def _egpd_pdf_sqrt(self, y_sqrt: torch.Tensor, sigma: torch.Tensor,
+                       kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        """
+        Densité conditionnelle g_Y(y) sur l'échelle sqrt(BA).
+        """
+        y_sqrt = torch.clamp(y_sqrt, min=0.0)
+        sigma  = torch.clamp(sigma, min=self.eps)
+        z = 1.0 + xi * (y_sqrt / sigma)
+        z = torch.clamp(z, min=1.0 + 1e-12)
 
+        # H(y) = 1 - z^{-1/xi},  h(y) = (1/sigma) * z^{-1/xi - 1}
+        H = 1.0 - torch.pow(z, -1.0 / xi)
+        H = torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+        h = (1.0 / sigma) * torch.pow(z, (-1.0 / xi) - 1.0)
+
+        g = torch.clamp(kappa, min=self.eps) * h * torch.pow(H, torch.clamp(kappa, min=self.eps) - 1.0)
+        return g
+    
+    # ---------- décodage de sigma (+ offset surface éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, areas=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        if areas is not None:
+            sigma = sigma * torch.clamp(areas, min=self.eps) ** self.area_exponent
+        return sigma
+
+    # ---------- Entraînement : NLL eGPD conditionnelle sur sqrt(BA) ----------
+    def forward(
+        self,
+        inputs: torch.Tensor,     # (...,) sigma_raw (tête réseau échelle)
+        y: torch.Tensor,          # (N,) cible en BA (>=0)
+        clusters_ids: torch.Tensor,# (N,) longs, pour kappa/xi
+        areas: torch.Tensor = None,# (N,) optionnel, offset d'échelle
+        weight: torch.Tensor = None,
+        from_logits: bool = True
+    ) -> torch.Tensor:
+        """
+        Calcule la NLL eGPD sur sqrt(BA) pour les échantillons positifs (y>0),
+        avec (kappa, xi) dépendants du cluster.
+        """
+
+        # sigma conditionnelle (avec offset area éventuel)
+        sigma_raw = inputs[:, 0]
+        sigma = self._decode_sigma(sigma_raw, from_logits, areas)
+
+        # sélectionner et “positiviser” kappa/xi selon les clusters
+        kappa_raw_sel, xi_raw_sel = self._select_raw_params(clusters_ids.long())
+        kappa, xi = self._positivize(kappa_raw_sel, xi_raw_sel)
+
+        # positifs: y>0  (travail sur sqrt(y))
+        pos = (y > 0)
+        y_sqrt = torch.where(pos, torch.sqrt(torch.clamp(y, min=self.eps)), torch.zeros_like(y))
+
+        # z = 1 + xi * y_sqrt / sigma
+        z = 1.0 + xi * (y_sqrt / sigma)
+        z = torch.where(pos, z.clamp_min(1.0 + 1e-12), torch.ones_like(z))
+
+        # log h, H
+        log_h = torch.where(pos, -torch.log(sigma) + (-1.0 / xi - 1.0) * torch.log(z), torch.zeros_like(y))
+        H     = torch.where(pos, 1.0 - torch.pow(z, -1.0 / xi), torch.zeros_like(y))
+        H     = torch.where(pos, H.clamp(max=1.0 - 1e-12), H)
+
+        # log g(y) = log kappa + log h + (kappa - 1) * log H
+        log_g = torch.where(
+            pos,
+            torch.log(torch.clamp(kappa, min=self.eps)) + log_h +
+            (torch.clamp(kappa, min=self.eps) - 1.0) * torch.log(H.clamp_min(self.eps)),
+            torch.zeros_like(y)
+        )
+
+        nll = torch.where(pos, -(log_g), torch.zeros_like(y))
         if weight is not None:
             nll = nll * weight
 
         if self.reduction == "mean":
             return nll.mean()
-        elif self.reduction == "sum":
+        if self.reduction == "sum":
             return nll.sum()
         return nll
+
+    # ---------- Plot PDF par cluster (sqrt et BA) ----------
+    @torch.no_grad()
+    def _plot_one_cluster_pdfs(self, sigmas_c: torch.Tensor, kappa_c: torch.Tensor, xi_c: torch.Tensor,
+                               dir_output, cname: str, num_points: int = 1000):
+        """
+        Trace les densités pour un cluster donné (liste de sigmas observées).
+        Sauvegarde deux figures: sqrt(BA) et BA, suffixées par le nom du cluster.
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        # choisir des sigmas représentatives (min/med/max)
+        sig = sigmas_c.flatten()
+        if sig.numel() == 0:
+            return
+        sig_sorted, _ = torch.sort(sig)
+        idxs = torch.linspace(0, sig_sorted.numel()-1, steps=min(3, sig_sorted.numel())).round().long()
+        sig_list = sig_sorted[idxs].tolist()
+
+        # grille en sqrt(BA) basée sur q0.999 de la plus grande sigma
+        s_ref = torch.tensor(max(sig_list), device=sigmas_c.device, dtype=sigmas_c.dtype)
+        y_max = self._egpd_icdf(torch.tensor(0.999, device=sigmas_c.device, dtype=sigmas_c.dtype),
+                                s_ref, kappa_c, xi_c, self.eps).item()
+        y_max = max(y_max, float(s_ref.item()) * 6.0)
+        y_grid = torch.linspace(0.0, y_max, num_points, device=sigmas_c.device, dtype=sigmas_c.dtype)
+
+        # --- PDF sur sqrt(BA)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigmas_c.device, dtype=sigmas_c.dtype)
+            pdf_y = self._egpd_pdf_sqrt(y_grid, s_t, kappa_c, xi_c)
+            plt.plot(y_grid.cpu().numpy(), pdf_y.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("y = sqrt(BA)")
+        plt.ylabel("Conditional PDF g_Y(y)")
+        plt.title(f"eGPD PDF on sqrt(BA) — cluster {cname}  (kappa={float(kappa_c):.3f}, xi={float(xi_c):.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        fname_sqrt = dir_output / f"egpd_pdf_{cname}_sqrt.png"
+        plt.tight_layout(); plt.savefig(fname_sqrt, dpi=200); plt.close()
+
+        # --- PDF transformée sur BA : f_Z(z) = g_Y(sqrt(z)) / (2 sqrt(z))
+        z_max = (y_max ** 2)
+        z_grid = torch.linspace(1e-12, z_max, num_points, device=sigmas_c.device, dtype=sigmas_c.dtype)
+        y_from_z = torch.sqrt(z_grid)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigmas_c.device, dtype=sigmas_c.dtype)
+            g_y = self._egpd_pdf_sqrt(y_from_z, s_t, kappa_c, xi_c)
+            f_z = g_y / (2.0 * torch.clamp(y_from_z, min=1e-12))
+            plt.plot(z_grid.cpu().numpy(), f_z.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("BA"); plt.ylabel("Conditional PDF on BA, f_Z(z)")
+        plt.title(f"Final PDF on BA — cluster {cname}  (kappa={float(kappa_c):.3f}, xi={float(xi_c):.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        fname_ba = dir_output / f"egpd_pdf_{cname}_ba.png"
+        plt.tight_layout(); plt.savefig(fname_ba, dpi=200); plt.close()
+
+    @torch.no_grad()
+    def plot_final_pdf(self, sigma: torch.Tensor, clusters_ids: torch.Tensor, dir_output,
+                       num_points: int = 1000, cluster_names=None):
+        """
+        Trace les PDF **par cluster** (sqrt et BA).
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        clusters_ids = clusters_ids.long()
+        C = self.n_clusters
+        # reconstruire kappa/xi par cluster (après positivisation)
+        if not self.add_global:
+            kappa_full = self.kappa_raw
+            xi_full    = self.xi_raw
+        else:
+            kappa_full = self.kappa_global + self.kappa_delta
+            xi_full    = self.xi_global    + self.xi_delta
+
+        if self.force_positive:
+            kappa_full = F.softplus(kappa_full)
+            xi_full    = F.softplus(xi_full) + float(self.xi_min)
+
+        for c in range(C):
+            mask = (clusters_ids == c)
+            if mask.any():
+                sig_c = sigma[mask]
+                self._plot_one_cluster_pdfs(
+                    sig_c,
+                    kappa_full[c],
+                    xi_full[c],
+                    dir_output,
+                    cname=f"cl{c}" if cluster_names is None else str(cluster_names[c]),
+                    num_points=num_points
+                )
+                
+    # ---------- Inférence : quantile conditionnel puis retour en BA ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, clusters_ids: torch.Tensor, areas: torch.Tensor = None,
+                  dir_output=None, from_logits: bool = True, u: float = 0.5, plot: bool = False,
+                  cluster_names=None):
+        """
+        Retourne une PRÉDICTION EN BA:
+          - calcule le quantile conditionnel u sur sqrt(BA) avec (kappa,xi) selon le cluster,
+          - BA_pred = (quantile_sqrt)^2.
+
+        Si plot=True (ou si dir_output non None), trace et sauvegarde les PDF par cluster.
+        """
+        sigma_raw = inputs[:, 0]
+        sigma = self._decode_sigma(sigma_raw, from_logits, areas)
+
+        # sélectionner kappa/xi par sample
+        kappa_raw_sel, xi_raw_sel = self._select_raw_params(clusters_ids.long())
+        kappa, xi = self._positivize(kappa_raw_sel, xi_raw_sel)
+
+        if not torch.is_tensor(u):
+            u = torch.tensor(u, dtype=sigma.dtype, device=sigma.device)
+
+        y_sqrt_q = self._egpd_icdf(u, sigma, kappa, xi, self.eps)  # quantile sur sqrt(BA)
+        ba_pred = y_sqrt_q ** 2
+
+        if dir_output is not None or plot:
+            self.plot_final_pdf(sigma, clusters_ids, dir_output, cluster_names=cluster_names)
+
+        return ba_pred
 
     # ---------- Utilitaires d'inspection ----------
     def get_learnable_parameters(self):
@@ -669,7 +958,6 @@ class EGPDNLLLossClusterIDs(nn.Module):
                     ('xi',    self.xi_raw.detach()),
                 ]
         else:
-            # Reconstruire les valeurs par cluster pour inspection
             kappa_raw_full = self.kappa_global + self.kappa_delta
             xi_raw_full    = self.xi_global    + self.xi_delta
             if self.force_positive:
@@ -693,16 +981,15 @@ class EGPDNLLLossClusterIDs(nn.Module):
         À ajouter à la perte totale : total = nll + loss_fn.shrinkage_penalty(lambda_l2)
         """
         if not self.add_global:
-            device = self.kappa_raw.device
+            device = (self.kappa_raw if hasattr(self, "kappa_raw") else self.kappa_global).device
             return torch.zeros((), device=device)
         return lambda_l2 * (self.kappa_delta.pow(2).sum() + self.xi_delta.pow(2).sum())
 
-    # ---------- Plot: un fichier PNG par cluster ----------
+    # ---------- Plot: un fichier PNG par cluster + (optionnel) global au fil des epochs ----------
     def plot_params(self, egpd_logs, dir_output, cluster_names=None, dpi=120):
         """
-        Sauvegarde et trace les paramètres EGPD au fil des epochs.
-        - add_global=False : un fichier PNG par cluster (kappa, xi).
-        - add_global=True  : idem + un fichier 'global' montrant kappa_global et xi_global.
+        Sauvegarde et trace les paramètres EGPD au fil des epochs, **par cluster**.
+        Si add_global=True, trace aussi les paramètres globaux.
         """
         dir_output = Path(dir_output)
         dir_output.mkdir(parents=True, exist_ok=True)
@@ -752,7 +1039,6 @@ class EGPDNLLLossClusterIDs(nn.Module):
             name = cluster_names[c] if cluster_names is not None else f"cl{c}"
             slug = _slug(name)
 
-            import matplotlib.pyplot as plt
             plt.figure(figsize=(8, 5))
             plt.plot(epochs, K[:, c], marker='o', label=r'$\kappa$')
             plt.plot(epochs, X[:, c], marker='s', label=r'$\xi$')
@@ -765,12 +1051,11 @@ class EGPDNLLLossClusterIDs(nn.Module):
             plt.savefig(Path(dir_output) / f'egpd_params_{slug}.png', dpi=dpi)
             plt.close()
 
-        # --- Cas global ---
+        # --- Courbes globales (si add_global=True) ---
         if self.add_global:
             kappa_global = np.asarray([to_np_vec(k) for k in kappa_global])
             xi_global    = np.asarray([to_np_vec(x) for x in xi_global])
 
-            import matplotlib.pyplot as plt
             plt.figure(figsize=(8, 5))
             plt.plot(epochs, kappa_global, marker='o', label=r'$\kappa_{global}$')
             plt.plot(epochs, xi_global,    marker='s', label=r'$\xi_{global}$')
@@ -783,16 +1068,2825 @@ class EGPDNLLLossClusterIDs(nn.Module):
             plt.savefig(Path(dir_output) / f'egpd_params_global.png', dpi=dpi)
             plt.close()
 
-import math
-from pathlib import Path
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
+class dEGPDLossTrunc(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) truncated to {0,..., y_max}.
+    - Forward: NLL on truncated PMF.
+    - Transform: returns a discrete y selected by a PMF threshold (p_thresh) with tie policy.
+    PMF (truncated):
+        p_trunc(y) = [F_+(y+1) - F_+(y)] / F_+(y_max+1),  for y in {0,...,y_max}
+    """
 
-# On suppose disponible:
-# cdf_egpd_family1(u, sigma_tail, xi, kappa, eps=1e-12) -> Tensor in [0,1]
+    def __init__(self,
+                 kappa: float = 0.8,
+                 xi: float = 0.15,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = False,
+                 y_max: int = 4):
+        super().__init__()
+        self.kappa = nn.Parameter(torch.tensor(kappa), requires_grad=True)
+        self.xi    = nn.Parameter(torch.tensor(xi),    requires_grad=True)
+        self.eps = eps
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.y_max = int(y_max)
+
+    # ---------- contraintes de positivité sur (kappa, xi) ----------
+    def _pos_params(self):
+        if self.force_positive:
+            return F.softplus(self.kappa), F.softplus(self.xi)
+        return self.kappa, self.xi
+
+    # ---------- décodage de sigma (+ offset éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, area=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        # pas d'offset ici (comptes), gardé pour compat API
+        return sigma
+
+    # ---------- CDF GPD H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- PMF brute: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # normalisation: F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)  # clamp sup
+
+    # ---------- NLL TRONQUÉE ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._pos_params()
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- Trouver y tel que PMF(y) >= p_thresh (min/max/all) ----------
+    @torch.no_grad()
+    def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                      p_thresh, pick):
+        """
+        Retourne:
+          - si sigma scalaire: int y
+          - si sigma batch:    tensor (N,) de y
+        Politique si aucun y ne vérifie PMF>=p_thresh : repli sur argmax PMF.
+        """
+        if isinstance(p_thresh, torch.Tensor):
+            assert torch.all(p_thresh >= 0.0) and torch.all(p_thresh <= 1.0), "p_thresh must be in (0,1)"
+        else:
+            assert p_thresh >=0 and p_thresh <= 1.0, "p_thresh must be in (0,1)"
+            
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            mask = (pmf >= p_thresh)
+            if not mask.any():
+                return int(torch.argmax(pmf).item())
+            idxs = torch.nonzero(mask, as_tuple=False).flatten()
+            return int((idxs.min() if pick == "min" else idxs.max()).item())
+
+        # batch
+        pmf = self._pmf_trunc(y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+                              sigma.unsqueeze(-1), kappa, xi)  # (N, y_max+1)
+        
+        if isinstance(p_thresh, torch.Tensor):
+            mask = (pmf >= p_thresh.view(-1,1))
+        else:
+            mask = (pmf >= p_thresh)
+        y_index = torch.arange(self.y_max + 1, device=sigma.device).unsqueeze(0).expand_as(pmf)
+
+        if pick == "min":
+            large = torch.full_like(y_index, self.y_max + 1)
+            cand = torch.where(mask, y_index, large)
+            y_hat = cand.min(dim=1).values.clamp_max(self.y_max)
+        else:  # "max"
+            neg = torch.full_like(y_index, -1)
+            cand = torch.where(mask, y_index, neg)
+            y_hat = cand.max(dim=1).values.clamp_min(0)
+
+        # repli pour les lignes sans True
+        no_hit = ~mask.any(dim=1)
+        if no_hit.any():
+            fallback = pmf.argmax(dim=1)
+            y_hat[no_hit] = fallback[no_hit]
+        return y_hat
+
+    # ---------- Transform: sélection par seuil de PMF + tracés optionnels ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output,  p_thresh,
+                  from_logits: bool = True,
+                  pick: str = "max"):
+        """
+        Retourne un y discret dans {0,...,y_max} tel que PMF(y) >= p_thresh,
+        avec tie-breaking contrôlé par `pick`:
+          - "min": plus petit y satisfaisant le seuil,
+          - "max": plus grand y satisfaisant le seuil.
+        Repli: argmax PMF si aucun y ne dépasse le seuil.
+        Si dir_output n'est pas None, trace PMF/CDF/PPF via plot_final().
+        """
+        
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        
+        if isinstance(p_thresh, dict):
+            p_thresh = torch.sigmoid(p_thresh['a'] + sigma * p_thresh['b'])
+            
+        kappa, xi = self._pos_params()
+
+        y_hat = self._y_where_p_ge(sigma, kappa, xi, p_thresh=p_thresh, pick=pick)
+        
+        if dir_output is not None:
+            self.plot_final(sigma, dir_output, which_sigmas='mean')
+            self.plot_final(sigma, dir_output, which_sigmas='max')
+            
+        return y_hat
+    
+     # ---------- Accès params ----------
+    def get_learnable_parameters(self):
+        return {"kappa": self.kappa, "xi": self.xi}
+
+    def get_attribute(self):
+        if self.force_positive:
+            return [('kappa', F.softplus(self.kappa)), ('xi', F.softplus(self.xi))]
+        else:
+            return [('kappa', self.kappa), ('xi', self.xi)]
+
+    # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, dir_output,
+                   which_sigmas='max'):
+        
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+        kappa, xi = self._pos_params()
+
+        sig = sigma.detach().flatten()
+        if sig.numel() == 0:
+            return
+        sig_sorted, _ = torch.sort(sig)
+        
+        if which_sigmas == 'mean':
+            sig_list = [sig_sorted.mean().item()]
+        elif which_sigmas == 'max':
+            sig_list = [sig_sorted.max().item()]
+        else:
+            idxs = torch.linspace(0, sig_sorted.numel()-1,
+                                  steps=min(which_sigmas, sig_sorted.numel())).round().long()
+            sig_list = sig_sorted[idxs].tolist()
+            
+        # 1) PMF tronquée
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, kappa, xi)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                   s_t, kappa, xi)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title(f"deGPD truncated PMF  (kappa={float(kappa):.3f}, xi={float(xi):.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_pmf = dir_output / f"degpd_trunc_pmf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_pmf, dpi=200); plt.close()
+
+        # 2) CDF tronquée
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, kappa, xi)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                 s_t, kappa, xi)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post", label=f"sigma={float(s):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title(f"deGPD truncated CDF  (kappa={float(kappa):.3f}, xi={float(xi):.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_cdf = dir_output / f"degpd_trunc_cdf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_cdf, dpi=200); plt.close()
+
+        # 3) PPF discrète via balayage de u ∈ (0,1) -> y(u)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                  s_t, kappa, xi)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, kappa, xi)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y on {{0,...,{self.y_max}}})")
+        plt.title(f"deGPD truncated PPF  (kappa={float(kappa):.3f}, xi={float(xi):.3f})")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_ppf = dir_output / f"degpd_trunc_ppf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_ppf, dpi=200); plt.close()
+        
+    def calibrate(self,
+                    inputs: torch.Tensor,
+                    y_true : torch.Tensor,
+                    score_fn,               # callable: preds -> float
+                    dir_output,
+                    log_sigma: bool = False,
+                    from_logtis : bool = True,
+                    a_grid=None,
+                    b_grid=None,
+                    plot: bool = True):
+        """
+        Calibre u(x) = sigmoid(a + b * phi(sigma)) en maximisant `score_fn`.
+        - `sigma`: tensor (N,) ou (N,1), déjà sur l'échelle d'échelle (pas de logits).
+        - `score_fn(preds) -> float`: calcule le score final à maximiser à partir des
+        prédictions discrètes (par ex. classes après transform avec quantile u).
+        NOTE: `score_fn` doit capturer la vérité terrain (closure) si nécessaire.
+        - `dir_output`: dossier où sauvegarder la figure (si plot=True).
+        - `areas`: offset éventuel passé à `transform` (exposition) ; None pour ignorer.
+        - `log_sigma`: si True, phi(sigma) = log(sigma), sinon phi(sigma)=sigma.
+        - `a_grid`, `b_grid`: grilles de recherche (torch.Tensor ou list). Par défaut, on crée
+        une grille raisonnable.
+        - `plot`: si True, trace u vs sigma et sauvegarde un PNG.
+
+        """
+        
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logtis, None)
+
+        with torch.no_grad():
+            s = sigma.detach().flatten()
+            # feature phi(sigma)
+            x = torch.log(torch.clamp(s, min=self.eps)) if log_sigma else s
+
+            # grilles par défaut (couvrent large, dont la zone "extrêmes")
+            if a_grid is None:
+                a_grid = torch.linspace(-6.0, 6.0, 25, device=s.device, dtype=s.dtype)
+            else:
+                a_grid = torch.as_tensor(a_grid, device=s.device, dtype=s.dtype)
+            if b_grid is None:
+                # on teste pentes positives & négatives
+                b_grid = torch.cat([
+                    torch.linspace(-8.0, -0.25, 16, device=s.device, dtype=s.dtype),
+                    torch.linspace( 0.25,  8.0, 16, device=s.device, dtype=s.dtype)
+                ])
+            else:
+                b_grid = torch.as_tensor(b_grid, device=s.device, dtype=s.dtype)
+
+            calibration = {"a": None, "b": None, "calibration_score": -float("inf"),
+                    "u_calibration": None, "preds": None}
+
+            # recherche sur grille (robuste et simple)
+            for a in a_grid:
+                for b in b_grid:
+                    u_vec = torch.sigmoid(a + b * x)              # (N,)
+                    # prédictions discrètes via quantile tronqué
+                    
+                    preds = self.transform(
+                        inputs=s,               # on passe sigma "déjà décodé"
+                        dir_output=None,
+                        from_logits=False,      # IMPORTANT
+                        p_thresh=u_vec,                # vecteur par échantillon
+                    )
+                                        
+                    score = float(score_fn(y_true, preds))
+                    if score > calibration["calibration_score"]:
+                        calibration.update(a=float(a.item()),
+                                    b=float(b.item()),
+                                    calibration_score=score,
+                                    u_calibration=u_vec.clone(),
+                                    preds=preds.clone())
+
+            # tracé diagnostique
+            if plot and dir_output is not None:
+                dir_output = Path(dir_output)
+                dir_output.mkdir(parents=True, exist_ok=True)
+
+                # Scatter sigma vs u_calibration + courbe sigmoïde moyenne (sur l'axe x)
+                # On ordonne pour une courbe lisible
+                order = torch.argsort(s)
+                s_ord = s[order].cpu().numpy()
+                x_ord = x[order].cpu().numpy()
+                u_ord = calibration["u_calibration"][order].cpu().numpy()
+                
+                plt.figure(figsize=(7,5))
+                # points
+                plt.scatter(s_ord, u_ord, s=10, alpha=0.5, label="u(sigma) calibrated")
+                # courbe "théorique" sur un axe régulier (pour le visuel)
+                xx = np.linspace(x.min().cpu(), x.max().cpu(), 400)
+                uu = 1.0 / (1.0 + np.exp(-(calibration["a"] + calibration["b"] * xx)))
+                # convertir xx -> axe sigma si log_sigma
+                if log_sigma:
+                    ss = np.exp(xx)
+                else:
+                    ss = xx
+                plt.plot(ss, uu, lw=2, label=f"sigmoid(a + b·phi), a={calibration['a']:.3f}, b={calibration['b']:.3f}")
+                plt.xscale("log" if log_sigma else "linear")
+                plt.xlabel("sigma" + (" (log-scale axis)" if log_sigma else ""))
+                plt.ylabel("u(sigma)")
+                plt.title("Calibrated u(sigma) = sigmoid(a + b·phi(sigma))")
+                plt.grid(True, linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(dir_output / f"calibrated_u_sigmoid_.png", dpi=200)
+                plt.close()
+
+            return calibration
+    
+class PredictdEGPDLossTrunc(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) truncated to {0,..., y_max}.
+    - Forward: NLL on truncated PMF.
+    - Transform: returns a discrete y selected by a PMF threshold (p_thresh) with tie policy.
+    PMF (truncated):
+        p_trunc(y) = [F_+(y+1) - F_+(y)] / F_+(y_max+1),  for y in {0,...,y_max}
+
+    Inputs layout (last dim):
+      - inputs[..., 0] : sigma (raw or decoded depending on from_logits)
+      - inputs[..., 1] : kappa (raw if force_positive, decoded with softplus)
+      - inputs[..., 2] : xi    (raw if force_positive, decoded with softplus)
+    """
+
+    def __init__(self,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = True,
+                 y_max: int = 4):
+        
+        super().__init__()
+        self.eps = eps
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.y_max = int(y_max)
+
+    # ---------- décodage de sigma (+ offset éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, area=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        return sigma
+
+    # ---------- décodage/contrainte sur (kappa, xi) ----------
+    def _decode_kappa_xi(self, kappa_raw: torch.Tensor, xi_raw: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw)
+            xi    = F.softplus(xi_raw)
+        else:
+            kappa = kappa_raw
+            xi    = xi_raw
+        # bornes de sécurité numériques
+        kappa = kappa.clamp_min(self.eps)
+        xi    = xi.clamp(min=-1e6, max=1e6)
+        return kappa, xi
+
+    # ---------- CDF GPD H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- PMF brute: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # normalisation: F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)
+
+    # ---------- NLL TRONQUÉE ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        """
+        inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw  = inputs[..., 0]
+        kappa_raw  = inputs[..., 1]
+        xi_raw     = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- Trouver y tel que PMF(y) >= p_thresh (min/max/all) ----------
+    @torch.no_grad()
+    def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                      p_thresh, pick):
+        """
+        Retourne:
+          - si sigma scalaire: int y
+          - si sigma batch:    tensor (N,) de y
+        Politique si aucun y ne vérifie PMF>=p_thresh : repli sur argmax PMF.
+        """
+        if isinstance(p_thresh, torch.Tensor):
+            assert torch.all(p_thresh >= 0.0) and torch.all(p_thresh <= 1.0), f"p_thresh must be in (0,1) got {p_thresh}"
+        else:
+            assert p_thresh >=0 and p_thresh <= 1.0, "p_thresh must be in (0,1)"
+            
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            mask = (pmf >= p_thresh)
+            if not mask.any():
+                return int(torch.argmax(pmf).item())
+            idxs = torch.nonzero(mask, as_tuple=False).flatten()
+            return int((idxs.min() if pick == "min" else idxs.max()).item())
+
+        # batch
+        pmf = self._pmf_trunc(y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+                              sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1))  # (N, y_max+1)
+        
+        if isinstance(p_thresh, torch.Tensor):
+            mask = (pmf >= p_thresh.view(-1,1))
+        else:
+            mask = (pmf >= p_thresh)
+        y_index = torch.arange(self.y_max + 1, device=sigma.device).unsqueeze(0).expand_as(pmf)
+
+        if pick == "min":
+            large = torch.full_like(y_index, self.y_max + 1)
+            cand = torch.where(mask, y_index, large)
+            y_hat = cand.min(dim=1).values.clamp_max(self.y_max)
+        else:  # "max"
+            neg = torch.full_like(y_index, -1)
+            cand = torch.where(mask, y_index, neg)
+            y_hat = cand.max(dim=1).values.clamp_min(0)
+
+        # repli pour les lignes sans True
+        no_hit = ~mask.any(dim=1)
+        if no_hit.any():
+            fallback = pmf.argmax(dim=1)
+            y_hat[no_hit] = fallback[no_hit]
+        return y_hat
+
+    # ---------- Transform: sélection par seuil de PMF + tracés optionnels ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output, p_thresh,
+                  from_logits: bool = True,
+                  pick: str = "max"):
+        """
+        inputs[...,0]=sigma, inputs[...,1]=kappa, inputs[...,2]=xi
+        Retourne un y discret dans {0,...,y_max} tel que PMF(y) >= p_thresh,
+        avec tie-breaking contrôlé par `pick` ("min"/"max").
+        Repli: argmax PMF si aucun y ne dépasse le seuil.
+        Si dir_output n'est pas None, trace PMF/CDF/PPF via plot_final().
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        if isinstance(p_thresh, dict):
+            # Exemple: p_thresh = {'a': a, 'b': b}
+            # u = sigmoid(a + b * sigma) par défaut (ou log sigma si voulu avant l'appel)
+            p_thresh = torch.sigmoid(p_thresh['a'] + sigma * p_thresh['b'])
+
+        y_hat = self._y_where_p_ge(sigma, kappa, xi, p_thresh=p_thresh, pick=pick)
+        
+        if dir_output is not None:
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='mean')
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='max')
+        return y_hat
+
+    # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                   dir_output, which_sigmas='max'):
+        
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        sig = sigma.detach().flatten()
+        kap = kappa.detach().flatten()
+        xit = xi.detach().flatten()
+        if sig.numel() == 0:
+            return
+
+        if which_sigmas == 'mean':
+            sig_list = [(sig.mean().item(),
+                        kap.mean().item(),
+                        xit.mean().item())]
+
+        elif which_sigmas == 'max':
+            # max selon sigma ET kappa/xi correspondants (même index)
+            idx_max = torch.argmax(sig)          # indice de l'échantillon avec sigma max
+            s_max   = sig[idx_max].item()
+            k_atmax = kap[idx_max].item()
+            xi_atmax= xit[idx_max].item()
+            sig_list = [(s_max, k_atmax, xi_atmax)]
+            
+        # 1) PMF tronquée
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, k_t, x_t)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                   s_t, k_t, x_t)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated PMF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_pmf = dir_output / f"degpd_trunc_pmf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_pmf, dpi=200); plt.close()
+
+        # 2) CDF tronquée
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                 s_t, k_t, x_t)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post",
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated CDF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_cdf = dir_output / f"degpd_trunc_cdf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_cdf, dpi=200); plt.close()
+
+        # 3) PPF discrète via balayage de u ∈ (0,1) -> y(u)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                  s_t, k_t, x_t)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(),
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y on {{0,...,{self.y_max}}})")
+        plt.title("deGPD truncated PPF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_ppf = dir_output / f"degpd_trunc_ppf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_ppf, dpi=200); plt.close()
+        
+    def calibrate(self,
+                  inputs: torch.Tensor,     # (..., 3) : sigma, kappa, xi
+                  y_true : torch.Tensor,
+                  score_fn,               # callable: (y_true, preds) -> float
+                  dir_output,
+                  log_sigma: bool = False,
+                  from_logits : bool = True,
+                  a_grid=None,
+                  b_grid=None,
+                  plot: bool = True):
+        """
+        Calibre u(x) = sigmoid(a + b * phi(sigma)) en maximisant `score_fn`.
+        Ici kappa/xi sont par-échantillon, pris dans `inputs`.
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        # decode
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        with torch.no_grad():
+            s = sigma.detach().flatten()
+            # feature phi(sigma)
+            x = torch.log(torch.clamp(s, min=self.eps)) if log_sigma else s
+
+            # grilles par défaut
+            if a_grid is None:
+                a_grid = torch.linspace(-6.0, 6.0, 25, device=s.device, dtype=s.dtype)
+            else:
+                a_grid = torch.as_tensor(a_grid, device=s.device, dtype=s.dtype)
+            if b_grid is None:
+                b_grid = torch.cat([
+                    torch.linspace(-8.0, -0.25, 16, device=s.device, dtype=s.dtype),
+                    torch.linspace( 0.25,  8.0, 16, device=s.device, dtype=s.dtype)
+                ])
+            else:
+                b_grid = torch.as_tensor(b_grid, device=s.device, dtype=s.dtype)
+
+            calibration = {"a": None, "b": None, "calibration_score": -float("inf"),
+                           "u_calibration": None, "preds": None}
+
+            # pour les appels à transform, on prépare les entrées décodées
+            sigma_dec = s.view(sigma.shape)
+            kappa_dec = kappa.detach()
+            xi_dec    = xi.detach()
+
+            for a in a_grid:
+                for b in b_grid:
+                    u_vec = torch.sigmoid(a + b * x).view_as(sigma_dec)  # (N,) -> shape inputs batch
+
+                    # on passe inputs déjà décodés et from_logits=False
+                    inputs_decoded = torch.stack([sigma_dec, kappa_dec, xi_dec], dim=-1)
+
+                    preds = self.transform(
+                        inputs=inputs_decoded,
+                        dir_output=None,
+                        from_logits=False,      # IMPORTANT: déjà décodé
+                        p_thresh=u_vec,         # vecteur par échantillon
+                    )
+                                        
+                    score = float(score_fn(y_true, preds))
+                    if score > calibration["calibration_score"]:
+                        calibration.update(a=float(a.item()),
+                                           b=float(b.item()),
+                                           calibration_score=score,
+                                           u_calibration=u_vec.clone(),
+                                           preds=preds.clone())
+
+            # tracé diagnostique
+            if plot and dir_output is not None:
+                dir_output = Path(dir_output)
+                dir_output.mkdir(parents=True, exist_ok=True)
+
+                order = torch.argsort(s)
+                s_ord = s[order].cpu().numpy()
+                x_ord = x[order].cpu().numpy()
+                u_ord = calibration["u_calibration"].detach().flatten()[order].cpu().numpy()
+                
+                plt.figure(figsize=(7,5))
+                plt.scatter(s_ord, u_ord, s=10, alpha=0.5, label="u(sigma) calibrated")
+                xx = np.linspace(x.min().cpu(), x.max().cpu(), 400)
+                uu = 1.0 / (1.0 + np.exp(-(calibration["a"] + calibration["b"] * xx)))
+                # convertir xx -> axe sigma si log_sigma
+                if log_sigma:
+                    ss = np.exp(xx)
+                else:
+                    ss = xx
+                plt.plot(ss, uu, lw=2, label=f"sigmoid(a + b·phi), a={calibration['a']:.3f}, b={calibration['b']:.3f}")
+                plt.xscale("log" if log_sigma else "linear")
+                plt.xlabel("sigma" + (" (log-scale axis)" if log_sigma else ""))
+                plt.ylabel("u(sigma)")
+                plt.title("Calibrated u(sigma) = sigmoid(a + b·phi(sigma))")
+                plt.grid(True, linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(dir_output / f"calibrated_u_sigmoid_.png", dpi=200)
+                plt.close()
+                
+            return calibration
+        
+class PredictdEGPDLossTruncMostProbable(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) truncated to {0,..., y_max}.
+    - Forward: NLL on truncated PMF.
+    - Transform: returns a discrete y selected by a PMF threshold (p_thresh) with tie policy.
+    PMF (truncated):
+        p_trunc(y) = [F_+(y+1) - F_+(y)] / F_+(y_max+1),  for y in {0,...,y_max}
+
+    Inputs layout (last dim):
+      - inputs[..., 0] : sigma (raw or decoded depending on from_logits)
+      - inputs[..., 1] : kappa (raw if force_positive, decoded with softplus)
+      - inputs[..., 2] : xi    (raw if force_positive, decoded with softplus)
+    """
+
+    def __init__(self,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = True,
+                 y_max: int = 4):
+        
+        super().__init__()
+        self.eps = eps
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.y_max = int(y_max)
+
+    # ---------- décodage de sigma (+ offset éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, area=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        return sigma
+
+    # ---------- décodage/contrainte sur (kappa, xi) ----------
+    def _decode_kappa_xi(self, kappa_raw: torch.Tensor, xi_raw: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw)
+            xi    = F.softplus(xi_raw)
+        else:
+            kappa = kappa_raw
+            xi    = xi_raw
+        # bornes de sécurité numériques
+        kappa = kappa.clamp_min(self.eps)
+        xi    = xi.clamp(self.eps)
+        return kappa, xi
+
+    # ---------- CDF GPD H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- PMF brute: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # normalisation: F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)
+
+    # ---------- NLL TRONQUÉE ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        """
+        inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw  = inputs[..., 0]
+        kappa_raw  = inputs[..., 1]
+        xi_raw     = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+        
+        #print('s', torch.unique(sigma))
+        #print('k', torch.unique(kappa))
+        #print('xi', torch.unique(xi))
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- Trouver y le plus probable : argmax PMF ----------
+    @torch.no_grad()
+    def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor):
+        """
+        Retourne :
+        - si sigma scalaire : int y (classe avec PMF maximale)
+        - si sigma batch    : tensor (N,) de y
+        """
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            return int(pmf.argmax().item())
+
+        # batch
+        pmf = self._pmf_trunc(
+            y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+            sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1)
+        )  # (N, y_max+1)
+
+        y_hat = pmf.argmax(dim=1)
+        return y_hat
+
+    @torch.no_grad()
+    def _y(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor):
+        """
+        Retourne :
+        - si sigma scalaire : int y (classe avec PMF maximale)
+        - si sigma batch    : tensor (N,) de y
+        """
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            return int(pmf.argmax().item())
+
+        # batch
+        pmf = self._pmf_trunc(
+            y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+            sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1)
+        )  # (N, y_max+1)
+        return pmf
+
+    # ---------- Transform: sélection par seuil de PMF + tracés optionnels ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output, prediction_type,
+                  from_logits: bool = True):
+        """
+        inputs[...,0]=sigma, inputs[...,1]=kappa, inputs[...,2]=xi
+        Retourne un y discret dans {0,...,y_max} tel que PMF(y) >= p_thresh,
+        avec tie-breaking contrôlé par `pick` ("min"/"max").
+        Repli: argmax PMF si aucun y ne dépasse le seuil.
+        Si dir_output n'est pas None, trace PMF/CDF/PPF via plot_final().
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        if prediction_type == 'Class':
+            y_hat = self._y_where_p_ge(sigma, kappa, xi)
+        else:
+            y_hat = self._y(sigma, kappa, xi)
+            
+        if dir_output is not None:
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='mean')
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='max')
+        return y_hat
+
+    # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                   dir_output, which_sigmas='max'):
+        
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        sig = sigma.detach().flatten()
+        kap = kappa.detach().flatten()
+        xit = xi.detach().flatten()
+        if sig.numel() == 0:
+            return
+
+        if which_sigmas == 'mean':
+            sig_list = [(sig.mean().item(),
+                        kap.mean().item(),
+                        xit.mean().item())]
+
+        elif which_sigmas == 'max':
+            # max selon sigma ET kappa/xi correspondants (même index)
+            idx_max = torch.argmax(sig)          # indice de l'échantillon avec sigma max
+            s_max   = sig[idx_max].item()
+            k_atmax = kap[idx_max].item()
+            xi_atmax= xit[idx_max].item()
+            sig_list = [(s_max, k_atmax, xi_atmax)]
+            
+        # 1) PMF tronquée
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, k_t, x_t)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                   s_t, k_t, x_t)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated PMF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_pmf = dir_output / f"degpd_trunc_pmf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_pmf, dpi=200); plt.close()
+
+        # 2) CDF tronquée
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                 s_t, k_t, x_t)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post",
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated CDF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_cdf = dir_output / f"degpd_trunc_cdf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_cdf, dpi=200); plt.close()
+
+        # 3) PPF discrète via balayage de u ∈ (0,1) -> y(u)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                  s_t, k_t, x_t)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(),
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y on {{0,...,{self.y_max}}})")
+        plt.title("deGPD truncated PPF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_ppf = dir_output / f"degpd_trunc_ppf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_ppf, dpi=200); plt.close()
+        
+class PredictdBulkTailEGPD(nn.Module):
+    """
+    Bulk + Tail discret:
+      - Bulk: Normal (mu, sigma_b) discrétisée par différence de CDF (Phi(y+1)-Phi(y))
+              et tronquée sur {0,...,tau}.
+      - Tail: eGPD (sigma_t, kappa, xi) sur les excès (y - tau), discrétisée
+              via F_+(e+1) - F_+(e) et tronquée sur {tau+1,...,y_max}.
+      - Mélange: p(y) = (1-rho)*p_bulk(y)  si y <= tau
+                 p(y) = rho     *p_tail(y)  si y >= tau+1
+    Entrées (dernière dimension):
+      inputs[..., 0] : sigma_t (tail)   (raw si from_logits, sinon déjà décodé)
+      inputs[..., 1] : kappa    (tail)  (raw si force_positive)
+      inputs[..., 2] : xi       (tail)  (raw si force_positive)
+      inputs[..., 3] : mu_b     (bulk Normal, réel)
+      inputs[..., 4] : sigma_b  (bulk Normal, >0 ; raw si from_logits)
+      inputs[..., 5] : rho      (poids tail, dans (0,1) via sigmoid si from_logits)
+
+    Args:
+      tau (int): seuil séparant bulk (<= tau) et tail (>= tau+1).
+      y_max (int): support max du compte discret.
+      force_positive (bool): applique softplus à (kappa, xi) si True.
+      reduction: "mean" | "sum" | "none"
+      eps: petite constante de stabilité.
+    """
+    def __init__(self,
+                 tau: int = 5,
+                 y_max: int = 50,
+                 force_positive: bool = True,
+                 reduction: str = "mean",
+                 eps: float = 1e-8):
+        super().__init__()
+        assert 0 <= tau < y_max, "Exiger 0 <= tau < y_max"
+        self.tau = int(tau)
+        self.y_max = int(y_max)
+        self.force_positive = force_positive
+        self.reduction = reduction
+        self.eps = eps
+
+    # ---------- décodages ----------
+    def _decode_pos(self, t: torch.Tensor, from_logits: bool):
+        t = F.softplus(t) if from_logits else t
+        return t.clamp_min(self.eps)
+
+    def _decode_tail_params(self, kappa_raw: torch.Tensor, xi_raw: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw)
+            xi    = F.softplus(xi_raw)
+        else:
+            kappa = kappa_raw
+            xi    = xi_raw
+        return kappa.clamp_min(self.eps), xi.clamp_min(self.eps)
+
+    def _decode_rho(self, rho_raw: torch.Tensor, from_logits: bool):
+        if from_logits:
+            rho = torch.sigmoid(rho_raw)
+        else:
+            rho = rho_raw
+        # Serrer dans (eps, 1-eps) pour éviter masses nulles
+        return rho.clamp(self.eps, 1.0 - self.eps)
+
+    # ---------- Normal standard CDF ----------
+    @staticmethod
+    def _phi(x: torch.Tensor):
+        # CDF de la N(0,1) via erf
+        return 0.5 * (1.0 + torch.erf(x / torch.sqrt(torch.tensor(2.0, device=x.device, dtype=x.dtype))))
+
+    # ---------- PMF bulk: Normal discrétisée et tronquée à {0,...,tau} ----------
+    def _pmf_bulk_trunc(self, y_int: torch.Tensor, mu: torch.Tensor, sig_b: torch.Tensor) -> torch.Tensor:
+        # PMF(y) = Phi((y+1-mu)/sig_b) - Phi((y-mu)/sig_b), renormalisée sur [0, tau]
+        y = y_int.to(dtype=mu.dtype)
+
+        # Z_b = Phi((tau+1 - mu)/sig_b) - Phi((0 - mu)/sig_b)
+        z_hi = (self.tau + 1 - mu) / sig_b
+        z_lo = (0.0 - mu) / sig_b
+        Zb = (self._phi(z_hi) - self._phi(z_lo)).clamp_min(self.eps)
+
+        z1 = (y + 1 - mu) / sig_b
+        z0 = (y - mu) / sig_b
+        p_raw = (self._phi(z1) - self._phi(z0)).clamp_min(self.eps)
+
+        p = p_raw / Zb
+        # Mettre à 0 hors support bulk
+        mask = (y_int <= self.tau).to(p.dtype)
+        return (p * mask).clamp_min(self.eps)
+
+    # ---------- CDF GPD ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = xi.clamp(min=-1e6, max=1e6)
+        near0 = xi_safe.abs() < 1e-6
+        z = (1.0 + xi_safe * (y / sigma)).clamp_min(self.eps)
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)
+        H_0  = 1.0 - torch.exp(-y / sigma)
+        H = torch.where(near0, H_0, H_xi)
+        return H.clamp(self.eps, 1.0 - 1e-12)
+
+    # ---------- eGPD CDF: H^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = kappa.clamp_min(self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return Fp.clamp(self.eps, 1.0 - 1e-12)
+
+    # ---------- PMF tail: eGPD sur excès e=y-(tau+1)+1 with support {tau+1,...,y_max} ----------
+    def _pmf_tail_trunc(self, y_int: torch.Tensor, sigma_t: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        # Excès e = y - (tau+1)  (donc e ∈ {0,..., y_max-(tau+1)})
+        e = (y_int - (self.tau + 1)).to(dtype=sigma_t.dtype)
+        e = torch.clamp(e, min=0.0)
+
+        # p_raw_tail(y) = F_+(e+1) - F_+(e)
+        F_e   = self._egpd_cdf(e,   sigma_t, kappa, xi)
+        F_ep1 = self._egpd_cdf(e+1, sigma_t, kappa, xi)
+        p_raw = (F_ep1 - F_e).clamp_min(self.eps)
+        
+        # Normalisation sur {tau+1,...,y_max}  <=>  e ∈ {0,..., y_max-(tau+1)}
+        Emax = self._egpd_cdf(torch.tensor(self.y_max - (self.tau + 1) + 1,
+                                           dtype=sigma_t.dtype, device=sigma_t.device),
+                              sigma_t, kappa, xi).clamp_min(self.eps)
+        p = p_raw / Emax
+
+        # Mettre à 0 hors support tail
+        mask = (y_int >= self.tau + 1).to(p.dtype)
+        return (p * mask).clamp_min(self.eps)
+
+    # ---------- PMF totale ----------
+    def _pmf_mixture(self, y_int: torch.Tensor,
+                     sigma_t: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                     mu_b: torch.Tensor, sigma_b: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
+        p_b = self._pmf_bulk_trunc(y_int, mu_b, sigma_b)       # support <= tau
+        p_t = self._pmf_tail_trunc(y_int, sigma_t, kappa, xi)  # support >= tau+1
+        # Mélange
+        return ((1.0 - rho) * p_b + rho * p_t).clamp_min(self.eps)
+
+    # ---------- NLL ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        if inputs.size(-1) < 6:
+            raise ValueError("inputs must have 6 channels: [sigma_t, kappa, xi, mu_b, sigma_b, rho]")
+
+        sigma_t_raw = inputs[..., 0]
+        kappa_raw   = inputs[..., 1]
+        xi_raw      = inputs[..., 2]
+        mu_b        = inputs[..., 3]
+        sigma_b_raw = inputs[..., 4]
+        rho_raw     = inputs[..., 5]
+
+        sigma_t = self._decode_pos(sigma_t_raw, from_logits)
+        kappa, xi = self._decode_tail_params(kappa_raw, xi_raw)
+        sigma_b = self._decode_pos(sigma_b_raw, from_logits)
+        rho = self._decode_rho(rho_raw, from_logits)
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p = self._pmf_mixture(y_int, sigma_t, kappa, xi, mu_b, sigma_b, rho)
+
+        nll = -torch.log(p.clamp_min(self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        elif self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- Argmax PMF / PMF row ----------
+    @torch.no_grad()
+    def _y_argmax(self, sigma_t, kappa, xi, mu_b, sigma_b, rho):
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma_t.device)
+
+        if sigma_t.ndim == 0:
+            pmf = self._pmf_mixture(y_vals, sigma_t, kappa, xi, mu_b, sigma_b, rho)
+            return int(pmf.argmax().item())
+
+        pmf = self._pmf_mixture(
+            y_vals.unsqueeze(0).expand(sigma_t.shape[0], -1),
+            sigma_t.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1),
+            mu_b.unsqueeze(-1), sigma_b.unsqueeze(-1), rho.unsqueeze(-1)
+        )
+        return pmf.argmax(dim=1)
+
+    @torch.no_grad()
+    def _pmf_row(self, sigma_t, kappa, xi, mu_b, sigma_b, rho):
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma_t.device)
+
+        if sigma_t.ndim == 0:
+            return self._pmf_mixture(y_vals, sigma_t, kappa, xi, mu_b, sigma_b, rho)
+
+        return self._pmf_mixture(
+            y_vals.unsqueeze(0).expand(sigma_t.shape[0], -1),
+            sigma_t.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1),
+            mu_b.unsqueeze(-1), sigma_b.unsqueeze(-1), rho.unsqueeze(-1)
+        )
+
+    # ---------- Transform ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output=None, prediction_type='Class',
+                  from_logits: bool = True):
+        if inputs.size(-1) < 6:
+            raise ValueError("inputs must have 6 channels: [sigma_t, kappa, xi, mu_b, sigma_b, rho]")
+
+        sigma_t_raw = inputs[..., 0]
+        kappa_raw   = inputs[..., 1]
+        xi_raw      = inputs[..., 2]
+        mu_b        = inputs[..., 3]
+        sigma_b_raw = inputs[..., 4]
+        rho_raw     = inputs[..., 5]
+
+        sigma_t = self._decode_pos(sigma_t_raw, from_logits)
+        kappa, xi = self._decode_tail_params(kappa_raw, xi_raw)
+        sigma_b = self._decode_pos(sigma_b_raw, from_logits)
+        rho = self._decode_rho(rho_raw, from_logits)
+
+        if prediction_type == 'Class':
+            y_hat = self._y_argmax(sigma_t, kappa, xi, mu_b, sigma_b, rho)
+        else:
+            y_hat = self._pmf_row(sigma_t, kappa, xi, mu_b, sigma_b, rho)
+
+        if dir_output is not None:
+            self.plot_final(sigma_t, kappa, xi, mu_b, sigma_b, rho, dir_output, which='mean')
+            self.plot_final(sigma_t, kappa, xi, mu_b, sigma_b, rho, dir_output, which='max')
+        return y_hat
+
+    # ---------- Plots ----------
+    @torch.no_grad()
+    def plot_final(self, sigma_t, kappa, xi, mu_b, sigma_b, rho, dir_output, which='max'):
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        # Aplatir pour extraire (mean) ou (max sigma_t)
+        st, kp, xw = sigma_t.detach().flatten(), kappa.detach().flatten(), xi.detach().flatten()
+        mu, sb, rh = mu_b.detach().flatten(), sigma_b.detach().flatten(), rho.detach().flatten()
+        if st.numel() == 0:
+            return
+
+        if which == 'mean':
+            params = [(st.mean().item(), kp.mean().item(), xw.mean().item(),
+                       mu.mean().item(), sb.mean().item(), rh.mean().item())]
+        else:
+            idx = torch.argmax(st)
+            params = [(float(st[idx]), float(kp[idx]), float(xw[idx]),
+                       float(mu[idx]), float(sb[idx]), float(rh[idx]))]
+
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma_t.device)
+
+        # PMF totale + composants
+        plt.figure(figsize=(7,5))
+        for s_t, k_t, xi_t, mu_t, s_b, r_t in params:
+            s_t = torch.tensor(s_t, device=sigma_t.device, dtype=sigma_t.dtype)
+            k_t = torch.tensor(k_t, device=sigma_t.device, dtype=sigma_t.dtype)
+            xi_t= torch.tensor(xi_t, device=sigma_t.device, dtype=sigma_t.dtype)
+            mu_t= torch.tensor(mu_t, device=sigma_t.device, dtype=sigma_t.dtype)
+            s_b = torch.tensor(s_b, device=sigma_t.device, dtype=sigma_t.dtype)
+            r_t = torch.tensor(r_t, device=sigma_t.device, dtype=sigma_t.dtype)
+
+            p_b = self._pmf_bulk_trunc(y_vals, mu_t, s_b)
+            p_t = self._pmf_tail_trunc(y_vals, s_t, k_t, xi_t)
+            p   = (1-r_t)*p_b + r_t*p_t
+
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), linefmt='-', markerfmt='o', basefmt=" ", label="Mixture PMF")
+            plt.stem(y_vals.cpu().numpy(), ((1-r_t)*p_b).cpu().numpy(), linefmt='-', markerfmt='x', basefmt=" ", label=f"Bulk (1-rho)")
+            plt.stem(y_vals.cpu().numpy(), (r_t*p_t).cpu().numpy(), linefmt='-', markerfmt='^', basefmt=" ", label=f"Tail (rho)")
+        plt.axvline(self.tau + 0.5, linestyle="--", alpha=0.5, label=f"tau={self.tau}")
+        plt.xlabel("y"); plt.ylabel("PMF")
+        plt.title(f"Bulk (Normal) + Tail (eGPD) on {{0,...,{self.y_max}}}")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_p = Path(dir_output) / f"bulk_tail_degpd_pmf_{which}.png"
+        plt.tight_layout(); plt.savefig(f_p, dpi=200); plt.close()
+        
+class PredictdEGPDLossTrunc2(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) truncated to {0,..., y_max}.
+    - Forward: NLL on truncated PMF.
+    - Transform: returns a discrete y selected by a PMF threshold (p_thresh) with tie policy.
+    PMF (truncated):
+        p_trunc(y) = [F_+(y+1) - F_+(y)] / F_+(y_max+1),  for y in {0,...,y_max}
+
+    Inputs layout (last dim):
+      - inputs[..., 0] : sigma (raw or decoded depending on from_logits)
+      - inputs[..., 1] : kappa (raw if force_positive, decoded with softplus)
+      - inputs[..., 2] : xi    (raw if force_positive, decoded with softplus)
+    """
+
+    def __init__(self,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = True,
+                 y_max: int = 4):
+        
+        super().__init__()
+        self.eps = eps
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.y_max = int(y_max)
+
+    # ---------- décodage de sigma (+ offset éventuel) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, area=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        # pas d'offset ici (comptes), gardé pour compat API
+        return sigma
+
+    # ---------- décodage/contrainte sur (kappa, xi) ----------
+    def _decode_kappa_xi(self, kappa_raw: torch.Tensor, xi_raw: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw)
+            xi    = F.softplus(xi_raw)
+        else:
+            kappa = kappa_raw
+            xi    = xi_raw
+        # bornes de sécurité numériques
+        kappa = kappa.clamp_min(self.eps)
+        xi    = xi.clamp(min=-1e6, max=1e6)
+        return kappa, xi
+
+    # ---------- CDF GPD H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- PMF brute: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # normalisation: F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)
+
+    # ---------- NLL TRONQUÉE ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+        """
+        inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw  = inputs[..., 0]
+        kappa_raw  = inputs[..., 1]
+        xi_raw     = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+
+    # ---------- Trouver y tel que PMF(y) >= p_thresh (min/max/all) ----------
+    @torch.no_grad()
+    def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                      p_thresh, pick):
+        """
+        Retourne:
+          - si sigma scalaire: int y
+          - si sigma batch:    tensor (N,) de y
+        Politique si aucun y ne vérifie PMF>=p_thresh : repli sur argmax PMF.
+        """
+        if isinstance(p_thresh, torch.Tensor):
+            assert torch.all(p_thresh >= 0.0) and torch.all(p_thresh <= 1.0), "p_thresh must be in (0,1)"
+        else:
+            assert p_thresh >=0 and p_thresh <= 1.0, "p_thresh must be in (0,1)"
+            
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            mask = (pmf >= p_thresh)
+            if not mask.any():
+                return int(torch.argmax(pmf).item())
+            idxs = torch.nonzero(mask, as_tuple=False).flatten()
+            return int((idxs.min() if pick == "min" else idxs.max()).item())
+
+        # batch
+        pmf = self._pmf_trunc(y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+                              sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1))  # (N, y_max+1)
+        
+        if isinstance(p_thresh, torch.Tensor):
+            mask = (pmf >= p_thresh.view(-1,1))
+        else:
+            mask = (pmf >= p_thresh)
+        y_index = torch.arange(self.y_max + 1, device=sigma.device).unsqueeze(0).expand_as(pmf)
+
+        if pick == "min":
+            large = torch.full_like(y_index, self.y_max + 1)
+            cand = torch.where(mask, y_index, large)
+            y_hat = cand.min(dim=1).values.clamp_max(self.y_max)
+        else:  # "max"
+            neg = torch.full_like(y_index, -1)
+            cand = torch.where(mask, y_index, neg)
+            y_hat = cand.max(dim=1).values.clamp_min(0)
+
+        # repli pour les lignes sans True
+        no_hit = ~mask.any(dim=1)
+        if no_hit.any():
+            fallback = pmf.argmax(dim=1)
+            y_hat[no_hit] = fallback[no_hit]
+        return y_hat
+
+    # ---------- Transform: sélection par seuil de PMF + tracés optionnels ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output, p_thresh,
+                  from_logits: bool = True,
+                  pick: str = "max"):
+        """
+        inputs[...,0]=sigma, inputs[...,1]=kappa, inputs[...,2]=xi
+        Retourne un y discret dans {0,...,y_max} tel que PMF(y) >= p_thresh,
+        avec tie-breaking contrôlé par `pick` ("min"/"max").
+        Repli: argmax PMF si aucun y ne dépasse le seuil.
+        Si dir_output n'est pas None, trace PMF/CDF/PPF via plot_final().
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        if isinstance(p_thresh, dict):
+            # Exemple: p_thresh = {'a': a, 'b': b}
+            # u = sigmoid(a + b * sigma) par défaut (ou log sigma si voulu avant l'appel)
+            l = p_thresh['a'] + p_thresh['b_s']* sigma + p_thresh['b_k']*kappa + p_thresh['b_x']*xi
+            p_thresh = torch.sigmoid(l)
+
+        y_hat = self._y_where_p_ge(sigma, kappa, xi, p_thresh=p_thresh, pick=pick)
+        
+        if dir_output is not None:
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='mean')
+            self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='max')
+        return y_hat
+
+    # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                   dir_output, which_sigmas='max'):
+        
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        sig = sigma.detach().flatten()
+        kap = kappa.detach().flatten()
+        xit = xi.detach().flatten()
+        if sig.numel() == 0:
+            return
+
+        if which_sigmas == 'mean':
+            sig_list = [(sig.mean().item(),
+                        kap.mean().item(),
+                        xit.mean().item())]
+
+        elif which_sigmas == 'max':
+            # max selon sigma ET kappa/xi correspondants (même index)
+            idx_max = torch.argmax(sig)          # indice de l'échantillon avec sigma max
+            s_max   = sig[idx_max].item()
+            k_atmax = kap[idx_max].item()
+            xi_atmax= xit[idx_max].item()
+            sig_list = [(s_max, k_atmax, xi_atmax)]
+            
+        # 1) PMF tronquée
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, k_t, x_t)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                   s_t, k_t, x_t)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated PMF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_pmf = dir_output / f"degpd_trunc_pmf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_pmf, dpi=200); plt.close()
+
+        # 2) CDF tronquée
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                 s_t, k_t, x_t)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post",
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated CDF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_cdf = dir_output / f"degpd_trunc_cdf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_cdf, dpi=200); plt.close()
+
+        # 3) PPF discrète via balayage de u ∈ (0,1) -> y(u)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                  s_t, k_t, x_t)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(),
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y on {{0,...,{self.y_max}}})")
+        plt.title("deGPD truncated PPF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_ppf = dir_output / f"degpd_trunc_ppf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_ppf, dpi=200); plt.close()
+        
+    def calibrate(self,
+              inputs: torch.Tensor,     # (..., 3) : sigma, kappa, xi (bruts ou logits)
+              y_true : torch.Tensor,
+              score_fn,                 # callable: (y_true, preds) -> float
+              dir_output,
+              log_sigma: bool = False,
+              log_kappa: bool = False,
+              log_xi: bool = False,
+              from_logits : bool = True,
+              a_grid=None,
+              b_grid=None,
+              b_s_grid=None,
+              b_k_grid=None,
+              b_x_grid=None,
+              plot: bool = True):
+        """
+        Calibrates u(x) = sigmoid(a + b_s * phi_s(sigma) + b_k * phi_k(kappa) + b_x * phi_x(xi))
+        by maximizing `score_fn`. (force_positive=True attendu pour kappa, xi).
+        Uses pick="max" through self.transform (fallback = argmax PMF).
+        """
+        from pathlib import Path
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        # --- decode (respecte votre implémentation et force_positive=True) ---
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        eps = float(self.eps)
+
+        with torch.no_grad():
+            # Aplatissement (on garde le shape batch pour transform après)
+            s = sigma.detach().flatten()
+            k = kappa.detach().flatten()
+            x = xi.detach().flatten()
+
+            # Features phi_s / phi_k / phi_x
+            phi_s = torch.log(torch.clamp(s, min=eps)) if log_sigma else s
+            phi_k = torch.log(torch.clamp(k, min=eps)) if log_kappa else k
+            phi_x = torch.log(torch.clamp(x, min=eps)) if log_xi    else x
+
+            # Grilles par défaut
+            if a_grid is None:
+                a_grid = torch.linspace(-6.0, 6.0, 25, device=s.device, dtype=s.dtype)
+            else:
+                a_grid = torch.as_tensor(a_grid, device=s.device, dtype=s.dtype)
+
+            if b_grid is None:
+                b_grid = torch.cat([
+                    torch.linspace(-8.0, -0.25, 16, device=s.device, dtype=s.dtype),
+                    torch.linspace( 0.25,  8.0, 16, device=s.device, dtype=s.dtype)
+                ])
+            else:
+                b_grid = torch.as_tensor(b_grid, device=s.device, dtype=s.dtype)
+
+            # Si grilles spécifiques non fournies, on réutilise b_grid
+            b_s_grid = b_grid if b_s_grid is None else torch.as_tensor(b_s_grid, device=s.device, dtype=s.dtype)
+            b_k_grid = b_grid if b_k_grid is None else torch.as_tensor(b_k_grid, device=s.device, dtype=s.dtype)
+            b_x_grid = b_grid if b_x_grid is None else torch.as_tensor(b_x_grid, device=s.device, dtype=s.dtype)
+
+            calibration = {
+                "a": None, "b_s": None, "b_k": None, "b_x": None,
+                "calibration_score": -float("inf"),
+                "u_calibration": None, "preds": None
+            }
+
+            # Entrées déjà décodées pour transform (on remet en shape d'origine)
+            sigma_dec = s.view(sigma.shape)
+            kappa_dec = kappa.detach()
+            xi_dec    = xi.detach()
+            inputs_decoded = torch.stack([sigma_dec, kappa_dec, xi_dec], dim=-1)
+
+            # Recherche sur (a, b_s, b_k, b_x)
+            for a in a_grid:
+                for b_s in b_s_grid:
+                    for b_k in b_k_grid:
+                        for b_x in b_x_grid:
+                            logit = a + b_s*phi_s + b_k*phi_k + b_x*phi_x
+                            u_vec = torch.sigmoid(logit).clamp(eps, 1.0 - 1e-6).view_as(sigma_dec)
+
+                            preds = self.transform(
+                                inputs=inputs_decoded,
+                                dir_output=None,
+                                from_logits=False,   # IMPORTANT: déjà décodé
+                                p_thresh=u_vec,      # vecteur par échantillon
+                                pick="max"           # politique imposée
+                            )
+
+                            score = float(score_fn(y_true, preds))
+                            if score > calibration["calibration_score"]:
+                                calibration.update(
+                                    a=float(a.item()),
+                                    b_s=float(b_s.item()),
+                                    b_k=float(b_k.item()),
+                                    b_x=float(b_x.item()),
+                                    calibration_score=score,
+                                    u_calibration=u_vec.clone(),
+                                    preds=preds.clone()
+                                )
+
+            # --- Visualisation (optionnelle) ---
+            if plot and dir_output is not None:
+                dir_output = Path(dir_output)
+                dir_output.mkdir(parents=True, exist_ok=True)
+
+                order = torch.argsort(s)  # tri selon sigma pour lisibilité
+                s_ord   = s[order].cpu().numpy()
+                ps_ord  = phi_s[order].cpu().numpy()
+                pk_ord  = phi_k[order].cpu().numpy()
+                px_ord  = phi_x[order].cpu().numpy()
+                u_ord   = calibration["u_calibration"].detach().flatten()[order].cpu().numpy()
+
+                # Courbe u vs. sigma (couleur = phi_k ou phi_x)
+                plt.figure(figsize=(7,5))
+                sc = plt.scatter(s_ord, u_ord, c=pk_ord, s=10, cmap="viridis", alpha=0.6)
+                cbar = plt.colorbar(sc)
+                cbar.set_label("phi_k(kappa)" + (" = log(kappa)" if log_kappa else " = kappa"))
+                # Ligne lisse (a titre indicatif) : on fige kappa/xi à leur médiane
+                a  = calibration["a"]; b_s = calibration["b_s"]; b_k = calibration["b_k"]; b_x = calibration["b_x"]
+                k_med = torch.median(k).item()
+                x_med = torch.median(x).item()
+                fk = (np.log(max(k_med, eps)) if log_kappa else k_med)
+                fx = (np.log(max(x_med, eps)) if log_xi    else x_med)
+                ss = np.linspace(max(float(s.min().cpu()), eps), float(s.max().cpu()), 400)
+                fs = (np.log(np.clip(ss, eps, None)) if log_sigma else ss)
+                uu = 1.0/(1.0 + np.exp(-(a + b_s*fs + b_k*fk + b_x*fx)))
+                plt.plot(ss, uu, lw=2, label=f"u=σ(a+b_s φ_s + b_k φ_k + b_x φ_x)\n"
+                                            f"a={a:.2f}, b_s={b_s:.2f}, b_k={b_k:.2f}, b_x={b_x:.2f}")
+                plt.xscale("log" if log_sigma else "linear")
+                plt.xlabel("sigma" + (" (log-scale axis)" if log_sigma else ""))
+                plt.ylabel("u(sigma,kappa,xi)")
+                plt.title("Calibrated threshold u depending on (sigma, kappa, xi)")
+                plt.grid(True, linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(dir_output / "calibrated_u_sigmoid_sigma_kappa_xi.png", dpi=200)
+                plt.close()
+
+            return calibration
+        
+class PredictdEGPDLossTruncClusterIDs(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) TRUNCATED to {0,..., y_max},
+    with sigma, kappa, xi provided by the model as inputs[..., 0:3].
+    No internal learnable parameters (no global/delta, no per-cluster params).
+
+    - Forward: negative log-likelihood on the TRUNCATED PMF for integer targets in {0,...,y_max}.
+    - Transform: returns a discrete y in {0,...,y_max} using a PMF threshold u (pick="max"/"min"),
+                 or falls back to argmax PMF if no class reaches the threshold.
+    - Optional plotting by cluster for diagnostics (no learnable params involved).
+
+    Inputs layout (last dim):
+      inputs[..., 0] = sigma (raw or decoded depending on from_logits)
+      inputs[..., 1] = kappa (raw if force_positive, decoded with softplus)
+      inputs[..., 2] = xi    (raw if force_positive, decoded with softplus)
+    """
+
+    def __init__(self,
+                 id: int,
+                 num_classes: int = 5,
+                 y_max: int = 4,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = True):
+        super().__init__()
+        self.y_max = int(y_max)
+        self.eps = float(eps)
+        self.reduction = reduction
+        self.force_positive = force_positive
+        self.num_classes = num_classes
+        self.id = id
+        
+    # ---------- décodage de sigma ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, areas: Optional[torch.Tensor] = None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        # pas d'offset d'exposition par défaut (gardé pour compat API)
+        if areas is not None:
+            # si vous souhaitez appliquer un offset d'exposition, adaptez ici
+            sigma = sigma  # noop
+        return sigma
+
+    # ---------- décodage/contrainte sur (kappa, xi) ----------
+    def _decode_kappa_xi(self, kappa_raw: torch.Tensor, xi_raw: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw)
+            xi    = F.softplus(xi_raw)
+        else:
+            kappa = kappa_raw
+            xi    = xi_raw
+        # bornes de sécurité numériques
+        kappa = kappa.clamp_min(self.eps)
+        xi    = xi.clamp(min=-1e6, max=1e6)
+        return kappa, xi
+
+    # ---------- GPD CDF H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- PMF brute: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # normalisation: F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)
+
+    # ---------- NLL TRONQUÉE ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor,
+                weight: Optional[torch.Tensor] = None, from_logits: bool = True) -> torch.Tensor:
+        """
+        inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
+        y: integer targets in {0,...,y_max}
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw  = inputs[..., 0]
+        kappa_raw  = inputs[..., 1]
+        xi_raw     = inputs[..., 2]
+        
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll  # "none": vector
+
+    # ---------- Trouver y tel que PMF(y) >= p_thresh (min/max/all) ----------
+    @torch.no_grad()
+    def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                      p_thresh, pick: str = "max"):
+        """
+        Retourne:
+          - si sigma scalaire: int y
+          - si batch: tensor (N,) de y
+        Politique si aucun y ne vérifie PMF>=p_thresh : repli sur argmax PMF.
+        """
+        if isinstance(p_thresh, torch.Tensor):
+            assert torch.all(p_thresh >= 0.0) and torch.all(p_thresh <= 1.0), "p_thresh must be in (0,1)"
+        else:
+            assert 0.0 <= p_thresh <= 1.0, "p_thresh must be in (0,1)"
+
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+
+        if sigma.ndim == 0:
+            pmf = self._pmf_trunc(y_vals, sigma, kappa, xi)  # (y_max+1,)
+            mask = (pmf >= p_thresh)
+            if not mask.any():
+                return int(torch.argmax(pmf).item())
+            idxs = torch.nonzero(mask, as_tuple=False).flatten()
+            return int((idxs.min() if pick == "min" else idxs.max()).item())
+
+        # batch
+        pmf = self._pmf_trunc(
+            y_vals.unsqueeze(0).expand(sigma.shape[0], -1),
+            sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1)
+        )  # (N, y_max+1)
+        
+        if isinstance(p_thresh, torch.Tensor):
+            mask = (pmf >= p_thresh.view(-1, 1))
+        else:
+            mask = (pmf >= p_thresh)
+        y_index = torch.arange(self.y_max + 1, device=sigma.device).unsqueeze(0).expand_as(pmf)
+
+        if pick == "min":
+            large = torch.full_like(y_index, self.y_max + 1)
+            cand = torch.where(mask, y_index, large)
+            y_hat = cand.min(dim=1).values.clamp_max(self.y_max)
+        else:  # "max"
+            neg = torch.full_like(y_index, -1)
+            cand = torch.where(mask, y_index, neg)
+            y_hat = cand.max(dim=1).values.clamp_min(0)
+
+        # repli pour les lignes sans True
+        no_hit = ~mask.any(dim=1)
+        if no_hit.any():
+            fallback = pmf.argmax(dim=1)
+            y_hat[no_hit] = fallback[no_hit]
+        return y_hat
+
+    # ---------- Transform: sélection par seuil de PMF + tracés optionnels ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, dir_output: Optional[str], clusters_ids, p_thresh,
+                  from_logits: bool = True, pick='max'):
+        """
+        inputs[...,0]=sigma, inputs[...,1]=kappa, inputs[...,2]=xi
+        Retourne un y discret dans {0,...,y_max} tel que PMF(y) >= p_thresh,
+        avec tie-breaking contrôlé par `pick` ("min"/"max").
+        Repli: argmax PMF si aucun y ne dépasse le seuil.
+        Si dir_output n'est pas None, trace PMF/CDF/PPF via plot_final().
+        Optionnel: clusters_ids pour des plots par cluster (diagnostic uniquement).
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        if isinstance(p_thresh, dict):
+            y_hat = torch.zeros_like(sigma, dtype=torch.int32).long()
+            for id in torch.unique(clusters_ids):
+                mask = clusters_ids == id
+                id = id.item()
+                if id in p_thresh.keys():
+                    logit = p_thresh[id]['a'] + p_thresh[id]['b_s']*sigma + p_thresh[id]['b_k']*kappa + p_thresh[id]['b_x']*xi
+                    u = torch.sigmoid(logit)
+                else:
+                    print(f'No {id} in calibration dict, taking median -> to do')
+                    u = 0.1
+
+                y_hat[mask] = self._y_where_p_ge(sigma[mask], u, kappa[mask], xi[mask], pick=pick)
+        else:
+            y_hat = self._y_where_p_ge(sigma, p_thresh, kappa, xi, pick=pick)
+                
+        if dir_output is not None:
+            if clusters_ids is None:
+                self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='mean')
+                self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='max')
+            else:
+                self.plot_final_by_cluster(sigma, kappa, xi, clusters_ids, dir_output)
+        return y_hat
+
+    # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
+    @torch.no_grad()
+    def plot_final(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                   dir_output: str, which_sigmas: str = 'max'):
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        sig = sigma.detach().flatten()
+        kap = kappa.detach().flatten()
+        xit = xi.detach().flatten()
+        if sig.numel() == 0:
+            return
+
+        if which_sigmas == 'mean':
+            sig_list = [(sig.mean().item(), kap.mean().item(), xit.mean().item())]
+        elif which_sigmas == 'max':
+            idx_max = torch.argmax(sig)
+            sig_list = [(sig[idx_max].item(), kap[idx_max].item(), xit[idx_max].item())]
+        else:
+            sig_list = [(sig.mean().item(), kap.mean().item(), xit.mean().item())]
+
+        # 1) PMF tronquée
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, k_t, x_t)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                   s_t, k_t, x_t)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), basefmt=" ",
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated PMF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_pmf = dir_output / f"degpd_trunc_pmf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_pmf, dpi=200); plt.close()
+
+        # 2) CDF tronquée
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                 s_t, k_t, x_t)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post",
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title("deGPD truncated CDF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_cdf = dir_output / f"degpd_trunc_cdf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_cdf, dpi=200); plt.close()
+
+        # 3) PPF discrète via balayage de u ∈ (0,1) -> y(u)
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigma.device)
+        plt.figure(figsize=(7,5))
+        for s, k, x in sig_list:
+            s_t = torch.tensor(s, device=sigma.device, dtype=sigma.dtype)
+            k_t = torch.tensor(k, device=sigma.device, dtype=sigma.dtype)
+            x_t = torch.tensor(x, device=sigma.device, dtype=sigma.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                                  s_t, k_t, x_t)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, k_t, x_t)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(),
+                     label=f"sigma={float(s):.3f}, kappa={float(k):.3f}, xi={float(x):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y on {{0,...,{self.y_max}}})")
+        plt.title("deGPD truncated PPF")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        f_ppf = dir_output / f"degpd_trunc_ppf_{which_sigmas}.png"
+        plt.tight_layout(); plt.savefig(f_ppf, dpi=200); plt.close()
+
+    # ---------- Plots par cluster (diagnostic, aucun paramètre appris) ----------
+    @torch.no_grad()
+    def plot_final_by_cluster(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor,
+                              clusters_ids: torch.Tensor, dir_output: str):
+        """
+        Trace PMF/CDF/PPF par cluster en prenant des sigma représentatifs (mean/max).
+        Purement diagnostique : ne crée aucun paramètre appris.
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        clusters_ids = clusters_ids.long()
+        for c in torch.unique(clusters_ids):
+            mask = (clusters_ids == c)
+            if not mask.any():
+                continue
+            sig_c = sigma[mask]
+            kap_c = kappa[mask]
+            xi_c  = xi[mask]
+
+            # valeurs représentatives (mean/max) pour (sigma, kappa, xi)
+            s_mean = sig_c.mean().item(); s_max = sig_c.max().item()
+            k_mean = kap_c.mean().item(); x_mean = xi_c.mean().item()
+
+            name_c = f"cl{int(c.item())}"
+            (dir_output / name_c).mkdir(parents=True, exist_ok=True)
+
+            # mean
+            self.plot_final(
+                sigma=torch.tensor([s_mean], device=sigma.device, dtype=sigma.dtype),
+                kappa=torch.tensor([k_mean], device=sigma.device, dtype=sigma.dtype),
+                xi=torch.tensor([x_mean], device=sigma.device, dtype=sigma.dtype),
+                dir_output=dir_output / name_c,
+                which_sigmas="mean"
+            )
+            # max sigma (avec kappa/xi moyens pour illustrer)
+            self.plot_final(
+                sigma=torch.tensor([s_max], device=sigma.device, dtype=sigma.dtype),
+                kappa=torch.tensor([k_mean], device=sigma.device, dtype=sigma.dtype),
+                xi=torch.tensor([x_mean], device=sigma.device, dtype=sigma.dtype),
+                dir_output=dir_output / name_c,
+                which_sigmas="max"
+            )
+            
+    @torch.no_grad()
+    def calibrate(self,
+                inputs: torch.Tensor,          # (...,3) : [sigma_raw, kappa_raw, xi_raw] du modèle
+                y_true: torch.Tensor,          # (N,)
+                clusters_ids: torch.Tensor,    # (N,) ids de cluster
+                score_fn,                      # callable: (y_true_sub, preds_sub) -> float
+                dir_output: Optional[str] = None,
+                from_logits: bool = True,
+                log_sigma: bool = False,
+                log_kappa: bool = False,
+                log_xi:    bool = False,
+                a_grid=None,
+                b_s_grid=None,
+                b_k_grid=None,
+                b_x_grid=None,
+                plot: bool = True):
+        """
+        Cluster-wise calibration of u_c(x) = sigmoid(a_c + b_s^c * φ_s(σ) + b_k^c * φ_k(κ) + b_x^c * φ_x(ξ)),
+        maximizing `score_fn` on each cluster (prediction via self.transform(..., pick="max")).
+
+        Returns:
+            dict { cluster_id: {"a","b_s","b_k","b_x","calibration_score","u_calibration","preds"} }
+        """
+        from pathlib import Path
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        # ---- Decode model outputs -> (σ, κ, ξ) positifs / clampés ----
+        sigma_raw, kappa_raw, xi_raw = inputs[..., 0], inputs[..., 1], inputs[..., 2]
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        s = sigma.detach().flatten()
+        k = kappa.detach().flatten()
+        x = xi.detach().flatten()
+        N = s.numel()
+        if y_true.numel() != N or clusters_ids.numel() != N:
+            raise ValueError("y_true and clusters_ids must align with the batch size")
+
+        eps = float(self.eps)
+        φs = torch.log(torch.clamp(s, min=eps)) if log_sigma else s
+        φk = torch.log(torch.clamp(k, min=eps)) if log_kappa else k
+        φx = torch.log(torch.clamp(x, min=eps)) if log_xi    else x
+
+        device, dtype = s.device, s.dtype
+        # Grilles par défaut
+        if a_grid is None:
+            a_grid = torch.linspace(-6.0, 6.0, 25, device=device, dtype=dtype)
+        else:
+            a_grid = torch.as_tensor(a_grid, device=device, dtype=dtype)
+
+        def _default_b_grid(g):
+            if g is not None:
+                return torch.as_tensor(g, device=device, dtype=dtype)
+            return torch.cat([
+                torch.linspace(-8.0, -0.25, 16, device=device, dtype=dtype),
+                torch.linspace( 0.25,  8.0, 16, device=device, dtype=dtype)
+            ])
+
+        b_s_grid = _default_b_grid(b_s_grid)
+        b_k_grid = _default_b_grid(b_k_grid)
+        b_x_grid = _default_b_grid(b_x_grid)
+
+        # Entrées décodées (from_logits=False pour transform)
+        inputs_decoded = torch.stack([sigma.view_as(sigma),
+                                    kappa.detach(),
+                                    xi.detach()], dim=-1)
+
+        results = {}
+        clusters_ids = clusters_ids.flatten().long()
+        unique_cls = torch.unique(clusters_ids)
+
+        for cl in unique_cls:
+            mask = (clusters_ids == cl)
+            print(f'calibrate {cl}')
+            idx = torch.nonzero(mask, as_tuple=False).flatten()
+            
+            if idx.numel() == 0:
+                continue
+
+            y_sub   = y_true[idx]
+            φs_sub  = φs[idx]
+            φk_sub  = φk[idx]
+            φx_sub  = φx[idx]
+            in_sub  = inputs_decoded.view(-1, 3)[idx]  # (n_sub,3)
+
+            best = {
+                "a": None, "b_s": None, "b_k": None, "b_x": None,
+                "calibration_score": -float("inf"),
+                "u_calibration": None, "preds": None
+            }
+
+            for a in a_grid:
+                for bs in b_s_grid:
+                    for bk in b_k_grid:
+                        for bx in b_x_grid:
+                            logit = a + bs*φs_sub + bk*φk_sub + bx*φx_sub
+                            u_vec = torch.sigmoid(logit).clamp(eps, 1.0 - 1e-6)  # (n_sub,)
+
+                            preds = self.transform(
+                                inputs=in_sub,
+                                dir_output=None,
+                                p_thresh=u_vec,
+                                from_logits=False,
+                                pick="max",
+                                clusters_ids=clusters_ids,
+                            )
+
+                            score = float(score_fn(y_sub, preds))
+                            if score > best["calibration_score"]:
+                                best.update(a=float(a.item()),
+                                            b_s=float(bs.item()),
+                                            b_k=float(bk.item()),
+                                            b_x=float(bx.item()),
+                                            calibration_score=score,
+                                            u_calibration=u_vec.clone(),
+                                            preds=preds.clone())
+
+            # --- Plot optionnel par cluster ---
+            if plot and dir_output is not None and best["u_calibration"] is not None:
+                outdir = Path(dir_output) / f"cl{int(cl.item())}"
+                outdir.mkdir(parents=True, exist_ok=True)
+
+                # Scatter σ vs u ; courbe lissée en figeant κ, ξ à leur médiane (visuel)
+                s_sub = s[idx]
+                order = torch.argsort(s_sub)
+                σ_axis = s_sub[order].cpu().numpy()
+                u_axis = best["u_calibration"][order].cpu().numpy()
+
+                a, bs, bk, bx = best["a"], best["b_s"], best["b_k"], best["b_x"]
+                k_med = k[idx].median().item()
+                x_med = x[idx].median().item()
+                fk = np.log(max(k_med, eps)) if log_kappa else k_med
+                fx = np.log(max(x_med, eps)) if log_xi    else x_med
+                ss = np.linspace(max(float(s_sub.min().cpu()), eps),
+                                float(s_sub.max().cpu()), 400)
+                fs = np.log(np.clip(ss, eps, None)) if log_sigma else ss
+                uu = 1.0/(1.0 + np.exp(-(a + bs*fs + bk*fk + bx*fx)))
+
+                plt.figure(figsize=(7,5))
+                plt.scatter(σ_axis, u_axis, s=10, alpha=0.5, label="u calibrated")
+                plt.plot(ss, uu, lw=2, label=f"u=σ(a+bs φ_s+bk φ_k+bx φ_x)\n"
+                                            f"a={a:.2f}, bs={bs:.2f}, bk={bk:.2f}, bx={bx:.2f}")
+                plt.xscale("log" if log_sigma else "linear")
+                plt.xlabel("sigma" + (" (log-scale axis)" if log_sigma else ""))
+                plt.ylabel("u")
+                plt.title(f"Calibrated u(σ,κ,ξ) — cl{int(cl.item())}")
+                plt.grid(True, linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(outdir / "u_calibration_sigma_kappa_xi.png", dpi=200)
+                plt.close()
+
+            results[int(cl.item())] = best
+
+        return results
+
+class dEGPDLossTruncClusterIDs(nn.Module):
+    """
+    Discrete exponentiated GPD (deGPD) TRUNCATED to {0,..., y_max},
+    with cluster-specific parameters (kappa, xi) and optional
+    global + per-cluster deltas (partial pooling).
+
+    - Forward: negative log-likelihood on the TRUNCATED PMF.
+      For integer targets y in {0,...,y_max}.
+    - Transform: returns a (truncated) discrete quantile via u (with F_+(y_max+1) renormalization),
+      or the discrete mode (argmax PMF), and can also plot PMF/CDF/PPF by cluster.
+
+    CDF pieces:
+        H(y)   = GPD CDF(sigma, xi) on y>=0
+        F_+(y) = [H(y)]^kappa  (eGPD CDF, family 1)
+
+    TRUNCATED PMF (on {0,...,y_max}):
+        p_trunc(y) = [F_+(y+1) - F_+(y)] / F_+(y_max+1)
+
+    Args
+    ----
+    NC : int
+        Number of clusters.
+    y_max : int
+        Truncation upper bound (support {0,...,y_max}).
+    id : optional
+        Identifier used in plot filenames.
+    kappa_init, xi_init : float
+        Initial values for (kappa, xi).
+    eps : float
+        Numerical epsilon.
+    reduction : {"mean","sum","none"}
+        Reduction for the NLL.
+    force_positive : bool
+        If True, enforce kappa>0 and xi>0 via softplus (and xi>=xi_min).
+    xi_min : float
+        Lower floor added to xi when force_positive=True.
+    G : bool
+        If True, use global + per-cluster deltas; else per-cluster params directly.
+    area_exponent : float
+        Exponent for exposure offset on sigma: sigma <- sigma * areas**area_exponent.
+        (Set to 0.0 if you don't want any offset.)
+    """
+
+    def __init__(self,
+                 NC: int,
+                 num_classes: int = 5,
+                 id: int = None,
+                 kappa_init: float = 0.8,
+                 xi_init: float = 0.15,
+                 eps: float = 1e-8,
+                 reduction: str = "mean",
+                 force_positive: bool = False,
+                 xi_min: float = 0.0,
+                 G: bool = False                 # global + delta:
+        ):
+        super().__init__()
+        self.n_clusters     = NC
+        self.y_max          = num_classes - 1
+        self.id             = id
+        self.eps            = eps
+        self.reduction      = reduction
+        self.force_positive = force_positive
+        self.xi_min         = xi_min
+        self.add_global     = G
+        self.num_classes = num_classes
+        
+        if not G:
+            # cluster-only parameters
+            self.kappa_raw = nn.Parameter(torch.full((NC,), float(kappa_init)))
+            self.xi_raw    = nn.Parameter(torch.full((NC,), float(xi_init)))
+        else:
+            # global + per-cluster deltas
+            self.kappa_global = nn.Parameter(torch.tensor(float(kappa_init)))
+            self.xi_global    = nn.Parameter(torch.tensor(float(xi_init)))
+            self.kappa_delta  = nn.Parameter(torch.zeros(NC))
+            self.xi_delta     = nn.Parameter(torch.zeros(NC))
+
+    # ---------- select raw params per sample ----------
+    def _select_raw_params(self, clusters_ids: torch.Tensor):
+        if isinstance(clusters_ids, torch.Tensor):
+            clusters_ids = clusters_ids.long()
+        if not self.add_global:
+            kappa_raw_sel = self.kappa_raw[clusters_ids]                 # (N,)
+            xi_raw_sel    = self.xi_raw[clusters_ids]                    # (N,)
+        else:
+            kappa_raw_sel = self.kappa_global + self.kappa_delta[clusters_ids]
+            xi_raw_sel    = self.xi_global    + self.xi_delta[clusters_ids]
+        return kappa_raw_sel, xi_raw_sel
+
+    # ---------- enforce positivity if requested ----------
+    def _positivize(self, kappa_raw_sel: torch.Tensor, xi_raw_sel: torch.Tensor):
+        if self.force_positive:
+            kappa = F.softplus(kappa_raw_sel)                 # >0
+            xi    = F.softplus(xi_raw_sel) + float(self.xi_min)  # >xi_min
+        else:
+            kappa = kappa_raw_sel
+            xi    = xi_raw_sel
+        return kappa, xi
+
+    # ---------- decode sigma (+ exposure offset if provided) ----------
+    def _decode_sigma(self, sigma_raw: torch.Tensor, from_logits: bool, areas=None):
+        sigma = F.softplus(sigma_raw) if from_logits else sigma_raw
+        sigma = sigma.clamp_min(self.eps)
+        area = None
+        if areas is not None:
+            sigma = sigma * torch.clamp(areas, min=self.eps) ** self.area_exponent
+        return sigma
+
+    # ---------- GPD CDF H(y; sigma, xi) ----------
+    def _gpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y     = torch.clamp(y, min=0.0)
+        sigma = torch.clamp(sigma, min=self.eps)
+        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
+        near0   = xi_safe.abs() < 1e-6
+
+        z = 1.0 + xi_safe * (y / sigma)
+        z = torch.clamp(z, min=self.eps)
+
+        H_xi = 1.0 - torch.pow(z, -1.0 / xi_safe)   # xi != 0
+        H_0  = 1.0 - torch.exp(-y / sigma)          # xi ~ 0
+        H = torch.where(near0, H_0, H_xi)
+        return torch.clamp(H, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- eGPD CDF: F_+(y) = [H(y)]^kappa ----------
+    def _egpd_cdf(self, y: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        H = self._gpd_cdf(y, sigma, xi)
+        kappa_pos = torch.clamp(kappa, min=self.eps)
+        Fp = torch.pow(H, kappa_pos)
+        return torch.clamp(Fp, min=self.eps, max=1.0 - 1e-12)
+
+    # ---------- NON-truncated discrete PMF: p_raw(y) = F_+(y+1) - F_+(y) ----------
+    def _pmf_raw(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        y = y_int.to(dtype=sigma.dtype)
+        F_y   = self._egpd_cdf(y,   sigma, kappa, xi)
+        F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
+        p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
+        return p_raw
+
+    # ---------- TRUNCATED PMF on {0,...,y_max}: normalize by F_+(y_max+1) ----------
+    def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
+        p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
+        Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                               sigma, kappa, xi)  # F_+(y_max+1)
+        Z = torch.clamp(Z, min=self.eps)
+        p = p_raw / Z
+        return torch.clamp(p, min=self.eps, max=1.0)
+
+    # ---------- FORWARD: truncated NLL on integer y in {0,...,y_max} ----------
+    def forward(self, inputs: torch.Tensor, y: torch.Tensor, clusters_ids: torch.Tensor,
+                areas: torch.Tensor = None, weight: torch.Tensor = None,
+                from_logits: bool = True) -> torch.Tensor:
+        """
+        inputs : (...,) sigma_raw (échelle)
+        y      : int tensor, targets in {0,...,y_max}
+        clusters_ids : (N,) longs
+        areas  : (N,) optionnel, offset d'exposition sur sigma
+        """
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logits, areas)
+
+        kappa_raw_sel, xi_raw_sel = self._select_raw_params(clusters_ids)
+        kappa, xi = self._positivize(kappa_raw_sel, xi_raw_sel)
+
+        y_int = y.to(torch.long).clamp(min=0, max=self.y_max)
+        p_trunc = self._pmf_trunc(y_int, sigma, kappa, xi)
+        
+        nll = -torch.log(torch.clamp(p_trunc, min=self.eps))
+        if weight is not None:
+            nll = nll * weight
+
+        if self.reduction == "mean":
+            return nll.mean()
+        if self.reduction == "sum":
+            return nll.sum()
+        return nll
+    
+    def find_most_probable_value(self, sigma, u, kappa, xi):
+        
+        # tables sur {0,...,y_max}
+        y_vals = torch.arange(0, self.y_max + 1, device=sigma.device, dtype=sigma.dtype)
+        
+        # quantile tronqué: u_eff = u * F_+(y_max+1)
+        if not torch.is_tensor(u):
+            u = torch.tensor(u, dtype=sigma.dtype, device=sigma.device)
+        u = torch.clamp(u, 1e-6, 1.0 - 1e-6)
+
+        Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigma.dtype, device=sigma.device),
+                            sigma, kappa, xi)                  # (N,)
+        u_eff = torch.clamp(u * Fmax, min=self.eps, max=1.0 - 1e-12)
+        
+        # F_+(y) pour y=0..y_max
+        ys2 = y_vals.unsqueeze(0).expand(sigma.shape[0], -1)      # (N, y_max+1)
+        F_tab = self._egpd_cdf(ys2, sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1))
+
+        # plus petit y tel que F_tab >= u_eff
+        idx = torch.searchsorted(F_tab, u_eff.unsqueeze(-1), right=False)
+        y_hat = idx.clamp(min=0, max=self.y_max).squeeze(-1)
+        return y_hat
+
+    # ---------- TRANSFORM: truncated discrete quantile or mode ----------
+    @torch.no_grad()
+    def transform(self, inputs: torch.Tensor, clusters_ids: torch.Tensor, p_thresh: Any,
+                  dir_output, from_logits: bool = True,
+                  mode: bool = False, plot: bool = False):
+        """
+        Returns a discrete prediction in {0,...,y_max}.
+        - If mode=True: returns argmax_y p_trunc(y).
+        - Else: returns the (truncated) quantile:
+            u_eff = u * F_+(y_max+1),
+            y_hat = min { y : F_+(y) >= u_eff }  clipped to [0, y_max].
+
+        Also plots PMF/CDF/PPF per cluster if dir_output is provided or plot=True.
+        """
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logits)
+        kappa_raw_sel, xi_raw_sel = self._select_raw_params(clusters_ids)
+        kappa, xi = self._positivize(kappa_raw_sel, xi_raw_sel)
+        if mode:
+            # argmax_y p_trunc(y)
+            # tables sur {0,...,y_max}
+            y_vals = torch.arange(0, self.y_max + 1, device=sigma.device, dtype=sigma.dtype)
+            p = self._pmf_trunc(y_vals, sigma.unsqueeze(-1), kappa.unsqueeze(-1), xi.unsqueeze(-1))  # (N, y_max+1)
+            y_hat = p.argmax(dim=-1)
+        else:
+            if isinstance(p_thresh, dict):
+                y_hat = torch.zeros_like(sigma, dtype=torch.int32).long()
+                for id in torch.unique(clusters_ids):
+                    mask = clusters_ids == id
+                    id = id.item()
+                    kappa_raw_sel, xi_raw_sel = self._select_raw_params(id)
+                    kappa, xi = self._positivize(kappa_raw_sel, xi_raw_sel)
+                    if id in p_thresh.keys():
+                        u = torch.sigmoid(p_thresh[id]['a'] + sigma[mask] * p_thresh[id]['b'])
+                    else:
+                        print(f'No {id} in calibration dict, taking median -> to do')
+                        u = 0.1
+                    
+                    y_hat[mask] = self.find_most_probable_value(sigma[mask], u, kappa, xi)
+            else:
+                y_hat = self.find_most_probable_value(sigma, p_thresh, kappa, xi)
+                
+        if dir_output is not None or plot:
+            self.plot_final_pmf(sigma, clusters_ids, dir_output)
+
+        return y_hat
+
+    # ---------- PLOTS: PMF/CDF/PPF per cluster ----------
+    @torch.no_grad()
+    def _plot_one_cluster(self, sigmas_c: torch.Tensor, kappa_c: torch.Tensor, xi_c: torch.Tensor,
+                          dir_output, cname: str, which_sigma : str):
+        """
+        Save 3 plots for one cluster:
+          1) Truncated PMF on {0,...,y_max}
+          2) Truncated CDF on {0,...,y_max}
+          3) Truncated PPF (discrete y(u)) for u in (0,1)
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        # choose representative sigmas: min/median/max
+        sig = sigmas_c.flatten()
+        if sig.numel() == 0:
+            return
+
+        if which_sigma == 'mean':
+            sig_op = torch.mean(sig)
+        elif which_sigma == 'max':
+            sig_op = torch.max(sig)
+        
+        sig_list = [sig_op]
+
+        y_vals = torch.arange(0, self.y_max + 1, device=sigmas_c.device)
+
+        # 1) PMF tronquée
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigmas_c.device, dtype=sigmas_c.dtype)
+            p_raw = self._pmf_raw(y_vals, s_t, kappa_c, xi_c)
+            Z     = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigmas_c.dtype, device=sigmas_c.device),
+                                   s_t, kappa_c, xi_c)
+            p     = torch.clamp(p_raw / torch.clamp(Z, min=self.eps), min=self.eps)
+            plt.stem(y_vals.cpu().numpy(), p.cpu().numpy(), basefmt=" ", label=f"sigma={float(s):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated PMF on {{0,...,{self.y_max}}}")
+        plt.title(f"deGPD truncated PMF  (kappa={float(kappa_c):.3f}, xi={float(xi_c):.3f}) — {cname}")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / cname / f"degpd_trunc_pmf_{which_sigma}.png", dpi=200); plt.close()
+
+        # 2) CDF tronquée F_tr(y) = F_+(y)/F_+(y_max+1)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigmas_c.device, dtype=sigmas_c.dtype)
+            F_y = self._egpd_cdf(y_vals, s_t, kappa_c, xi_c)
+            Z   = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigmas_c.dtype, device=sigmas_c.device),
+                                 s_t, kappa_c, xi_c)
+            F_tr = torch.clamp(F_y / torch.clamp(Z, min=self.eps), min=self.eps, max=1.0)
+            plt.step(y_vals.cpu().numpy(), F_tr.cpu().numpy(), where="post", label=f"sigma={float(s):.3f}")
+        plt.xlabel("y (count)")
+        plt.ylabel(f"Truncated CDF on {{0,...,{self.y_max}}}")
+        plt.title(f"deGPD truncated CDF  (kappa={float(kappa_c):.3f}, xi={float(xi_c):.3f}) — {cname}")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / cname / f"degpd_trunc_cdf_{which_sigma}.png", dpi=200); plt.close()
+
+        # 3) PPF (discrete): y(u) = min{ y : F_+(y) >= u * F_+(y_max+1) }
+        u_grid = torch.linspace(1e-6, 1.0 - 1e-6, 1000, device=sigmas_c.device)
+        plt.figure(figsize=(7,5))
+        for s in sig_list:
+            s_t = torch.tensor(s, device=sigmas_c.device, dtype=sigmas_c.dtype)
+            Fmax = self._egpd_cdf(torch.tensor(self.y_max + 1, dtype=sigmas_c.dtype, device=sigmas_c.device),
+                                  s_t, kappa_c, xi_c)
+            u_eff = torch.clamp(u_grid * torch.clamp(Fmax, min=self.eps), min=self.eps, max=1.0 - 1e-12)
+            F_tab = self._egpd_cdf(y_vals, s_t, kappa_c, xi_c)  # (y_max+1,)
+            y_idx = torch.searchsorted(F_tab, u_eff, right=False).clamp(0, self.y_max)
+            plt.plot(u_grid.cpu().numpy(), y_idx.cpu().numpy(), label=f"sigma={float(s):.3f}")
+        plt.xlabel("u (quantile level)")
+        plt.ylabel(f"PPF (discrete y in {{0,...,{self.y_max}}})")
+        plt.title(f"deGPD truncated PPF  (kappa={float(kappa_c):.3f}, xi={float(xi_c):.3f}) — {cname}")
+        plt.legend(); plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout(); plt.savefig(dir_output / cname / f"degpd_trunc_ppf_{which_sigma}.png", dpi=200); plt.close()
+
+    @torch.no_grad()
+    def plot_final_pmf(self, sigma: torch.Tensor, clusters_ids: torch.Tensor, dir_output):
+        """
+        Plot PMF/CDF/PPF per cluster (saves PNG files).
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        clusters_ids = clusters_ids.long()
+        C = self.n_clusters
+
+        # params per cluster (after positivity if needed)
+        if not self.add_global:
+            kappa_full = self.kappa_raw
+            xi_full    = self.xi_raw
+        else:
+            kappa_full = self.kappa_global + self.kappa_delta
+            xi_full    = self.xi_global    + self.xi_delta
+
+        if self.force_positive:
+            kappa_full = F.softplus(kappa_full)
+            xi_full    = F.softplus(xi_full) + float(self.xi_min)
+
+        for c in torch.unique(clusters_ids):
+            mask = (clusters_ids == c)
+            if mask.any():
+                sig_c = sigma[mask]
+                name_c = f"cl{c}"
+                self._plot_one_cluster(sig_c, kappa_full[c], xi_full[c], dir_output, name_c, 'mean')
+                self._plot_one_cluster(sig_c, kappa_full[c], xi_full[c], dir_output, name_c, 'max')
+
+    # ---------- parameters access ----------
+    def get_learnable_parameters(self):
+        if not self.add_global:
+            return {"kappa": self.kappa_raw, "xi": self.xi_raw}
+        else:
+            return {
+                "kappa_global": self.kappa_global,
+                "xi_global": self.xi_global,
+                "kappa_delta": self.kappa_delta,
+                "xi_delta": self.xi_delta,
+            }
+
+    def get_attribute(self):
+        if not self.add_global:
+            if self.force_positive:
+                return [
+                    ('kappa', F.softplus(self.kappa_raw).detach()),
+                    ('xi',    (F.softplus(self.xi_raw) + self.xi_min).detach()),
+                ]
+            else:
+                return [
+                    ('kappa', self.kappa_raw.detach()),
+                    ('xi',    self.xi_raw.detach()),
+                ]
+        else:
+            kappa_raw_full = self.kappa_global + self.kappa_delta
+            xi_raw_full    = self.xi_global    + self.xi_delta
+            if self.force_positive:
+                return [
+                    ('kappa_global', F.softplus(self.kappa_global).detach()),
+                    ('xi_global',    (F.softplus(self.xi_global) + self.xi_min).detach()),
+                    ('kappa_per_cluster', F.softplus(kappa_raw_full).detach()),
+                    ('xi_per_cluster',    (F.softplus(xi_raw_full) + self.xi_min).detach()),
+                ]
+            else:
+                return [
+                    ('kappa_global', self.kappa_global.detach()),
+                    ('xi_global',    self.xi_global.detach()),
+                    ('kappa_per_cluster', kappa_raw_full.detach()),
+                    ('xi_per_cluster',    xi_raw_full.detach()),
+                ]
+
+    # ---------- optional shrinkage penalty (for global+delta) ----------
+    def shrinkage_penalty(self, lambda_l2: float = 1e-4) -> torch.Tensor:
+        if not self.add_global:
+            device = (self.kappa_raw if hasattr(self, "kappa_raw") else torch.tensor(0.)).device
+            return torch.zeros((), device=device)
+        return lambda_l2 * (self.kappa_delta.pow(2).sum() + self.xi_delta.pow(2).sum())
+
+    # ---------- plot params over epochs (per cluster, optional global) ----------
+    def plot_params(self, egpd_logs, dir_output, clusters_ids=None, dpi=120):
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+
+        epochs = [int(log["epoch"]) for log in egpd_logs]
+
+        if not self.add_global:
+            kappas_raw = [log["kappa"] for log in egpd_logs]  # (C,)
+            xis_raw    = [log["xi"]    for log in egpd_logs]  # (C,)
+        else:
+            kappas_raw = [log["kappa_per_cluster"] for log in egpd_logs]  # (C,)
+            xis_raw    = [log["xi_per_cluster"]    for log in egpd_logs]  # (C,)
+            kappa_global = [log["kappa_global"] for log in egpd_logs]     # scalar
+            xi_global    = [log["xi_global"]    for log in egpd_logs]     # scalar
+
+        def to_np_vec(x):
+            if isinstance(x, torch.Tensor):
+                x = x.detach().cpu().numpy()
+            return np.asarray(x)
+
+        K_list = [to_np_vec(k) for k in kappas_raw]
+        X_list = [to_np_vec(x) for x in xis_raw]
+        K = np.stack(K_list, axis=0)  # (T, C)
+        X = np.stack(X_list, axis=0)
+
+        egpd_to_save = {"epoch": epochs, "kappa": K_list, "xi": X_list}
+        if self.add_global:
+            egpd_to_save["kappa_global"] = kappa_global
+            egpd_to_save["xi_global"] = xi_global
+        save_object(egpd_to_save, 'degpd_kappa_xi.pkl', dir_output)
+
+        if clusters_ids is not None:
+            u_clusters = torch.unique(clusters_ids)
+        else:
+            u_clusters = np.arange(0, self.n_clusters)
+        for c in u_clusters:
+            name = f"cl{c}"
+            
+            check_and_create_path(dir_output / name)
+
+            plt.figure(figsize=(8, 5))
+            plt.plot(epochs, K[:, c], marker='o', label=r'$\kappa$')
+            plt.plot(epochs, X[:, c], marker='s', label=r'$\xi$')
+            plt.xlabel('Epoch'); plt.ylabel('Value')
+            plt.title(f'deGPD parameters over epochs — {name}')
+            plt.grid(True, linestyle='--', alpha=0.4)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(Path(dir_output) / name / f'degpd_params.png', dpi=dpi)
+            plt.close()
+
+        if self.add_global:
+            kg = np.asarray([to_np_vec(k) for k in kappa_global])
+            xg = np.asarray([to_np_vec(x) for x in xi_global])
+
+            plt.figure(figsize=(8, 5))
+            plt.plot(epochs, kg, marker='o', label=r'$\kappa_{global}$')
+            plt.plot(epochs, xg, marker='s', label=r'$\xi_{global}$')
+            plt.xlabel('Epoch'); plt.ylabel('Value')
+            plt.title('Global deGPD parameters over epochs')
+            plt.grid(True, linestyle='--', alpha=0.4)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(Path(dir_output) / f'degpd_params_global.png', dpi=dpi)
+            plt.close()
+            
+    def calibrate(self,
+                    inputs: torch.Tensor,
+                    y_true : torch.Tensor,
+                    clusters_ids : torch.Tensor,
+                    score_fn,               # callable: preds -> float
+                    dir_output,
+                    from_logtis = True,
+                    log_sigma: bool = False,
+                    a_grid=None,
+                    b_grid=None,
+                    plot: bool = True):
+        """
+        Calibre u(x) = sigmoid(a + b * phi(sigma)) en maximisant `score_fn`.
+        - `sigma`: tensor (N,) ou (N,1), déjà sur l'échelle d'échelle (pas de logits).
+        - `score_fn(preds) -> float`: calcule le score final à maximiser à partir des
+        prédictions discrètes (par ex. classes après transform avec quantile u).
+        NOTE: `score_fn` doit capturer la vérité terrain (closure) si nécessaire.
+        - `dir_output`: dossier où sauvegarder la figure (si plot=True).
+        - `areas`: offset éventuel passé à `transform` (exposition) ; None pour ignorer.
+        - `log_sigma`: si True, phi(sigma) = log(sigma), sinon phi(sigma)=sigma.
+        - `a_grid`, `b_grid`: grilles de recherche (torch.Tensor ou list). Par défaut, on crée
+        une grille raisonnable.
+        - `plot`: si True, trace u vs sigma et sauvegarde un PNG.
+
+        """
+        
+        sigma_raw = inputs[..., 0] if inputs.ndim > 1 else inputs
+        sigma = self._decode_sigma(sigma_raw, from_logtis, None)
+        
+        calibration = {}
+        
+        u_clusters = torch.unique(clusters_ids)
+        
+        for id in u_clusters:
+            mask = clusters_ids == id
+            id = id.item()
+            name = f"cl{id}"
+
+            with torch.no_grad():
+                s = sigma.detach().flatten()[mask]
+                # feature phi(sigma)
+                x = torch.log(torch.clamp(s, min=self.eps)) if log_sigma else s
+
+                # grilles par défaut (couvrent large, dont la zone "extrêmes")
+                if a_grid is None:
+                    a_grid = torch.linspace(-6.0, 6.0, 25, device=s.device, dtype=s.dtype)
+                else:
+                    a_grid = torch.as_tensor(a_grid, device=s.device, dtype=s.dtype)
+                if b_grid is None:
+                    # on teste pentes positives & négatives
+                    b_grid = torch.cat([
+                        torch.linspace(-8.0, -0.25, 16, device=s.device, dtype=s.dtype),
+                        torch.linspace( 0.25,  8.0, 16, device=s.device, dtype=s.dtype)
+                    ])
+                else:
+                    b_grid = torch.as_tensor(b_grid, device=s.device, dtype=s.dtype)
+
+                calibration_id = {"a": None, "b": None, "calibration_score": -float("inf"),
+                        "u_calibration": None, "preds": None}
+
+                # recherche sur grille (robuste et simple)
+                for a in a_grid:
+                    for b in b_grid:
+                        u_vec = torch.sigmoid(a + b * x)              # (N,)
+                        # prédictions discrètes via quantile tronqué
+                        preds = self.transform(
+                            inputs=s,               # on passe sigma "déjà décodé"
+                            clusters_ids=clusters_ids[mask],
+                            dir_output=None,
+                            from_logits=False,      # IMPORTANT
+                            mode=False,
+                            p_thresh=u_vec
+                        )
+                        
+                        score = float(score_fn(y_true[mask], preds))
+                        if score > calibration_id["calibration_score"]:
+                            calibration_id.update(a=float(a.item()),
+                                        b=float(b.item()),
+                                        calibration_score=score,
+                                        u_calibration=u_vec.clone(),
+                                        preds=preds.clone())
+
+                # tracé diagnostique
+                if plot and dir_output is not None:
+                    check_and_create_path(dir_output / name)
+                    dir_output = Path(dir_output)
+                    dir_output.mkdir(parents=True, exist_ok=True)
+
+                    # Scatter sigma vs u_calibration + courbe sigmoïde moyenne (sur l'axe x)
+                    # On ordonne pour une courbe lisible
+                    order = torch.argsort(s)
+                    s_ord = s[order].cpu().numpy()
+                    x_ord = x[order].cpu().numpy()
+                    u_ord = calibration_id["u_calibration"][order].cpu().numpy()
+                    
+                    plt.figure(figsize=(7,5))
+                    # points
+                    plt.scatter(s_ord, u_ord, s=10, alpha=0.5, label="u(sigma) calibrated")
+                    # courbe "théorique" sur un axe régulier (pour le visuel)
+                    xx = np.linspace(x.min().cpu(), x.max().cpu(), 400)
+                    uu = 1.0 / (1.0 + np.exp(-(calibration_id["a"] + calibration_id["b"] * xx)))
+                    # convertir xx -> axe sigma si log_sigma
+                    if log_sigma:
+                        ss = np.exp(xx)
+                    else:
+                        ss = xx
+                    plt.plot(ss, uu, lw=2, label=f"sigmoid(a + b·phi), a={calibration_id['a']:.3f}, b={calibration_id['b']:.3f}")
+                    plt.xscale("log" if log_sigma else "linear")
+                    plt.xlabel("sigma" + (" (log-scale axis)" if log_sigma else ""))
+                    plt.ylabel("u(sigma)")
+                    plt.title("Calibrated u(sigma) = sigmoid(a + b·phi(sigma))")
+                    plt.grid(True, linestyle="--", alpha=0.4)
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.savefig(dir_output / name / f"calibrated_u_sigmoid.png", dpi=200)
+                    plt.close()
+                
+                calibration[id] = calibration_id
+        
+        return calibration
+        
+##########################################################################################################################
 
 class EGPDIntervalCELoss(nn.Module):
     """
@@ -1709,13 +4803,13 @@ class IntervalCEClusterIDs(nn.Module):
     avec paramètres (par cluster OU global+delta) et edges par cluster.
 
     Entrées:
-      - forward(scale, y_class, cluster_ids, weight=None)
+      - forward(scale, y_class, clusters_ids, weight=None)
         * scale: paramètre d'échelle par échantillon
             T='egpd'  -> sigma_tail_i
             T='log'   -> sigma_ln_i (écart-type en log)
             T='gamma' -> theta_i (échelle)
         * y_class ∈ {0..K-1}
-        * cluster_ids ∈ {0..C-1}
+        * clusters_ids ∈ {0..C-1}
 
     P(k) créés par différences de CDF aux bords appris: u0_c + cumsum(softplus(t_steps_c,:))
     """
@@ -1817,14 +4911,14 @@ class IntervalCEClusterIDs(nn.Module):
         edges = u0.unsqueeze(1) + torch.cumsum(steps, dim=1)          # (C, K-1)
         return edges
 
-    def _edges_for_samples(self, cluster_ids: torch.Tensor, device, dtype):
+    def _edges_for_samples(self, clusters_ids: torch.Tensor, device, dtype):
         """Edges du cluster de chaque sample: shape (N, K-1)"""
         all_edges = self._edges_all_clusters(device, dtype)           # (C, K-1)
-        return all_edges[cluster_ids.long()]                          # (N, K-1)
+        return all_edges[clusters_ids.long()]                          # (N, K-1)
 
     # --- sélection des params par cluster selon T ---
-    def _select_primary_params(self, cluster_ids: torch.Tensor):
-        cid = cluster_ids.long()
+    def _select_primary_params(self, clusters_ids: torch.Tensor):
+        cid = clusters_ids.long()
         if self.T == "egpd":
             if not self.add_global:
                 k_raw = self.kappa_raw[cid]
@@ -1879,13 +4973,13 @@ class IntervalCEClusterIDs(nn.Module):
         return Pkx
 
     # --- CDF primaire par échantillon ---
-    def _cdf_primary(self, u: torch.Tensor, scale: torch.Tensor, cluster_ids: torch.Tensor) -> torch.Tensor:
-        tag, a, b = self._select_primary_params(cluster_ids)  # a,b dépendent de T
-        cluster_ids = cluster_ids.long()
+    def _cdf_primary(self, u: torch.Tensor, scale: torch.Tensor, clusters_ids: torch.Tensor) -> torch.Tensor:
+        tag, a, b = self._select_primary_params(clusters_ids)  # a,b dépendent de T
+        clusters_ids = clusters_ids.long()
         if tag == "egpd":
             res = torch.zeros_like(u)
-            for cluster in torch.unique(cluster_ids):
-                mask = cluster_ids == cluster
+            for cluster in torch.unique(clusters_ids):
+                mask = clusters_ids == cluster
                 res[mask] = cdf_egpd_family1(u[cluster].clamp_min(0.0), scale[mask], b[mask], a[mask], eps=1e-12)
             return res
         elif tag == "log":
@@ -1965,7 +5059,7 @@ class IntervalCEClusterIDs(nn.Module):
     def forward(self,
                 scale: torch.Tensor,        # [N] échelle per-sample
                 y_class: torch.Tensor,      # [N] in {0..K-1}
-                cluster_ids: torch.Tensor,  # [N] in {0..C-1}
+                clusters_ids: torch.Tensor,  # [N] in {0..C-1}
                 weight: torch.Tensor = None) -> torch.Tensor:
 
         scale = scale.squeeze(-1) if scale.ndim > 1 else scale
@@ -1973,14 +5067,14 @@ class IntervalCEClusterIDs(nn.Module):
         K = self.num_classes
 
         # Edges par sample: (N, K-1) ; u0 par sample: (N,)
-        edges_N = self._edges_for_samples(cluster_ids, device=device, dtype=dtype)  # (N, K-1)
+        edges_N = self._edges_for_samples(clusters_ids, device=device, dtype=dtype)  # (N, K-1)
         u0_vecC = self._u0(device=device, dtype=dtype)                               # (C,)
-        u0_N    = u0_vecC[cluster_ids.long()]                                        # (N,)
+        u0_N    = u0_vecC[clusters_ids.long()]                                        # (N,)
 
         # CDF aux bords (selon T)
-        F_list = [ self._cdf_primary(u0_N, scale, cluster_ids) ]
+        F_list = [ self._cdf_primary(u0_N, scale, clusters_ids) ]
         for j in range(K-2):
-            F_list.append(self._cdf_primary(edges_N[:, j], scale, cluster_ids))
+            F_list.append(self._cdf_primary(edges_N[:, j], scale, clusters_ids))
 
         # Probas par différences
         Ps = [F_list[0]] + [torch.clamp(F_list[j+1] - F_list[j], 1e-12, 1.0) for j in range(K-2)]
@@ -2009,7 +5103,7 @@ class IntervalCEClusterIDs(nn.Module):
         return nll
 
     @torch.no_grad()
-    def transform(self, inputs: torch.Tensor, cluster_ids: torch.Tensor,
+    def transform(self, inputs: torch.Tensor, clusters_ids: torch.Tensor,
                 dir_output, output_pdf):
         """
         Retourne P ∈ (N,K) (probabilités par classe) pour inspection/inférence.
@@ -2022,17 +5116,17 @@ class IntervalCEClusterIDs(nn.Module):
         inputs = self._sp(inputs) + 1e-12
 
         # --- Plot per-cluster (diagnostic) ---
-        self.plot_final_pdf(inputs, cluster_ids,
+        self.plot_final_pdf(inputs, clusters_ids,
                             dir_output=dir_output,
                             output_pdf=(output_pdf or "final_pdf"))
 
-        edges_N = self._edges_for_samples(cluster_ids, device=device, dtype=dtype)  # (N, K-1)
+        edges_N = self._edges_for_samples(clusters_ids, device=device, dtype=dtype)  # (N, K-1)
         u0_vecC = self._u0(device=device, dtype=dtype)
-        u0_N    = u0_vecC[cluster_ids.long()]
+        u0_N    = u0_vecC[clusters_ids.long()]
 
-        F_list = [ self._cdf_primary(u0_N, inputs, cluster_ids) ]
+        F_list = [ self._cdf_primary(u0_N, inputs, clusters_ids) ]
         for j in range(K-2):
-            F_list.append(self._cdf_primary(edges_N[:, j], inputs, cluster_ids))
+            F_list.append(self._cdf_primary(edges_N[:, j], inputs, clusters_ids))
 
         Ps = [F_list[0]] + [torch.clamp(F_list[j+1] - F_list[j], 1e-12, 1.0) for j in range(K-2)]
         Ps.append(torch.clamp(1.0 - F_list[-1], 1e-12, 1.0))
@@ -2328,7 +5422,7 @@ class IntervalCEClusterIDs(nn.Module):
     
     def plot_final_pdf(self,
                    scale: torch.Tensor,          # (N,) échelle par sample
-                   cluster_ids: torch.Tensor,    # (N,)
+                   clusters_ids: torch.Tensor,    # (N,)
                    dir_output,
                    y_max: float = None,
                    num_points: int = 400,
@@ -2377,7 +5471,7 @@ class IntervalCEClusterIDs(nn.Module):
         u0_all = (self._sp(self.u0_raw) if self.force_positive else self.u0_raw).to(device=device, dtype=dtype)  # (C,)
         E_all  = self._edges_all_clusters(device, dtype)  # (C, K-1)  (cumul sur steps)
 
-        cid = cluster_ids.long()
+        cid = clusters_ids.long()
 
         for c in range(self.n_clusters):
             cl_dir = out_dir / f"cl{c}"
@@ -3328,12 +6422,12 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
         u0 = self._u0_all(device, dtype, use_sp=use_sp).unsqueeze(1)                   # (C,1)
         return u0 + torch.cumsum(steps, dim=1)                          # (C,K-2)
 
-    def _edges_for_samples(self, cluster_ids, device, dtype):
-        return self._edges_all(device, dtype)[cluster_ids.long()]       # (N,K-2)
+    def _edges_for_samples(self, clusters_ids, device, dtype):
+        return self._edges_all(device, dtype)[clusters_ids.long()]       # (N,K-2)
 
     # --------------- sélecteurs params cluster ---------------
-    def _select_bulk_param(self, cluster_ids: torch.Tensor):
-        cid = cluster_ids.long()
+    def _select_bulk_param(self, clusters_ids: torch.Tensor):
+        cid = clusters_ids.long()
         if self.B == "log":
             if not self.add_global_bulk:
                 mu = self.mu_bulk_raw[cid]
@@ -3347,9 +6441,9 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
                 k = self.k_shape_bulk_global + self.k_shape_bulk_delta[cid]
             return self._sp(k) if self.force_positive else k
 
-    def _select_tail_params(self, cluster_ids: torch.Tensor):
+    def _select_tail_params(self, clusters_ids: torch.Tensor):
         """Retourne un dict selon T pour simplifier l'appel en aval."""
-        cid = cluster_ids.long()
+        cid = clusters_ids.long()
         if self.T == "egpd":
             if not self.add_global_tail:
                 k_raw = self.kappa_raw[cid]
@@ -3419,7 +6513,7 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
         return (1.0 - pi) * F_b + pi * F_t
 
     # --------------- transform -> P ---------------
-    def transform(self, inputs: torch.Tensor, cluster_ids: torch.Tensor,
+    def transform(self, inputs: torch.Tensor, clusters_ids: torch.Tensor,
               dir_output, output_pdf):
         """
         inputs: (N,3) = [scale_tail, scale_bulk, pi_tail_logit]
@@ -3434,19 +6528,19 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
 
         # --- Plot PDFs (diag) ---
         if dir_output is not None:
-            self.plot_final_pdf(scale_tail, scale_bulk, pi_logit, cluster_ids,
+            self.plot_final_pdf(scale_tail, scale_bulk, pi_logit, clusters_ids,
                                 dir_output=dir_output,
                                 output_pdf=(output_pdf or "final_pdf"))
 
         device, dtype = scale_tail.device, scale_tail.dtype
         K = self.K
 
-        bulk_param = self._select_bulk_param(cluster_ids)     # mu_c ou k_shape_c
-        tail_params = self._select_tail_params(cluster_ids)   # dict selon T
+        bulk_param = self._select_bulk_param(clusters_ids)     # mu_c ou k_shape_c
+        tail_params = self._select_tail_params(clusters_ids)   # dict selon T
 
         u0_all  = self._u0_all(device, dtype)
-        u0_N    = u0_all[cluster_ids.long()]
-        edges_N = self._edges_for_samples(cluster_ids, device, dtype)
+        u0_N    = u0_all[clusters_ids.long()]
+        edges_N = self._edges_for_samples(clusters_ids, device, dtype)
 
         Fu = [ self._cdf_mixture(u0_N, scale_tail, scale_bulk, pi_logit, bulk_param, tail_params) ]
         for j in range(K - 2):
@@ -3461,11 +6555,11 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
         return P
 
     # --------------- forward (loss) ---------------
-    def forward(self, inputs: torch.Tensor, y_class: torch.Tensor, cluster_ids: torch.Tensor, weight: torch.Tensor = None):
+    def forward(self, inputs: torch.Tensor, y_class: torch.Tensor, clusters_ids: torch.Tensor, weight: torch.Tensor = None):
         """
         inputs: (N,3) = [scale_tail, scale_bulk, pi_tail_logit]
         """
-        P = self.transform(inputs, cluster_ids, dir_output=None, output_pdf=None)  # (N,K)
+        P = self.transform(inputs, clusters_ids, dir_output=None, output_pdf=None)  # (N,K)
 
         if self.L == 'entropy':
             logP = torch.log(P.clamp_min(1e-12))
@@ -3977,7 +7071,7 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
                    scale_tail: torch.Tensor,      # (N,)
                    scale_bulk: torch.Tensor,      # (N,)
                    pi_tail_logit: torch.Tensor,   # (N,)
-                   cluster_ids: torch.Tensor,     # (N,)
+                   clusters_ids: torch.Tensor,     # (N,)
                    dir_output,
                    y_max: float = None,
                    num_points: int = 400,
@@ -4026,7 +7120,7 @@ class BulkTailMixtureIntervalCELossClusterIDs(nn.Module):
         u0_all  = self._u0_all(device, dtype)                      # (C,)
         E_all   = self._edges_all(device, dtype)                   # (C, K-2)
 
-        cid = cluster_ids.long()
+        cid = clusters_ids.long()
 
         for c in range(self.C):
             cl_mask = (cid == c)

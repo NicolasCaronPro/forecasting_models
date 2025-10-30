@@ -74,7 +74,7 @@ class MLPLayer(torch.nn.Module):
 class NetMLP(torch.nn.Module):
     def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0):
         super(NetMLP, self).__init__()
-        self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
+        self.layer1 = MLPLayer(in_dim * n_sequences + end_channels, hidden_dim[0], device) if horizon > 0 else MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
         self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
         self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
         self.layer2 = MLPLayer(end_channels, output_channels, device)
@@ -89,12 +89,21 @@ class NetMLP(torch.nn.Module):
         self.output_channels = output_channels
         self.in_dim = in_dim
         self.horizon = horizon
+        self.n_sequences = self.n_sequences
 
+        #if self.horizon > 0:
+        #    self.define_horizon_decodeur()
+
+    def forward(self, features, z_prev=None, edges=None):
         if self.horizon > 0:
-            self.define_decodeur()
+            if z_prev is None:
+                z_prev = torch.zeros((features.shape[0], self.end_channels * self.n_sequences))
 
-    def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
+        
+        if self.horizon > 0:
+            features = torch.cat((features, z_prev), dim=1)
+
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
         x = F.relu(self.layer4(x))
@@ -109,20 +118,21 @@ class NetMLP(torch.nn.Module):
 
         return output, logits, hidden
     
-    def define_decodeur(self):
-        output_dim = self.output_channels * (self.horizon if self.horizon > 0 else 1)
-        self.decode1 = torch.nn.Linear(self.end_channels + self.in_dim + self.output_channels, 256)
-        self.decode2 = torch.nn.Linear(256, output_dim)
-        self._decoder_output_dim = output_dim
+    def define_horizon_decodeur(self):
+        self.decode1 = torch.nn.Linear(self.end_channels + (self.in_dim * self.n_sequences) + self.output_channels, self.end_channels)
+        self.decode2 = torch.nn.Linear(self.end_channels, self.output_channels)
 
-    def forward_decodeur(self, z, y_prev=None, X_futur=None):
+    def forward_horizon(self, z, y_prev=None, X_futur=None):
         B = z.shape[0]
         if y_prev is None:
             y_prev = torch.zeros((B, getattr(self, "_decoder_output_dim", self.output_channels)), device=z.device)
         if X_futur is None:
-            X_futur = torch.zeros((B, self.in_dim), device=z.device)
+            X_futur = torch.zeros((B, (self.in_dim * self.n_sequences)), device=z.device)
+        else:
+            X_futur = X_futur.view(X_futur.shape[0], X_futur.shape[1] * self.n_sequences)
+        
+        x = torch.cat((z, y_prev, X_futur), dim=1)
 
-        x = torch.cat((z, y_prev, X_futur))
         x = self.decode1(x)
         hidden = F.relu(x)
         logits = self.decode2(hidden)
@@ -1392,7 +1402,7 @@ class GRU(torch.nn.Module):
 
         # GRU layer
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + self.end_channels if horizon > 0 else in_channels,
             hidden_size=gru_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
@@ -1424,9 +1434,6 @@ class GRU(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
-        if self.horizon > 0:
-            self.define_decodeur()
-
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
@@ -1440,6 +1447,11 @@ class GRU(torch.nn.Module):
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
 
         # Reshape to (batch, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1462,48 +1474,7 @@ class GRU(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
-
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.out_channels is None:
-                raise ValueError("out_channels must be specified to automatically define the decoder.")
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
@@ -1527,7 +1498,7 @@ class LSTM(torch.nn.Module):
 
         # LSTM block
         self.lstm = torch.nn.LSTM(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=self.lstm_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
@@ -1559,9 +1530,6 @@ class LSTM(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)
 
-        if self.horizon > 0:
-            self.define_decodeur()
-
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
         Parameters:
@@ -1575,6 +1543,11 @@ class LSTM(torch.nn.Module):
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
 
         # (batch_size, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1601,48 +1574,7 @@ class LSTM(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
-
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.out_channels is None:
-                raise ValueError("out_channels must be specified to automatically define the decoder.")
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0):
@@ -1655,7 +1587,10 @@ class DilatedCNN(torch.nn.Module):
         
         # Initialisation des couches convolutives et BatchNorm
         for i in range(self.num_layer):
-            self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
+            if i == 0:
+                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i] + end_channels if horizon > 0 else channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
+            else:
+                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
             if use_layernorm:
                 self.batch_norm_list.append(torch.nn.LayerNorm(channels[i + 1]).to(device))
             else:
@@ -1681,8 +1616,6 @@ class DilatedCNN(torch.nn.Module):
         self.return_hidden = return_hidden
         self.device = device
         self.end_channels = end_channels
-        self.decoder = None
-        self._decoder_input = None
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
@@ -1695,14 +1628,16 @@ class DilatedCNN(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
 
-        if self.horizon > 0:
-            self.define_decodeur()
-
     def forward(self, x, edges=None, z_prev=None):
         # Couche d'entrée
 
         if z_prev is None:
             z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
+        else:
+            z_prev = z_prev.view(x.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            x = torch.cat((x, z_prev), dim=1)
 
         # Couches convolutives dilatées avec BatchNorm, activation et dropout
         for cnn_layer, batch_norm in zip(self.cnn_layer_list, self.batch_norm_list):
@@ -1722,46 +1657,7 @@ class DilatedCNN(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
-
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1886,7 +1782,7 @@ class GraphCastGRU(torch.nn.Module):
         # GRU — encodes the temporal axis and outputs an embedding per node
         # ------------------------------------------------------------------
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=input_dim_grid_nodes,
             num_layers=num_gru_layers,
             dropout=0.03 if num_gru_layers > 1 else 0.0,
@@ -1940,7 +1836,7 @@ class GraphCastGRU(torch.nn.Module):
             self.output_activation = torch.nn.Identity()
 
         if self.horizon > 0:
-            self.define_decodeur()
+            self.define_horizon_decodeur()
 
     # ----------------------------------------------------------------------
     # Forward pass
@@ -1949,11 +1845,20 @@ class GraphCastGRU(torch.nn.Module):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
+
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
+
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+
+        if self.horizon > 0:            
+            X = torch.cat((X, z_prev), dim=1)
+
+        X_for_gru = X.permute(0, 2, 1)
+        
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -1961,7 +1866,7 @@ class GraphCastGRU(torch.nn.Module):
         gru_last = self.norm(gru_out[:, -1, :])
         gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
         
-        X_graphcast = gru_last[None,: ,:]
+        X_graphcast = gru_last[None, : ,:]
 
         # GraphCast processing
         x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
@@ -1974,7 +1879,7 @@ class GraphCastGRU(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params=None):
+    def define_horizon_decodeur(self, decodeur_params=None):
         if decodeur_params is None:
             if self.horizon <= 0:
                 raise ValueError("horizon must be greater than zero to automatically define the decoder.")
@@ -1997,9 +1902,9 @@ class GraphCastGRU(torch.nn.Module):
         ).to(device)
         self._decoder_output_dim = output_dim
 
-    def forward_decodeur(self, y_prev=None, X_futur=None):
+    def forward_horizon(self, y_prev=None, X_futur=None):
         if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
 
         if y_prev is not None:
             decoder_input = y_prev
@@ -2057,7 +1962,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # GRU — encodes the temporal axis and outputs an embedding per node
         # ------------------------------------------------------------------
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=input_dim_grid_nodes,
             num_layers=num_gru_layers,
             dropout=0.03 if num_gru_layers > 1 else 0.0,
@@ -2067,6 +1972,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.num_gru_layers = num_gru_layers
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         self.dropout = torch.nn.Dropout(0.03)
+        self.n_sequences = n_sequences
         
         # ------------------------------------------------------------------
         # GraphCast core network (unchanged)
@@ -2111,7 +2017,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.output_activation = torch.nn.Identity()
 
         if self.horizon > 0:
-            self.define_decodeur()
+            self.define_horizon_decodeur()
 
     # ----------------------------------------------------------------------
     # Forward pass
@@ -2122,9 +2028,17 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         """
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
+
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
+
+        X_for_gru = X.permute(0, 2, 1)
+
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -2155,7 +2069,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params=None):
+    def define_horizon_decodeur(self, decodeur_params=None):
         if decodeur_params is None:
             if self.horizon <= 0:
                 raise ValueError("horizon must be greater than zero to automatically define the decoder.")
@@ -2178,9 +2092,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         ).to(device)
         self._decoder_output_dim = output_dim
 
-    def forward_decodeur(self, y_prev=None, X_futur=None):
+    def forward_horizon(self, y_prev=None, X_futur=None):
         if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
 
         if y_prev is not None:
             decoder_input = y_prev

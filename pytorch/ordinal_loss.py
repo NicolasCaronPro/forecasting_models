@@ -18,7 +18,7 @@ class BCELoss(torch.nn.Module):
     binary classification targets representing ``P(y > k)`` for each threshold
     ``k``.
     """
-
+    
     def __init__(self, num_classes: int):
         super(BCELoss, self).__init__()
         self.num_classes = num_classes
@@ -853,40 +853,172 @@ class OrdinalDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         plt.savefig(dir_output / 'dwk_Cs_epochs.png')
         plt.close()
 
-class GeneralizedWassersteinDiceLoss(torch.nn.Module):
-
+class GeneralizedWassersteinDiceLoss(nn.Module):
     def __init__(self,
-        background: int = 0,           # index of background class
-        ignore_index = None,
-        use_logits: bool = True,
-        eps: float = 1e-6,
-        type_pen: str ='over'):
+                 background: int = 0,
+                 M = None,
+                 ignore_index = None,
+                 use_logits: bool = True,
+                 eps: float = 1e-6):
         super().__init__()
-
-        """self.M = torch.tensor([ [0, 1,      2,      3,      4],
-                                [1, 0,      0.25,    0.33,   0.5],
-                                [2, 1.0,    0,      0.25,   0.33],
-                                [3, 1.25,   0.75,   0,      0.33],
-                                [4, 1.75,      1.0,    0.75,   0]])"""
-        if type_pen == 'under':
-            self.M = torch.tensor([ [0, 1,      2,      3,      4],
-                                    [1, 0,      0.25,    0.33,   0.5],
-                                    [2, 1.25,    0,      0.25,   0.33],
-                                    [3, 1.5,   1.0,   0,      0.33],
-                                    [4, 2,      1.5,    1.0,   0]])
-        elif type_pen == 'over':
-             self.M = torch.tensor([ [0, 1,      2,      3,      4],
-                                    [1, 0,      0.25,    0.33,   0.5],
-                                    [2, 1.25,    0,      0.25,   0.33],
-                                    [3, 1.5,   1.0,   0,      0.33],
-                                    [4, 2,      1.5,    1.0,   0]]).T
+        
+        """self.M = torch.tensor([ [0, 1, 2, 3, 4], [1, 0, 0.25, 0.33, 0.5], [2, 1.0, 0, 0.25, 0.33], [3, 1.25, 0.75, 0, 0.33], [4, 1.75, 1.0, 0.75, 0]])"""
+        """self.M = torch.tensor([ [0, 1, 2, 3, 4], [1, 0, 0.25, 0.33, 0.5], [2, 1.0, 0, 0.25, 0.33], [3, 1.25, 1.0, 0, 0.33], [4, 1.5, 1.25, 0.5, 0]])"""
+        if M is None:
+            self.M = torch.tensor([ [0, 1.5, 2.5, 3.5, 4.5], [0.75, 0, 0.25, 0.33, 0.5], [1.5, 1.0, 0, 0.25, 0.33], [2, 1.25, 1.0, 0, 0.33], [3.5, 1.5, 1.25, 1.0, 0]])
+            """
+            self.M = torch.tensor([[0.00, 1.0, 2.0, 3.0, 4.0],
+                                   [1.0, 0.00, 1.00, 2.0, 3.0],
+                                   [2.0, 1.00, 0.00, 1.00, 2.0],
+                                   [3.0, 2.0, 1.00, 0.00, 1.00],
+                                   [4.0, 3.0, 2.0, 1.00, 0.00]], dtype=torch.float32)"""
         else:
-            raise ValueError(f'Unknow value of type_pen {type_pen}, should be over or under')
-                                
+            self.M = M.clone().detach().to(torch.float32)
+            
         self.background = background
         self.ignore_index = ignore_index
         self.use_logits = use_logits
         self.eps = eps
+
+    # ---------------- Confusion matrix (brute) ----------------
+    def get_confusion_matrix(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        C = int(self.M.size(0))
+        preds = (torch.softmax(logits, dim=1).argmax(dim=1) if self.use_logits
+                 else logits.argmax(dim=1))
+        y = target
+        if self.ignore_index is not None:
+            mask = (y != self.ignore_index)
+            preds, y = preds[mask], y[mask]
+        y = y.reshape(-1).to(torch.int64)
+        preds = preds.reshape(-1).to(torch.int64)
+        valid = (y >= 0) & (y < C) & (preds >= 0) & (preds < C)
+        if valid.numel() == 0 or valid.sum() == 0:
+            return torch.zeros((C, C), dtype=torch.long, device=logits.device)
+        y, preds = y[valid], preds[valid]
+        cm = torch.zeros((C, C), dtype=torch.long, device=logits.device)
+        idx = y * C + preds
+        counts = torch.bincount(idx, minlength=C*C)
+        cm += counts.view(C, C)
+        return cm
+
+    # -------------- Normalisation robuste max(row,col) --------------
+    def _normalize_confusion(self, conf_raw: torch.Tensor) -> torch.Tensor:
+        conf = conf_raw.to(torch.float32)
+        row_sum = conf.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        col_sum = conf.sum(dim=0, keepdim=True).clamp_min(1e-12)
+        conf_row = conf / row_sum                    # P(pred=j | true=i)
+        conf_col = conf / col_sum                    # P(true=i | pred=j)
+        conf_norm = torch.maximum(conf_row, conf_col)
+        return conf_norm
+
+    # ---------------- API de mise à jour générique ----------------
+    def update_after_batch(self, logits, target, **kwargs):
+        # Par défaut on fait la version ordinale par ligne
+        #return self.confusion_matrix_update(logits, target, **kwargs)
+        pass
+
+    # -------------- Mise à jour ordinale par ligne --------------
+    def confusion_matrix_update_rows(self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        alpha: float = 0.05,
+        normalize: bool = True,
+    ):
+        """
+        Pour chaque vraie classe i, ajoute alpha * max_j!=i conf[i,j] à TOUTES les cases (i,j!=i).
+        Diagonale maintenue à 0.
+        """
+        conf_raw = self.get_confusion_matrix(logits, target).to(self.M.device)
+        conf = self._normalize_confusion(conf_raw) if normalize else conf_raw.to(torch.float32)
+
+        C = conf.size(0)
+        conf_off = conf.clone()
+        conf_off.fill_diagonal_(0.0)
+        m_row = conf_off.max(dim=1).values  # (C,)
+
+        per_cell = m_row.unsqueeze(1).expand(C, C).clone()
+        per_cell.fill_diagonal_(0.0)
+
+        self.M = self.M.to(per_cell.device, per_cell.dtype)
+        self.M = self.M + (alpha * per_cell)
+        self.M.fill_diagonal_(0.0)
+        return conf
+    
+    # -------------- Mise à jour par coins (sur/sous-prédictions) --------------
+    def confusion_matrix_update_corners(self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        alpha: float = 0.05,
+        normalize: bool = True,
+        weights = None,   # (C,C) optionnelle pour pondérer le max des coins
+    ):
+        """
+        Ajoute:
+          - alpha * u_max à toutes les cases i<j (coin haut-droit, sur-prédictions)
+          - alpha * l_max à toutes les cases i>j (coin bas-gauche, sous-prédictions)
+        où u_max/l_max sont les max de conf (ou conf*weights) dans chaque coin.
+        """
+        conf_raw = self.get_confusion_matrix(logits, target).to(self.M.device)
+        conf = self._normalize_confusion(conf_raw) if normalize else conf_raw.to(torch.float32)
+
+        C = conf.size(0)
+        eff = conf if weights is None else (conf * weights.to(conf.device, conf.dtype))
+
+        upper_mask = torch.triu(torch.ones(C, C, device=conf.device, dtype=torch.bool), diagonal=1)
+        lower_mask = torch.tril(torch.ones(C, C, device=conf.device, dtype=torch.bool), diagonal=-1)
+
+        u_max = eff[upper_mask].max().item() if upper_mask.any() else 0.0
+        l_max = eff[lower_mask].max().item() if lower_mask.any() else 0.0
+
+        per_cell = torch.zeros_like(conf)
+        per_cell[upper_mask] = u_max
+        per_cell[lower_mask] = l_max
+        per_cell.fill_diagonal_(0.0)
+
+        self.M = self.M.to(per_cell.device, per_cell.dtype)
+        self.M = self.M + (alpha * per_cell)
+        self.M.fill_diagonal_(0.0)
+        return conf
+    
+    # -------------- Mise à jour par cases (sur/sous-prédictions) --------------
+    def confusion_matrix_update(self,
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        alpha: float = 0.05,
+        normalize: bool = True,
+        weights=None,   # (C,C) optionnelle pour pondérer chaque case
+    ):
+        """
+        Ajoute, pour chaque case (i,j) != (j,j), la quantité alpha * err_ij
+        où err_ij provient directement de la matrice de confusion (éventuellement
+        normalisée et/ou pondérée par weights). Contrairement à la version
+        précédente, on n'utilise plus le maximum par coin.
+
+        """
+
+        # Matrice de confusion (brute ou normalisée)
+        conf_raw = self.get_confusion_matrix(logits, target).to(self.M.device)
+        conf = self._normalize_confusion(conf_raw) if normalize else conf_raw.to(torch.float32)
+
+        # Pondération éventuelle case par case
+        eff = conf if weights is None else (conf * weights.to(conf.device, conf.dtype))
+
+        C = conf.size(0)
+        upper_mask = torch.triu(torch.ones(C, C, device=conf.device, dtype=torch.bool), diagonal=1)
+        lower_mask = torch.tril(torch.ones(C, C, device=conf.device, dtype=torch.bool), diagonal=-1)
+
+        # On reprend directement les erreurs par case dans chaque coin
+        per_cell = torch.zeros_like(conf)
+        per_cell[upper_mask] = eff[upper_mask]  # sur-prédictions
+        per_cell[lower_mask] = eff[lower_mask]  # sous-prédictions
+        per_cell.fill_diagonal_(0.0)
+
+        # Mise à jour de M
+        self.M = self.M.to(per_cell.device, per_cell.dtype)
+        self.M = self.M + (alpha * per_cell)
+        self.M.fill_diagonal_(0.0)
+
+        return conf
 
     def forward(self,
         logits: torch.Tensor,          # (N, C, H, W)  logits or probs
@@ -945,3 +1077,86 @@ class GeneralizedWassersteinDiceLoss(torch.nn.Module):
         score = num / den
         loss = 1.0 - score
         return loss
+
+    def plot_params(self,
+                log,
+                dir_output,
+                class_names=None,      # list of class names (length C) or None
+                title="Misclassification cost matrix",
+                figsize=(6, 5),
+                annotate=True,         # if True, write (i,j) and the numeric value in each cell
+                cmap="cool",        # matplotlib colormap
+                vmin=None, vmax=None,  # colorbar bounds (auto if None)
+                savepath=None):        # if provided, save the figure here (png, pdf, ...)
+        """
+        Display self.M (C x C) as a heatmap.
+
+        - self.M[i,j] = cost of predicting class j when the true class is i.
+        - class_names (optional): tick labels for axes.
+        - annotate: write "(i,j)" and the numeric value in each cell.
+        - savepath: if provided, save the figure to this path; otherwise saves to dir_output/'M.png'.
+        """
+        # Safely move to CPU and convert to numpy
+        M = self.M
+        if isinstance(M, torch.Tensor):
+            M = M.detach().to("cpu").numpy()
+        else:
+            M = np.asarray(M)
+
+        C = M.shape[0]
+        if class_names is not None:
+            assert len(class_names) == C, "class_names must have C elements."
+
+        fig, ax = plt.subplots(figsize=figsize)
+        im = ax.imshow(M, cmap=cmap, aspect="equal", vmin=vmin, vmax=vmax)
+
+        # Axes and titles
+        #ax.set_title(title)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Ground truth")
+
+        # Ticks + labels
+        ax.set_xticks(np.arange(C))
+        ax.set_yticks(np.arange(C))
+        if class_names is not None:
+            ax.set_xticklabels(class_names, rotation=45, ha="right")
+            ax.set_yticklabels(class_names)
+        else:
+            ax.set_xticklabels(np.arange(C))
+            ax.set_yticklabels(np.arange(C))
+
+        # Light grid for readability
+        ax.set_xticks(np.arange(-.5, C, 1), minor=True)
+        ax.set_yticks(np.arange(-.5, C, 1), minor=True)
+        ax.grid(which="minor", linestyle=":", linewidth=0.5)
+        ax.tick_params(top=False, bottom=True, left=True, right=False)
+
+        # Colorbar
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel("Cost", rotation=90, labelpad=10)
+
+        # Annotations
+        if annotate:
+            # Choose text color depending on background intensity
+            finite_vals = M[np.isfinite(M)]
+            if finite_vals.size == 0:
+                thresh = 0.0
+            else:
+                thresh = (np.nanmax(finite_vals) + np.nanmin(finite_vals)) / 2.0
+
+            for i in range(C):
+                for j in range(C):
+                    val = M[i, j]
+                    text_color = "white" if np.isfinite(val) and val > thresh else "black"
+                    ax.text(j, i, f"({i},{j})\n{val:.2f}",
+                            ha="center", va="center",
+                            color=text_color, fontsize=9, linespacing=1.1)
+
+        fig.tight_layout()
+
+        # Save
+        if savepath is None:
+            savepath = dir_output / "M.png"
+        fig.savefig(savepath, dpi=200, bbox_inches="tight")
+
+        return fig, ax
