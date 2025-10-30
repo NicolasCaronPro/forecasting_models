@@ -96,7 +96,6 @@ class EGPDNLLLoss(torch.nn.Module):
         self.eps = eps
         self.reduction = reduction
         self.force_positive = force_positive
-<<<<<<< HEAD
         self.area_exponent = area_exponent  # contrôle l’offset d’échelle via a**alpha
         self.num_classes = num_classes
 
@@ -147,137 +146,14 @@ class EGPDNLLLoss(torch.nn.Module):
 
         # H(y) = 1 - z^{-1/xi} ; h(y) = (1/sigma) * z^{-1/xi - 1}
         log_h = torch.where(pos, -torch.log(sigma) + (-1.0 / xi - 1.0) * torch.log(z), torch.zeros_like(y))
-=======
-    
-    def _egpd_icdf(self, u: torch.Tensor, sigma: torch.Tensor,
-               kappa: torch.Tensor, xi: torch.Tensor, eps: float):
-        """
-        Inverse CDF de l'eGPD pour u in (0,1):
-        y = H^{-1}(u^(1/kappa)),  H = CDF GPD(sigma, xi)
-        GPD:
-        xi != 0: H^{-1}(v) = (sigma/xi) * ((1 - v)^(-xi) - 1)
-        xi -> 0: H^{-1}(v) = -sigma * log(1 - v)
-        """
-        v = torch.clamp(u, eps, 1 - eps) ** (1.0 / torch.clamp(kappa, min=eps))
-        xi_safe = torch.clamp(xi, min=-1e6, max=1e6)
-
-        # branche xi ≈ 0 (exponentielle)
-        near0 = xi_safe.abs() < 1e-6
-        y = torch.empty_like(v)
-
-        # xi proche de 0
-        y_near0 = -sigma * torch.log1p(-v)
-
-        # xi != 0
-        y_xi = (sigma / xi_safe) * ((1.0 - v).clamp(min=eps) ** (-xi_safe) - 1.0)
-
-        y = torch.where(near0, y_near0, y_xi)
-        return y.clamp_min(0.0)
-
-    def transform(self, inputs: torch.Tensor, from_logits: bool = True):
-        """Renvoie (sigma_pos, p, y_pred_mediane_melange)."""
-        assert inputs.shape[-1] == 2, "inputs must have last dim = 2 (sigma, p)"
-        if from_logits:
-            sigma = F.softplus(inputs[..., 0])
-            #p = torch.sigmoid(inputs[..., 1])
-            p = inputs[..., 1]
-        else:
-            sigma = inputs[..., 0]
-            p = inputs[..., 1]
-
-        # bornes num
-        sigma = sigma.clamp_min(self.eps)
-        p = p.clamp(self.eps, 1.0 - self.eps)
-
-        # paramètres positifs (si option active)
-        kappa, xi = self._pos_params()
-
-        # --- prédiction: médiane du mélange (zero-inflated eGPD)
-        # Si p <= 0.5 -> médiane = 0. Sinon u = 1 - 0.5/p puis ICDF eGPD.
-        u_median = 1.0 - 0.5 / p
-        y_pred = torch.where(
-            p <= 0.5,
-            torch.zeros_like(p),
-            self._egpd_icdf(u_median, sigma, kappa, xi, self.eps)
-        )
-
-        return y_pred
-
-    def _pos_params(self):
-        if self.force_positive:
-            kappa = F.softplus(self.kappa)
-            xi = F.softplus(self.xi)
-        else:
-            kappa = self.kappa
-            xi = self.xi
-        return kappa, xi
-
-    def forward(
-        self,
-        inputs: torch.Tensor,
-        y: torch.Tensor,
-        weight: torch.Tensor = None,
-        from_logits: bool = True,
-    ) -> torch.Tensor:
-        """Compute mixture NLL with occurrence probability.
-
-        Args:
-            sigma_or_inputs: either sigma_pos tensor (same shape as y),
-                             or a tensor (...,2) with [:,0]=sigma_pos and [:,1]=p.
-            y: observed target (>=0), same shape as sigma.
-            p: probability of occurrence (same shape as y). If None and
-               sigma_or_inputs has last dim==2, it will be extracted via `transform`.
-            weight: optional sample weights (broadcastable to y).
-            from_logits: if True and `p is None` and `sigma_or_inputs` has 2 cols,
-                         apply (softplus/sigmoid) inside transform.
-        """
-        sigma_or_inputs, p = inputs[...,0], inputs[...,1]
-        sigma = F.softplus(sigma_or_inputs) if from_logits else sigma_or_inputs
-        #p = p.clamp(self.eps, 1.0 - self.eps) if from_logits else p
-
-        kappa, xi = self._pos_params()
-
-        # Masks for mixture components
-        # (we assume y >= 0; if negatives could appear, clamp or raise)
-        pos = (y > 0)
-        zero = ~pos
-
-        # --- y > 0 branch: log g_eGPD(y) ---
-        # z = 1 + xi * y / sigma
-        z = 1.0 + xi * (y / sigma)
-        z = torch.where(pos, z.clamp_min(1.0 + 1e-12), torch.ones_like(z))  # stable only where used
-
-        # h(y) = (1/sigma) * z^{-1/xi - 1}
-        log_h = torch.where(
-            pos,
-            -torch.log(sigma) + (-1.0 / xi - 1.0) * torch.log(z),
-            torch.zeros_like(y)
-        )
-
-        # H(y) = 1 - z^{-1/xi}
->>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         H = torch.where(pos, 1.0 - torch.pow(z, -1.0 / xi), torch.zeros_like(y))
         H = torch.where(pos, H.clamp(max=1.0 - 1e-12), H)
 
         # log g(y) = log kappa + log h(y) + (kappa - 1) * log H(y)
-<<<<<<< HEAD
         log_g = torch.where(pos, torch.log(kappa) + log_h + (kappa - 1.0) * torch.log(H.clamp_min(self.eps)),
                             torch.zeros_like(y))
 
         nll = torch.where(pos, -(log_g), torch.zeros_like(y))
-=======
-        log_g = torch.where(
-            pos,
-            torch.log(kappa) + log_h + (kappa - 1.0) * torch.log(H.clamp_min(self.eps)),
-            torch.zeros_like(y)
-        )
-
-        # --- Final NLL per-sample ---
-        nll_pos  = torch.where(pos, -(torch.log(p) + log_g), torch.zeros_like(y))
-        nll_zero = torch.where(zero, -torch.log(1.0 - p), torch.zeros_like(y))
-        nll = nll_pos + nll_zero
-
->>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
         if weight is not None:
             nll = nll * weight
 
@@ -285,7 +161,6 @@ class EGPDNLLLoss(torch.nn.Module):
             return nll.mean()
         if self.reduction == "sum":
             return nll.sum()
-<<<<<<< HEAD
         return nll
 
     @torch.no_grad()
@@ -308,10 +183,6 @@ class EGPDNLLLoss(torch.nn.Module):
         y_q = self._egpd_icdf(u, sigma, kappa, xi, self.eps)
         self.plot_final_pdf(inputs, dir_output)
         return y_q
-=======
-        else:
-            return nll
->>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
     
     def get_learnable_parameters(self):
         return {"kappa" : self.kappa, "xi" : self.xi}

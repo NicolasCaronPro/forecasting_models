@@ -137,12 +137,8 @@ class MeshGraphEncoder(nn.Module):
                     cat_feat = aggregate_and_concat(
                         efeat, mesh_nfeat, graph, self.aggregation
                     )
-<<<<<<< HEAD
                 #if self.attention == 'GAT':
                 if False:
-=======
-                if self.attention == 'GAT':
->>>>>>> 8e0e38145e8fcf485b70ae715672f2544c9b71aa
                     inputs = (grid_nfeat[i], cat_feat)
                 else:
                     inputs = cat_feat
