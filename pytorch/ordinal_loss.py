@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import Optional
 from forecasting_models.pytorch.tools_2 import *
 from forecasting_models.pytorch.loss_utils import *
+from forecasting_models.pytorch.classification_loss import WeightedCrossEntropyLoss
 
 ###################################### Ordinality ##########################################
 
@@ -1255,3 +1256,134 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
         fig.savefig(savepath, dpi=200, bbox_inches="tight")
 
         return fig, ax
+
+class CEWKLoss(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        C: float = 1.0,              # poids du WKLoss (inchangé)
+        C1: float = 0.5,             # trade-off entre wce1 et wce2
+        wk_penalization_type: str = "quadratic",
+        weight: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
+        use_logits: bool = True,
+        learned: bool = False,
+        background_class: int = 0,
+    ) -> None:
+        super().__init__(
+        )
+
+        self.num_classes = num_classes
+        self.learned = learned
+
+        self.C  = C   # poids pour WKLoss
+        self.C1 = C1  # c1: pondère wce1 vs wce2
+
+        self.wk_penalization_type = wk_penalization_type
+
+        if weight is not None and weight.shape != (num_classes,):
+            raise ValueError(
+                f"Weight shape {weight.shape} is not compatible "
+                f"with num_classes {num_classes}"
+            )
+
+        for name, val in (("C", C), ("C1", C1)):
+            if val < 0 or val > 1:
+                raise ValueError(f"{name} must be between 0 and 1, but is {val}")
+
+        if reduction not in ["mean", "sum", "none"]:
+            raise ValueError(
+                f"Reduction {reduction} is not supported. Please use 'mean', 'sum' or 'none'"
+            )
+
+        self.use_logits = use_logits
+        self.background_class = background_class
+
+        # sous-losses
+        self.wk  = WKLoss(
+            self.num_classes,
+            penalization_type=self.wk_penalization_type,
+            weight=weight,
+            use_logits=self.use_logits,
+        )
+        self.wce_fp_bg = WeightedCrossEntropyLoss(self.num_classes)
+        self.wce_fn_bg = WeightedCrossEntropyLoss(self.num_classes)
+
+    def _flatten_inputs(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if y_pred.dim() <= 2:
+            return y_pred, y_true.view(-1)
+
+        batch, classes = y_pred.size(0), y_pred.size(1)
+        flattened_pred = y_pred.view(batch, classes, -1).permute(0, 2, 1).reshape(-1, classes)
+        flattened_true = y_true.view(batch, -1).reshape(-1)
+        return flattened_pred, flattened_true
+
+    def forward(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
+        # paramètres (sigmoid si apprenables)
+        if self.learned:
+            C  = torch.sigmoid(self.C)
+            c1 = torch.sigmoid(self.C1)
+        else:
+            C, c1 = self.C, self.C1
+
+        y_pred_flat, y_true_flat = self._flatten_inputs(y_pred, y_true)
+
+        if sample_weight is not None:
+            sample_weight_flat = sample_weight.view(-1)
+            if sample_weight_flat.numel() != y_true_flat.numel():
+                raise ValueError(
+                    "Sample weights must have the same number of elements as the targets."
+                )
+        else:
+            sample_weight_flat = None            
+
+        if self.use_logits:
+            pred_classes = torch.argmax(torch.nn.functional.softmax(y_pred_flat, dim=1), dim=1)
+        else:
+            pred_classes = torch.argmax(y_pred_flat, dim=1)
+
+        
+        # masques
+        mask_true0_wrong = (y_true_flat == self.background_class) & (pred_classes != self.background_class)  # wce1
+        mask_pred0_wrong = (pred_classes == self.background_class) & (y_true_flat != self.background_class)  # wce2
+        positive_mask    = (y_true_flat != self.background_class) & (pred_classes != self.background_class)# WK
+        
+        # WCE #1
+        if mask_true0_wrong.any():
+            wce1_pred = y_pred_flat[mask_true0_wrong]
+            wce1_true = y_true_flat[mask_true0_wrong]
+            wce1_weight = sample_weight_flat[mask_true0_wrong] if sample_weight_flat is not None else None
+            wce1 = self.wce_fp_bg(wce1_pred, wce1_true, sample_weight=wce1_weight)
+
+        # WCE #2
+        if mask_pred0_wrong.any():
+            wce2_pred = y_pred_flat[mask_pred0_wrong]
+            wce2_true = y_true_flat[mask_pred0_wrong]
+            wce2_weight = sample_weight_flat[mask_pred0_wrong] if sample_weight_flat is not None else None
+            wce2 = self.wce_fn_bg(wce2_pred, wce2_true, sample_weight=wce2_weight)
+
+        # WKLoss
+        #if positive_mask.any():
+        #    wk_pred = y_pred_flat[positive_mask]
+        #    wk_true = y_true_flat[positive_mask]
+        #    wk_weight = sample_weight_flat[positive_mask] if sample_weight_flat is not None else None
+        #    wk_result = self.wk(wk_pred, wk_true, sample_weight=wk_weight)
+        #else:
+        #    wk_result = 0.0
+        
+        wk_result = self.wk(y_pred, y_true)
+        
+        loss = C * wk_result
+        
+        if 'wce1' in locals():
+            loss += c1 * wce1
+        
+        if 'wce2' in locals():
+            loss += (1 - c1) * wce2
+        
+        return loss

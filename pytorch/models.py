@@ -1423,8 +1423,9 @@ class GRU(torch.nn.Module):
         self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
         self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
 
-        # Activation function
-        self.act_func = getattr(torch.nn, act_func)()
+        # Activation functions - separate instances for SHAP compatibility
+        self.act_func1 = getattr(torch.nn, act_func)()
+        self.act_func2 = getattr(torch.nn, act_func)()
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1469,9 +1470,9 @@ class GRU(torch.nn.Module):
         x = self.norm(x)
         x = self.dropout(x)
 
-        # Activation and output
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
+        # Activation and output - using separate activation instances
+        x = self.act_func1(self.linear1(x))
+        hidden = self.act_func2(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
         return output, logits, hidden

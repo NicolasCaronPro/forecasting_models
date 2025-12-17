@@ -2452,7 +2452,43 @@ def calculate_area_under_curve(y_values):
     """
     return np.trapz(y_values, dx=1)
 
-def evaluate_metrics(df, y_true_col='target', y_pred=None):
+def entropy(prob_matrix):
+    """
+    Calcule l'entropie normalisée (entre 0 et 1) pour chaque sample.
+    
+    Paramètre
+    ---------
+    prob_matrix : np.ndarray de shape (N, K)
+        Chaque ligne contient les probabilités des K classes pour un sample.
+        
+    Retour
+    ------
+    np.ndarray de shape (N,)
+        Entropie normalisée pour chaque sample.
+    """
+    
+    # Vérifications
+    if not isinstance(prob_matrix, np.ndarray):
+        prob_matrix = np.array(prob_matrix)
+    
+    N, K = prob_matrix.shape
+    
+    # On évite les probas nulles dans le log : remplace 0 par une très petite valeur
+    eps = 1e-12
+    probs = np.clip(prob_matrix, eps, 1.0)
+    
+    # Entropie par sample : somme sur les classes
+    H = -np.sum(probs * np.log2(probs), axis=1)
+    
+    # Entropie maximale
+    H_max = math.log2(K)
+    
+    # Normalisation
+    H_norm = H / H_max
+    res = np.mean(H_norm)
+    return res
+
+def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
     """
     Calcule l'IoU et le F1-score sur chaque département, puis calcule l'aire sous la courbe normalisée (aire / aire maximale).
     
@@ -2482,6 +2518,9 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
     prec_macro = precision_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
     rec_macro = recall_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
     
+    if y_pred_probas is not None:
+        ent = entropy(y_pred_probas)
+    
     auoc = auoc_func(conf_matrix=confusion_matrix(y_true, y_pred, labels=np.union1d(y_true, y_pred)))
 
     under = under_prediction_score(y_true, y_pred)
@@ -2489,7 +2528,7 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
 
     # Initialiser un dictionnaire pour les résultats
     results = {'iou' : iou, 'f1' : f1, 'under' : under, 'over' : over, 'prec' : prec, 'recall' : rec,
-               'auoc' : auoc, 'f1_macro' : f1_macro, 'prec_macro' : prec_macro, 'rec_macro' : rec_macro}
+               'auoc' : auoc, 'f1_macro' : f1_macro, 'prec_macro' : prec_macro, 'rec_macro' : rec_macro, 'ent' : ent}
 
     # Calculer l'IoU et F1 pour chaque département
     IoU_scores = []
@@ -2503,12 +2542,14 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
         if np.all(y_true == 0):
             continue
         y_pred_department = y_pred[df_sorted['departement'] == department]  # Récupérer les prédictions associées au département
+        y_pred_department_proba = y_pred_probas[df_sorted['departement'] == department] if y_pred_probas is not None else y_pred_department
         
         # Calcul des scores IoU et F1
         IoU = iou_score(y_true, y_pred_department)
         F1 = f1_score(y_true > 0, y_pred_department > 0, zero_division=0)
         prec = precision_score(y_true > 0, y_pred_department > 0, zero_division=0)
         rec = recall_score(y_true > 0, y_pred_department > 0, zero_division=0)
+        ent = entropy(y_pred_department_proba)
 
         IoU_scores.append(IoU)
         F1_scores.append(F1)
@@ -2560,6 +2601,7 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
         rec_macro = recall_score((y_true[mask]).astype(int), (y_pred[mask]).astype(int), zero_division=0, average='macro')
 
         auoc_elt = auoc_func(confusion_matrix(y_true[mask], y_pred[mask], labels=np.union1d(y_true[mask], y_pred[mask])))
+        ent_elt = entropy(y_pred_probas[mask]) if y_pred_probas is not None else np.nan
 
         results[f'iou_elt_sup_{elt}'] = iou_elt
         results[f'f1_elt_sup_{elt}'] = f1_elt
@@ -2571,6 +2613,7 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None):
         results[f'rec_macro_elt_sup_{elt}'] = rec_macro
 
         results[f'auoc_elt_sup_{elt}'] = auoc_elt
+        results[f'ent_elt_sup_{elt}'] = ent_elt
     
     return results
 
