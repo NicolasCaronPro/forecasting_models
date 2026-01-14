@@ -6,7 +6,10 @@ from typing import Optional
 from forecasting_models.pytorch.tools_2 import *
 from forecasting_models.pytorch.loss_utils import *
 from forecasting_models.pytorch.classification_loss import WeightedCrossEntropyLoss
+<<<<<<< HEAD
 from typing import List
+=======
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
 
 ###################################### Ordinality ##########################################
 
@@ -1387,6 +1390,7 @@ class CEWKLoss(nn.Module):
         if 'wce2' in locals():
             loss += (1 - c1) * wce2
         
+<<<<<<< HEAD
         return loss
 
 class FocalLoss(nn.Module):
@@ -1573,3 +1577,6 @@ class FocalLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         plt.tight_layout()
         plt.savefig(dir_output / 'focalwk_Cs_epochs.png')
         plt.close()
+=======
+        return loss
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87

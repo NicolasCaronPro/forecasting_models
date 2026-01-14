@@ -2520,8 +2520,11 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
     
     if y_pred_probas is not None:
         ent = entropy(y_pred_probas)
+<<<<<<< HEAD
     else:
         ent = 0
+=======
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
     
     auoc = auoc_func(conf_matrix=confusion_matrix(y_true, y_pred, labels=np.union1d(y_true, y_pred)))
 
@@ -2551,10 +2554,15 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
         F1 = f1_score(y_true > 0, y_pred_department > 0, zero_division=0)
         prec = precision_score(y_true > 0, y_pred_department > 0, zero_division=0)
         rec = recall_score(y_true > 0, y_pred_department > 0, zero_division=0)
+<<<<<<< HEAD
         try:
             ent = entropy(y_pred_department_proba)
         except:
             ent = 0
+=======
+        ent = entropy(y_pred_department_proba)
+
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
         IoU_scores.append(IoU)
         F1_scores.append(F1)
         prec_scores.append(prec)

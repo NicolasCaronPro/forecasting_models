@@ -114,6 +114,11 @@ class NetMLP(torch.nn.Module):
         self.horizon = horizon
         self.n_sequences = self.n_sequences
 
+<<<<<<< HEAD
+=======
+        #if self.horizon > 0:
+        #    self.define_horizon_decodeur()
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
 
     def forward(self, features, z_prev=None, edges=None):
         if self.horizon > 0:
@@ -137,6 +142,34 @@ class NetMLP(torch.nn.Module):
 
         return output, logits, hidden
     
+<<<<<<< HEAD
+=======
+    def define_horizon_decodeur(self):
+        self.decode1 = torch.nn.Linear(self.end_channels + (self.in_dim * self.n_sequences) + self.output_channels, self.end_channels)
+        self.decode2 = torch.nn.Linear(self.end_channels, self.output_channels)
+
+    def forward_horizon(self, z, y_prev=None, X_futur=None):
+        B = z.shape[0]
+        if y_prev is None:
+            y_prev = torch.zeros((B, getattr(self, "_decoder_output_dim", self.output_channels)), device=z.device)
+        if X_futur is None:
+            X_futur = torch.zeros((B, (self.in_dim * self.n_sequences)), device=z.device)
+        else:
+            X_futur = X_futur.view(X_futur.shape[0], X_futur.shape[1] * self.n_sequences)
+        
+        x = torch.cat((z, y_prev, X_futur), dim=1)
+
+        x = self.decode1(x)
+        hidden = F.relu(x)
+        logits = self.decode2(hidden)
+
+        if self.task_type == 'classification':
+            output = self.soft(logits)
+        else:
+            output = logits
+
+        return output, logits, hidden
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
     
 #####################################################
 
@@ -1429,8 +1462,11 @@ class GRU(torch.nn.Module):
         # Activation functions - separate instances for SHAP compatibility
         self.act_func1 = getattr(torch.nn, act_func)()
         self.act_func2 = getattr(torch.nn, act_func)()
+<<<<<<< HEAD
 
         self.act_func = getattr(torch.nn, act_func)()
+=======
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
 
         # Output activation depending on task
         if task_type == 'classification':
@@ -1476,6 +1512,7 @@ class GRU(torch.nn.Module):
         x = self.dropout(x)
 
         # Activation and output - using separate activation instances
+<<<<<<< HEAD
         try:
             x = self.act_func1(self.linear1(x))
             hidden = self.act_func2(self.linear2(x))
@@ -1487,6 +1524,12 @@ class GRU(torch.nn.Module):
             logits = self.output_layer(hidden)
             output = self.output_activation(logits)
             
+=======
+        x = self.act_func1(self.linear1(x))
+        hidden = self.act_func2(self.linear2(x))
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
         return output, logits, hidden
 
 class LSTM(torch.nn.Module):
@@ -1588,6 +1631,7 @@ class LSTM(torch.nn.Module):
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
         return output, logits, hidden
+<<<<<<< HEAD
         
 class ESN(torch.nn.Module):
     """
@@ -1773,6 +1817,8 @@ class ESN(torch.nn.Module):
         output = self.output_activation(logits)
 
         return output, logits, hidden
+=======
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0):
@@ -2034,6 +2080,12 @@ class GraphCastGRU(torch.nn.Module):
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
 
+<<<<<<< HEAD
+=======
+        if self.horizon > 0:
+            self.define_horizon_decodeur()
+
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
     # ----------------------------------------------------------------------
     # Forward pass
     # ----------------------------------------------------------------------
@@ -2074,7 +2126,47 @@ class GraphCastGRU(torch.nn.Module):
         output = self.output_activation(logits)
         return output, logits, hidden
 
+<<<<<<< HEAD
 
+=======
+    def define_horizon_decodeur(self, decodeur_params=None):
+        if decodeur_params is None:
+            if self.horizon <= 0:
+                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
+            decodeur_params = {
+                'device': next(self.parameters()).device,
+                'hidden_dim': self.end_channels,
+                'output_dim': self.out_channels * self.horizon,
+            }
+
+        device = decodeur_params.get('device', next(self.parameters()).device)
+        hidden_dim = decodeur_params['hidden_dim']
+        output_dim = decodeur_params['output_dim']
+        bias1 = decodeur_params.get('bias1', True)
+        bias2 = decodeur_params.get('bias2', True)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
+        ).to(device)
+        self._decoder_output_dim = output_dim
+
+    def forward_horizon(self, y_prev=None, X_futur=None):
+        if self.decoder is None:
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
+
+        if y_prev is not None:
+            decoder_input = y_prev
+        elif X_futur is not None:
+            decoder_input = X_futur
+        elif self._decoder_input is not None:
+            decoder_input = self._decoder_input
+        else:
+            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+
+        return self.decoder(decoder_input)
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
     
 class GraphCastGRUWithAttention(torch.nn.Module):
     def __init__(
