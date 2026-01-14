@@ -1,6 +1,7 @@
 import sys
 sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
 
+import torch
 import torch.nn.functional as F
 from typing import Optional
 from forecasting_models.pytorch.tools_2 import *
@@ -23,7 +24,13 @@ class WeightedCrossEntropyLossLearnable(torch.nn.Module):
         initial_adjustment_rate = torch.ones((num_classes, num_classes), dtype=torch.float32) * 0.01
         self.adjustment_rate = torch.nn.Parameter(initial_adjustment_rate)
 
-    def forward(self, y_pred, y_true, update_matrix=False, sample_weights=None):
+    def forward(
+        self,
+        y_pred,
+        y_true,
+        update_matrix: bool = False,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         y_true = y_true.long()
 
         # Prédiction des classes
@@ -56,11 +63,12 @@ class WeightedCrossEntropyLossLearnable(torch.nn.Module):
                     loss[ir] *= self.ratio_matrix[true_class, predicted_class]
 
         # Appliquer les sample weights si fournis
-        if sample_weights is not None:
-            weighted_loss = loss * sample_weights
-            return torch.sum(weighted_loss) / torch.sum(sample_weights)
-        else:
-            return weighted_loss.sum() / y_pred.size(0)
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss.device)
+            weighted_loss = loss * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss.mean()
 
     def get_learnable_parameters(self):
         """Expose the learnable parameters to the external optimizer."""
@@ -71,7 +79,13 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
         super(WeightedCrossEntropyLoss, self).__init__()
         self.num_classes = num_classes
         
-    def forward(self, y_pred, y_true, update_matrix=False, sample_weights=None):
+    def forward(
+        self,
+        y_pred,
+        y_true,
+        update_matrix: bool = False,
+        sample_weight: Optional[torch.Tensor] = None,
+    ):
         y_true = y_true.long()
 
         #pred_class = torch.argmax(y_pred, dim=1)
@@ -88,11 +102,12 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
         #for ir in range(y_true.shape[0]):
         #loss[ir] *= ratio_matrix[y_true[ir]][pred_class[ir]]
         
-        if sample_weights is not None:
-            weighted_loss = loss * sample_weights
-            return torch.sum(weighted_loss) / torch.sum(sample_weights)
-        else:
-            return loss.sum() / y_pred.size(0)
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss.device)
+            weighted_loss = loss * sample_weight
+            return torch.sum(weighted_loss) / torch.sum(sample_weight)
+
+        return loss.mean()
         
 def has_method(obj, method_name):
     """

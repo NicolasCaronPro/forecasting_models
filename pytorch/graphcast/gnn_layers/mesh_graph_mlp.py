@@ -150,29 +150,80 @@ class MeshGraphMLPGAT(MeshGraphMLP):
         hidden_layers: Union[int, None] = 1,
         activation_fn: nn.Module = nn.SiLU(),
         norm_type: str = "LayerNorm",
-        nhead: int = 4
+        nhead: int = 4,
+        aggregate: str = "concat",   # <-- par défaut 'concat' pour matcher l'entrée MLP
+        op: str = 'Encoder'
     ):
-        super(MeshGraphMLPGAT, self).__init__(
-            input_dim,
+        self.op = op
+        # L’entrée de l’MLP dépend de l’agrégation choisie
+        mlp_in = input_dim * nhead if aggregate == "concat" else input_dim
+        super().__init__(
+            mlp_in,
             output_dim,
             hidden_dim,
             hidden_layers,
             activation_fn,
             norm_type,
         )
+
+        self.input_dim  = input_dim
+        self.nhead      = nhead
+        self.aggregate  = aggregate
+
         self.norm1 = nn.LayerNorm(input_dim)
 
-        self.attention_layer = GATConv(input_dim, input_dim, nhead)
-        self.residual = nn.Linear(input_dim, input_dim * nhead)
+        self.proj_grid = nn.Linear(input_dim // 2, input_dim) 
 
-    def forward(self, x: Tensor, graph : DGLGraph) -> Tensor:
+        # GAT : sortie par tête = input_dim -> shape (N, H, input_dim)
+        self.attention_layer = GATConv(
+            in_feats=input_dim,
+            out_feats=input_dim,
+            num_heads=nhead,
+            allow_zero_in_degree=True
+        )
+        # Skip/residual adaptés à l’agrégation
+        self.residual_cat  = nn.Linear(input_dim, input_dim * nhead)
 
-        x = self.norm1(x).unsqueeze(0)
-        attention = self.attention_layer(graph, x)      # (1, L, E)
-        attention = attention.squeeze(0)
-        attention = attention + self.residual(x).squeeze(0)
-        self.model = self.model.to(attention)
-        return self.model(x)
+    def _aggregate_heads(self, att: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        att: (N, H, D) avec D = input_dim (sortie de GATConv)
+        x  : (N, D)      features d'entrée
+        """
+        if self.aggregate == "concat":
+            # (N, H*D)
+            att_agg = att.flatten(1, 2)
+            att_agg = att_agg + self.residual_cat(x)          # skip compatible
+        elif self.aggregate == "mean":
+            # (N, D)
+            att_agg = att.mean(dim=1)
+            att_agg = att_agg + x
+        elif self.aggregate == "sum":
+            # (N, D)
+            att_agg = att.sum(dim=1)
+            att_agg = att_agg + x
+        elif self.aggregate == "max":
+            # (N, D)
+            att_agg, _ = att.max(dim=1)
+            att_agg = att_agg + x
+        else:
+            raise ValueError(f"aggregate must be one of ['concat','mean','sum','max'], got {self.aggregate}")
+        return att_agg
+
+    def forward(self, x: torch.Tensor, graph: DGLGraph) -> torch.Tensor:
+        # Normalisation (optionnelle mais utile pour la stabilité)
+        # GAT : (N, H, D) avec D = input_dim
+        x = (self.proj_grid(x[0]), x[1])
+        
+        att = self.attention_layer(graph, x)
+
+        # Agrégation des têtes + skip connection
+        att_agg = self._aggregate_heads(att, x[1])
+
+        # S'assurer que le MLP est sur le bon device
+        self.model = self.model.to(att_agg.device)
+
+        # On envoie l'attention agrégée dans l'MLP
+        return self.model(att_agg)
 
 class MeshGraphEdgeMLPConcat(MeshGraphMLP):
     """MLP layer which is commonly used in building blocks

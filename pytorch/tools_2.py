@@ -9,6 +9,7 @@ import numpy as np
 from forecasting_models.pytorch.models import *
 from forecasting_models.pytorch.models_2D import *
 from forecasting_models.pytorch.kan import *
+from forecasting_models.pytorch.student_distillation import StudentMLP, StudentMLPConcat
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -316,6 +317,45 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         model = GRU(**default_params)
         model_params.update(default_params)
+        
+    elif model_name == 'ESN':
+        default_params = {
+            'in_channels': in_dim,
+            'reservoir_size': 256,
+            'hidden_channels': 128,
+            'out_channels' : out_channels,
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'device': device,
+            'act_func': act_func,
+            'task_type': task_type,
+            'return_hidden': False,
+            'dropout': dropout,
+            'horizon': horizon
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = ESN(**default_params)
+        model_params.update(default_params)
+
+    elif model_name == 'ClassicESN':
+        default_params = {
+            'in_channels': in_dim,
+            'reservoir_size': 300,
+            'hidden_channels': 256,
+            'out_channels' : out_channels,
+            'dropout': dropout,
+            'device': device,
+            'task_type': task_type,
+            'horizon': horizon,
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = ClassicESN(**default_params)
+        model_params.update(default_params)
+
     elif model_name == 'TransformerNet':
         default_params = {
             'seq_len' : k_days + 1,
@@ -336,6 +376,34 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         print(custom_model_params)
         model = TransformerNet(**default_params)
+        model_params.update(default_params)
+
+    elif model_name == 'TFN':   # Temporal Fusion Network (paper-aligned TFT)
+        default_params = {
+        'in_channels' : in_dim,
+        'tft_size' : 256,                  # d_model TFT
+        'hidden_channels' : 256,
+        'end_channels' : 128,
+        'n_sequences' : k_days + 1,        # longueur historique
+        'device' : device,
+        'act_func' : 'ReLU',
+        'task_type' : task_type,
+        'dropout' : 0.1,
+        'num_layers' : 1,                  # LSTM encoder/decoder
+        'return_hidden' : False,
+        'out_channels' : out_channels,
+        'use_layernorm' : True,
+        'horizon' : horizon,
+        'n_heads' : 8,
+        'd_grn' : 512,                     # largeur GRN (paper ≈ 2×d_model)
+        'd_static' : 0,                    # 0 si tu n'utilises pas de static covariates
+        'use_positional_encoding' : False
+    }
+
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        model = TemporalFusionTransformerClassifier(**default_params)
         model_params.update(default_params)
 
     elif model_name == 'TransformerNetCutClient':
@@ -368,7 +436,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type' : task_type,
             'out_channels' : out_channels,
             'graph_or_node' : graph_or_node,
-            'return_hidden': False
+            'return_hidden': False,
             'horizon': horizon
         }
         if custom_model_params is not None:
@@ -800,6 +868,40 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
         model = GraphCastGRUWithAttention(**default_params)
         model_params.update(default_params)
 
+    elif model_name == 'StudentMLPConcat':
+        default_params = {
+            'input_dim': in_dim,
+            'out_channels': out_channels,
+            'mlp_hidden_dim': 128, # Default value
+            'embedding_dim': 128,  # Default value
+            'end_channels' : 64,
+            'n_group': 3,          # Default value
+            'device': device,
+            'task_type': task_type,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+            
+        model = StudentMLPConcat(**default_params)
+        model_params.update(default_params)
+
+    elif model_name == 'studenMLP':
+        default_params = {
+            'input_dim': in_dim,
+            'out_channels': out_channels,
+            'mlp_hidden_dim': 128, # Default value
+            'embedding_dim': 128,  # Default value
+            'end_channels' : 64,
+            'n_group': 3,          # Default value
+            'device': device,
+            'task_type': task_type,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+            
+        model = StudentMLP(**default_params)
+        model_params.update(default_params)
+        
     elif model_name == 'MultiScaleGraph':
         default_params = {
             'input_channels' : in_dim,
