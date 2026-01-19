@@ -40,7 +40,7 @@ class MeshGraphEncoder(nn.Module):
         activation_fn: nn.Module = nn.SiLU(),
         norm_type: str = "LayerNorm",
         do_concat_trick: bool = False,
-        use_lstm: bool = True,
+        use_lstm: bool = False,
         attention: str = None
     ):
         super().__init__()
@@ -56,6 +56,8 @@ class MeshGraphEncoder(nn.Module):
             MLP_PROCESS = MeshGraphMLPGAT
         else:
             MLP_PROCESS = MeshGraphMLP
+            
+        MLP_PROCESS = MeshGraphMLP
 
         # LSTM for temporal encoding (only for grid_nfeat here, but could be extended)
         if self.use_lstm:
@@ -80,10 +82,10 @@ class MeshGraphEncoder(nn.Module):
         if attention == "GAT":
             self.attention_score = EdgeScoreDotProductGAT(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
         elif attention == "Transformer":
-            self.attention_score = EdgeScoreDotProductTransformer(input_dim_src_nodes, input_dim_dst_nodes, output_dim_edges, num_heads=4, head_dim=32)
+            self.attention_score = EdgeScoreDotProductTransformer(input_dim_src_nodes, input_dim_src_nodes, output_dim_edges, num_heads=4, head_dim=32)
 
         # src node MLP
-        self.src_node_mlp = MLP_PROCESS(
+        self.src_node_mlp = MeshGraphMLP(
             input_dim=input_dim_src_nodes,
             output_dim=output_dim_src_nodes,
             hidden_dim=hidden_dim,
@@ -110,7 +112,7 @@ class MeshGraphEncoder(nn.Module):
         mesh_nfeat: Tensor,
         graph: DGLGraph,
     ) -> Tuple[Tensor, Tensor]:
-
+        
         has_time_dim = len(grid_nfeat.shape) == 3
         if has_time_dim:
             timesteps, num_nodes, feat_dim = grid_nfeat.size()
@@ -131,21 +133,29 @@ class MeshGraphEncoder(nn.Module):
                     cat_feat = aggregate_and_concat_with_attention(
                         efeat, mesh_nfeat, graph, attention_score
                     )
-                else:  
+                else:
                     cat_feat = aggregate_and_concat(
                         efeat, mesh_nfeat, graph, self.aggregation
                     )
-                mesh_nfeat_new.append(mesh_nfeat + self.dst_node_mlp(cat_feat), graph)
-                grid_nfeat_new.append(grid_input + self.src_node_mlp(grid_input), graph)
+                #if self.attention == 'GAT':
+                if False:
+                    inputs = (grid_nfeat[i], cat_feat)
+                else:
+                    inputs = cat_feat
+
+                mesh_nfeat_new.append(mesh_nfeat + self.dst_node_mlp(inputs, graph))
+                grid_nfeat_new.append(grid_input + self.src_node_mlp(grid_input, graph))
 
             return torch.stack(grid_nfeat_new), torch.stack(mesh_nfeat_new)
         else:
             efeat = self.edge_mlp(g2m_efeat, (grid_nfeat, mesh_nfeat), graph)
-            if self.aggregation:
+            
+            if self.attention:
                 attention_score = self.attention_score(graph, g2m_efeat, mesh_nfeat, efeat)
                 cat_feat = aggregate_and_concat_with_attention(grid_nfeat, mesh_nfeat, graph, attention_score)
             else:
                 cat_feat = aggregate_and_concat(efeat, mesh_nfeat, graph, self.aggregation)
+                
             mesh_nfeat = mesh_nfeat + self.dst_node_mlp(cat_feat, graph)
             grid_nfeat = grid_nfeat + self.src_node_mlp(grid_nfeat, graph)
             return grid_nfeat, mesh_nfeat

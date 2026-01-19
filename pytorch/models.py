@@ -21,6 +21,31 @@ from blitz.losses import kl_divergence_from_nn
 import dgl
 import dgl.function as fn
 import math
+import numpy as np
+import scipy.sparse
+
+from forecasting_models.pytorch.tfn import TemporalFusionTransformerClassifier
+
+# Monkeypatch for older scipy versions
+if not hasattr(scipy.sparse, 'random_array'):
+    def random_array_wrapper(*args, **kwargs):
+        # Map 'data_sampler' to 'data_rvs' if present
+        if 'data_sampler' in kwargs:
+            kwargs['data_rvs'] = kwargs.pop('data_sampler')
+        # Map 'rng' to 'random_state' if present
+        if 'rng' in kwargs:
+            kwargs['random_state'] = kwargs.pop('rng')
+            
+        # Handle shape argument: random_array(shape, ...) vs random(m, n, ...)
+        if len(args) > 0:
+            if isinstance(args[0], (tuple, list, np.ndarray)) and len(args[0]) == 2:
+                shape = args[0]
+                args = (shape[0], shape[1]) + args[1:]
+                
+        return scipy.sparse.random(*args, **kwargs)
+    scipy.sparse.random_array = random_array_wrapper
+
+from reservoirpy.nodes import Reservoir
 
 ##################################### SIMPLE GRAPH #####################################
 class NetGCN(torch.nn.Module):
@@ -74,7 +99,7 @@ class MLPLayer(torch.nn.Module):
 class NetMLP(torch.nn.Module):
     def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0):
         super(NetMLP, self).__init__()
-        self.layer1 = MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
+        self.layer1 = MLPLayer(in_dim * n_sequences + end_channels, hidden_dim[0], device) if horizon > 0 else MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
         self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
         self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
         self.layer2 = MLPLayer(end_channels, output_channels, device)
@@ -84,17 +109,22 @@ class NetMLP(torch.nn.Module):
         self.return_hidden = return_hidden
         self.device = device
         self.end_channels = end_channels
-        self.decoder = None
-        self._decoder_input = None
         self.output_channels = output_channels
         self.in_dim = in_dim
         self.horizon = horizon
+        self.n_sequences = self.n_sequences
 
+
+    def forward(self, features, z_prev=None, edges=None):
         if self.horizon > 0:
-            self.define_decodeur()
+            if z_prev is None:
+                z_prev = torch.zeros((features.shape[0], self.end_channels * self.n_sequences))
 
-    def forward(self, features, edges=None):
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
+        
+        if self.horizon > 0:
+            features = torch.cat((features, z_prev), dim=1)
+
         x = F.relu(self.layer1(features))
         x = F.relu(self.layer3(x))
         x = F.relu(self.layer4(x))
@@ -105,34 +135,8 @@ class NetMLP(torch.nn.Module):
         else:
             output = logits
 
-        self._decoder_input = hidden
-
         return output, logits, hidden
     
-    def define_decodeur(self):
-        output_dim = self.output_channels * (self.horizon if self.horizon > 0 else 1)
-        self.decode1 = torch.nn.Linear(self.end_channels + self.in_dim + self.output_channels, 256)
-        self.decode2 = torch.nn.Linear(256, output_dim)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, z, y_prev=None, X_futur=None):
-        B = z.shape[0]
-        if y_prev is None:
-            y_prev = torch.zeros((B, getattr(self, "_decoder_output_dim", self.output_channels)), device=z.device)
-        if X_futur is None:
-            X_futur = torch.zeros((B, self.in_dim), device=z.device)
-
-        x = torch.cat((z, y_prev, X_futur))
-        x = self.decode1(x)
-        hidden = F.relu(x)
-        logits = self.decode2(hidden)
-
-        if self.task_type == 'classification':
-            output = self.soft(logits)
-        else:
-            output = logits
-
-        return output, logits, hidden
     
 #####################################################
 
@@ -165,7 +169,7 @@ class GAT(torch.nn.Module):
         self.end_channels = end_channels
 
         # Couche d'entrée linéaire pour projeter les dimensions d'entrée
-        self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0] * heads[0], weight_initializer='glorot').to(device)
+        self.input = nn.Linear(in_channels=in_dim + (end_channels * n_sequences if horizon > 0 else 0), out_channels=hidden_channels[0] * heads[0], weight_initializer='glorot').to(device)
 
         for i in range(num_of_layers):
             concat = True if i < num_of_layers - 1 else False
@@ -220,6 +224,11 @@ class GAT(torch.nn.Module):
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         X = X[:, :, -1]
+        
+        if self.horizon > 0:
+            z_prev = z_prev.reshape(X.shape[0], -1)
+            X = torch.cat((X, z_prev), dim=1)
+
         x = self.input(X)  # Projeter les dimensions d'entrée
         for i, gat_layer in enumerate(self.gat_layers):
             # Apply GAT layer
@@ -277,7 +286,7 @@ class GCN(torch.nn.Module):
         self.n_sequences = n_sequences
         self.end_channels = end_channels
 
-        self.input = nn.Linear(in_channels=in_dim, out_channels=hidden_channels[0], weight_initializer='glorot').to(device)
+        self.input = nn.Linear(in_channels=in_dim + (end_channels * n_sequences if horizon > 0 else 0), out_channels=hidden_channels[0], weight_initializer='glorot').to(device)
 
         for i in range(num_of_layers):
             # GCN layer
@@ -329,6 +338,10 @@ class GCN(torch.nn.Module):
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
 
         X = X[:, :, -1]
+
+        if self.horizon > 0:
+            z_prev = z_prev.reshape(X.shape[0], -1)
+            X = torch.cat((X, z_prev), dim=1)
 
         x = self.input(X)
         for i, gcn_layer in enumerate(self.gcn_layers):
@@ -1040,7 +1053,7 @@ class Sep_LSTM_GNN(torch.nn.Module):
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)
 
@@ -1179,7 +1192,7 @@ class Sep_GRU_GNN(torch.nn.Module):
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)
 
@@ -1306,7 +1319,7 @@ class LSTM_GNN_Feedback(torch.nn.Module):
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)
 
@@ -1392,7 +1405,7 @@ class GRU(torch.nn.Module):
 
         # GRU layer
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + self.end_channels if horizon > 0 else in_channels,
             hidden_size=gru_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
@@ -1413,19 +1426,19 @@ class GRU(torch.nn.Module):
         self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
         self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
 
-        # Activation function
+        # Activation functions - separate instances for SHAP compatibility
+        self.act_func1 = getattr(torch.nn, act_func)()
+        self.act_func2 = getattr(torch.nn, act_func)()
+
         self.act_func = getattr(torch.nn, act_func)()
 
         # Output activation depending on task
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
-
-        if self.horizon > 0:
-            self.define_decodeur()
 
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
@@ -1440,6 +1453,11 @@ class GRU(torch.nn.Module):
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
 
         # Reshape to (batch, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1457,53 +1475,19 @@ class GRU(torch.nn.Module):
         x = self.norm(x)
         x = self.dropout(x)
 
-        # Activation and output
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
-        logits = self.output_layer(hidden)
-        output = self.output_activation(logits)
-        self._decoder_input = hidden
+        # Activation and output - using separate activation instances
+        try:
+            x = self.act_func1(self.linear1(x))
+            hidden = self.act_func2(self.linear2(x))
+            logits = self.output_layer(hidden)
+            output = self.output_activation(logits)
+        except:
+            x = self.act_func(self.linear1(x))
+            hidden = self.act_func(self.linear2(x))
+            logits = self.output_layer(hidden)
+            output = self.output_activation(logits)
+            
         return output, logits, hidden
-
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.out_channels is None:
-                raise ValueError("out_channels must be specified to automatically define the decoder.")
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
 
 class LSTM(torch.nn.Module):
     def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
@@ -1527,7 +1511,7 @@ class LSTM(torch.nn.Module):
 
         # LSTM block
         self.lstm = torch.nn.LSTM(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=self.lstm_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
@@ -1555,12 +1539,9 @@ class LSTM(torch.nn.Module):
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)
-
-        if self.horizon > 0:
-            self.define_decodeur()
 
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
@@ -1575,6 +1556,11 @@ class LSTM(torch.nn.Module):
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
 
         # (batch_size, seq_len, features)
         x = X.permute(0, 2, 1)
@@ -1601,48 +1587,192 @@ class LSTM(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
+        
+class ESN(torch.nn.Module):
+    """
+    Echo State Network (ESN) avec réservoir fixe + tête MLP entraînable,
+    calqué sur l'API/structure de ta classe GRU.
 
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.out_channels is None:
-                raise ValueError("out_channels must be specified to automatically define the decoder.")
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
+    Entrée attendue: X de forme (batch, features, seq_len)
+    - Si horizon > 0, concatène z_prev (état précédent de la tête) aux features (même logique que ta GRU).
+    - Le réservoir est mis à jour itérativement sur la dimension temporelle.
+    - La tête lit l'état final (ou pooling) et produit la prédiction.
+    """
+    def __init__(
+        self,
+        in_channels,
+        reservoir_size,
+        hidden_channels,
+        end_channels,
+        n_sequences,
+        device,
+        act_func='ReLU',
+        task_type='regression',
+        dropout=0.0,
+        return_hidden=False,
+        out_channels=None,
+        use_layernorm=False,
+        horizon=0,
+        # Hyperparamètres ESN
+        spectral_radius=0.9,
+        sparsity=0.1,
+        leak_rate=1.0,           # 1.0 => ESN classique (pas de fuite), <1.0 => leaky-ESN
+        input_scale=1.0,
+        bias_scale=0.0,
+        reservoir_activation='Tanh',
+        readout_from='last',     # 'last' ou 'mean' (pooling temporel)
+        reservoir_noise_std=0.0  # bruit optionnel ajouté à l'état
+    ):
+        super().__init__()
 
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
+        # --------- méta ---------
+        self.device = device
+        self.return_hidden = return_hidden
+        self.hidden_size = hidden_channels
+        self.task_type = task_type
+        self.is_graph_or_node = False
+        self.reservoir_size = reservoir_size
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
+        self.decoder = None
+        self._decoder_input = None
+        self.horizon = horizon
+        self.out_channels = out_channels
+        self.readout_from = readout_from
 
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
+        # --------- dimensions d'entrée du réservoir ---------
+        self.input_dim = in_channels + (self.end_channels if horizon > 0 else 0)
 
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+        # --------- réservoir (poids fixes) ---------
+        # W_in: (N, input_dim)
+        Win = torch.randn(reservoir_size, self.input_dim) * input_scale
+        # W_res: (N, N) sparse-ish, redimensionnée pour spectral_radius
+        W = torch.zeros(reservoir_size, reservoir_size)
+        mask = (torch.rand_like(W) < sparsity)
+        W[mask] = torch.randn(mask.sum())
+        # normalisation au rayon spectral
+        # on approxime via norme spéctrale par itérations de puissance (quelques steps)
+        with torch.no_grad():
+            v = torch.randn(reservoir_size)
+            for _ in range(10):
+                v = torch.matmul(W, v)
+                v = v / (v.norm() + 1e-8)
+            lambda_max = torch.matmul(v, torch.matmul(W, v)) / (torch.matmul(v, v) + 1e-8)
+            # si lambda_max ~ 0 (sparsité élevée), éviter /0
+            scale = spectral_radius / (lambda_max.abs() + 1e-8)
+            W = W * scale
 
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
+        # b (biais du réservoir)
+        b = torch.randn(reservoir_size) * bias_scale
+
+        # On enregistre comme buffers (fixes, déplacés avec .to(device))
+        self.register_buffer('W_in', Win)
+        self.register_buffer('W_res', W)
+        self.register_buffer('b_res', b)
+
+        # --------- activation réservoir ---------
+        self.reservoir_act = getattr(torch.nn, reservoir_activation)() if hasattr(torch.nn, reservoir_activation) else torch.nn.Tanh()
+        self.leak_rate = leak_rate
+        self.reservoir_noise_std = reservoir_noise_std
+
+        # --------- normalisation & dropout (sur la lecture de l'état agrégé) ---------
+        if use_layernorm:
+            self.norm = torch.nn.LayerNorm(reservoir_size).to(device)
         else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
+            self.norm = torch.nn.BatchNorm1d(reservoir_size).to(device)
 
-        return self.decoder(decoder_input)
+        self.dropout = torch.nn.Dropout(p=dropout).to(device)
+
+        # --------- tête MLP + output ---------
+        self.linear1 = torch.nn.Linear(reservoir_size, hidden_channels).to(device)
+        self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
+        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+
+        self.act_func = getattr(torch.nn, act_func)()
+
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        else:
+            self.output_activation = torch.nn.Identity().to(device)
+
+        # On s'assure que seules les couches de tête sont entraînables (optionnel mais recommandé)
+        for p in [self.W_in, self.W_res, self.b_res]:
+            p.requires_grad = False
+        # Les layers linéaires restent entraînables (default True)
+
+    def _reservoir_step(self, h, x_t):
+        """
+        h: (B, N)  état courant
+        x_t: (B, D) entrée au temps t (après concat éventuelle)
+        retour: h_next (B, N)
+        """
+        # affinité
+        pre = torch.matmul(x_t, self.W_in.T) + torch.matmul(h, self.W_res.T) + self.b_res
+        h_tilde = self.reservoir_act(pre)
+        # leaky update
+        if self.leak_rate < 1.0:
+            h_next = (1.0 - self.leak_rate) * h + self.leak_rate * h_tilde
+        else:
+            h_next = h_tilde
+        if self.reservoir_noise_std > 0:
+            h_next = h_next + self.reservoir_noise_std * torch.randn_like(h_next)
+        return h_next
+
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
+        """
+        X: (batch, features, seq_len)
+        Retour:
+            output: prédiction finale
+            logits: avant activation de sortie
+            hidden: représentation (end_channels) juste avant la couche de sortie
+        """
+        B = X.size(0)
+        # z_prev: même logique que ta GRU (injecter la dernière prédiction comme feature)
+        if z_prev is None:
+            z_prev = torch.zeros((B, self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(B, self.end_channels, self.n_sequences)
+
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)  # (B, in_channels+end_channels, T)
+
+        # permute -> (B, T, D)
+        x_seq = X.permute(0, 2, 1).contiguous()
+        T = x_seq.size(1)
+        D = x_seq.size(2)
+
+        # état réservoir initial
+        h = torch.zeros(B, self.reservoir_size, device=self.device, dtype=X.dtype)
+
+        # on peut accumuler les états si pooling 'mean'
+        if self.readout_from == 'mean':
+            h_acc = torch.zeros_like(h)
+
+        # itération temporelle
+        for t in range(T):
+            h = self._reservoir_step(h, x_seq[:, t, :])
+            if self.readout_from == 'mean':
+                h_acc = h_acc + h
+
+        if self.readout_from == 'mean':
+            h_read = h_acc / max(T, 1)
+        else:
+            h_read = h  # dernier état
+
+        # normalisation + dropout (attention BatchNorm1d attend (B, C))
+        h_norm = self.norm(h_read)
+        h_drop = self.dropout(h_norm)
+
+        # tête MLP + sortie
+        x = self.act_func(self.linear1(h_drop))
+        hidden = self.act_func(self.linear2(x))
+        logits = self.output_layer(hidden)
+        output = self.output_activation(logits)
+
+        return output, logits, hidden
         
 class DilatedCNN(torch.nn.Module):
     def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func, dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0):
@@ -1655,7 +1785,10 @@ class DilatedCNN(torch.nn.Module):
         
         # Initialisation des couches convolutives et BatchNorm
         for i in range(self.num_layer):
-            self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
+            if i == 0:
+                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i] + end_channels if horizon > 0 else channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
+            else:
+                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
             if use_layernorm:
                 self.batch_norm_list.append(torch.nn.LayerNorm(channels[i + 1]).to(device))
             else:
@@ -1681,8 +1814,6 @@ class DilatedCNN(torch.nn.Module):
         self.return_hidden = return_hidden
         self.device = device
         self.end_channels = end_channels
-        self.decoder = None
-        self._decoder_input = None
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
@@ -1691,18 +1822,20 @@ class DilatedCNN(torch.nn.Module):
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Sigmoid().to(device)
+            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
-
-        if self.horizon > 0:
-            self.define_decodeur()
 
     def forward(self, x, edges=None, z_prev=None):
         # Couche d'entrée
 
         if z_prev is None:
             z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
+        else:
+            z_prev = z_prev.view(x.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            x = torch.cat((x, z_prev), dim=1)
 
         # Couches convolutives dilatées avec BatchNorm, activation et dropout
         for cnn_layer, batch_norm in zip(self.cnn_layer_list, self.batch_norm_list):
@@ -1722,46 +1855,7 @@ class DilatedCNN(torch.nn.Module):
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
-
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': self.device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', self.device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
         
 class GraphCast(torch.nn.Module):
     def __init__(self,
@@ -1788,7 +1882,7 @@ class GraphCast(torch.nn.Module):
         super(GraphCast, self).__init__()
 
         self.net = GraphCastNet(
-            input_dim_grid_nodes=input_dim_grid_nodes,
+            input_dim_grid_nodes=input_dim_grid_nodes + end_channels if horizon > 0 else input_dim_grid_nodes,
             input_dim_mesh_nodes=input_dim_mesh_nodes,
             input_dim_edges=input_dim_edges,
             output_dim_grid_nodes=output_dim_grid_nodes,
@@ -1829,6 +1923,9 @@ class GraphCast(torch.nn.Module):
 
         if z_prev is None:
             z_prev = torch.zeros((X.shape[1], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
 
         x = self.net(X, graph, graph2mesh, mesh2graph)[-1]
         
@@ -1886,7 +1983,7 @@ class GraphCastGRU(torch.nn.Module):
         # GRU — encodes the temporal axis and outputs an embedding per node
         # ------------------------------------------------------------------
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=input_dim_grid_nodes,
             num_layers=num_gru_layers,
             dropout=0.03 if num_gru_layers > 1 else 0.0,
@@ -1926,8 +2023,6 @@ class GraphCastGRU(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.end_channels = end_channels
-        self.decoder = None
-        self._decoder_input = None
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
@@ -1939,9 +2034,6 @@ class GraphCastGRU(torch.nn.Module):
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
 
-        if self.horizon > 0:
-            self.define_decodeur()
-
     # ----------------------------------------------------------------------
     # Forward pass
     # ----------------------------------------------------------------------
@@ -1949,11 +2041,20 @@ class GraphCastGRU(torch.nn.Module):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
+
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
+
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+
+        if self.horizon > 0:            
+            X = torch.cat((X, z_prev), dim=1)
+
+        X_for_gru = X.permute(0, 2, 1)
+        
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -1961,7 +2062,7 @@ class GraphCastGRU(torch.nn.Module):
         gru_last = self.norm(gru_out[:, -1, :])
         gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
         
-        X_graphcast = gru_last[None,: ,:]
+        X_graphcast = gru_last[None, : ,:]
 
         # GraphCast processing
         x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
@@ -1971,46 +2072,9 @@ class GraphCastGRU(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
         output = self.output_activation(logits)
-        self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': next(self.parameters()).device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
 
-        device = decodeur_params.get('device', next(self.parameters()).device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_decodeur(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
     
 class GraphCastGRUWithAttention(torch.nn.Module):
     def __init__(
@@ -2057,7 +2121,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # GRU — encodes the temporal axis and outputs an embedding per node
         # ------------------------------------------------------------------
         self.gru = torch.nn.GRU(
-            input_size=in_channels,
+            input_size=in_channels + end_channels if horizon > 0 else in_channels,
             hidden_size=input_dim_grid_nodes,
             num_layers=num_gru_layers,
             dropout=0.03 if num_gru_layers > 1 else 0.0,
@@ -2067,6 +2131,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.num_gru_layers = num_gru_layers
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         self.dropout = torch.nn.Dropout(0.03)
+        self.n_sequences = n_sequences
         
         # ------------------------------------------------------------------
         # GraphCast core network (unchanged)
@@ -2111,7 +2176,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.output_activation = torch.nn.Identity()
 
         if self.horizon > 0:
-            self.define_decodeur()
+            self.define_horizon_decodeur()
 
     # ----------------------------------------------------------------------
     # Forward pass
@@ -2122,9 +2187,17 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         """
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
-        X_for_gru = X.permute(0, 2, 1)
+
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+        else:
+            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
+        
+        if self.horizon > 0:
+            X = torch.cat((X, z_prev), dim=1)
+
+        X_for_gru = X.permute(0, 2, 1)
+
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
 
         """gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
@@ -2155,7 +2228,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self._decoder_input = hidden
         return output, logits, hidden
 
-    def define_decodeur(self, decodeur_params=None):
+    def define_horizon_decodeur(self, decodeur_params=None):
         if decodeur_params is None:
             if self.horizon <= 0:
                 raise ValueError("horizon must be greater than zero to automatically define the decoder.")
@@ -2178,9 +2251,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         ).to(device)
         self._decoder_output_dim = output_dim
 
-    def forward_decodeur(self, y_prev=None, X_futur=None):
+    def forward_horizon(self, y_prev=None, X_futur=None):
         if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_decodeur first.")
+            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
 
         if y_prev is not None:
             decoder_input = y_prev
@@ -2836,3 +2909,178 @@ class BayesianMLP(torch.nn.Module):
 
     def kl_loss(self):
         return kl_divergence_from_nn(self)
+
+class ClassicESN(torch.nn.Module):
+    """
+    ESN (ReservoirPy) + readout PyTorch.
+
+    Entrée:  x  de forme (B, X, T)
+    Sortie: logits (B, n_classes)
+
+    Note: le réservoir est fixe (pas de gradients). Seul le readout PyTorch est entraîné.
+    """
+    def __init__(
+        self,
+        in_channels: int,          # X
+        out_channels: int = 5,
+        # Réservoir
+        reservoir_size: int = 300,
+        sr: float = 0.9,
+        lr_leak: float = 0.2,
+        input_scaling: float = 1.0,
+        seed: int = 42,
+        # Agrégation
+        agg: str = "mean_std_last",  # "mean" | "last" | "mean_std_last"
+        # Readout (MLP)
+        hidden_channels: int = 256,
+        dropout: float = 0.2,
+        # Normalisation des features réservoir (optionnel)
+        use_feat_norm: bool = False,
+        eps: float = 1e-8,
+        device='cpu',
+        task_type='classification',
+        horizon: int = 0,
+        end_channels: int = 64,
+        n_sequences: int = 1,
+        **kwargs
+    ):
+        super().__init__()
+        self.in_features = in_channels
+        self.n_classes = out_channels
+        self.agg = agg
+        self.use_feat_norm = use_feat_norm
+        self.eps = eps
+        self.device = device
+        self.horizon = horizon
+        self.end_channels = end_channels
+        self.n_sequences = n_sequences
+
+        # --- Réservoir ReservoirPy (fixe) ---
+        self.reservoir = Reservoir(
+            units=reservoir_size,
+            sr=sr,
+            lr=lr_leak,
+            input_scaling=input_scaling,
+            seed=seed,
+        )
+
+        # Dimension des features après agrégation
+        if agg == "last" or agg == "mean":
+            feat_dim = reservoir_size
+        elif agg == "mean_std_last":
+            feat_dim = 3 * reservoir_size
+        else:
+            raise ValueError("agg doit être 'last', 'mean' ou 'mean_std_last'")
+
+        self.feat_dim = feat_dim
+
+        # Buffers pour normalisation (remplis par fit_feature_norm)
+        self.register_buffer("feat_mu", torch.zeros(1, feat_dim))
+        self.register_buffer("feat_sigma", torch.ones(1, feat_dim))
+
+        # --- Readout PyTorch (entraînable) ---
+        self.layer_norm = torch.nn.LayerNorm(feat_dim)
+        self.linear1 = torch.nn.Linear(feat_dim, hidden_channels)
+        self.relu = torch.nn.ReLU()
+        self.dropout_layer = torch.nn.Dropout(dropout)
+        self.linear2 = torch.nn.Linear(hidden_channels, out_channels)
+
+        if task_type == 'classification':
+            self.output_activation = torch.torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == 'binary':
+            self.output_activation = torch.torch.nn.Softmax(dim=-1).to(device)
+        else:
+            self.output_activation = torch.torch.nn.Identity().to(device)
+
+    def _seq_to_feature_np(self, seq_TX: np.ndarray) -> np.ndarray:
+        """
+        seq_TX: (T, X) en numpy float32
+        retourne: (feat_dim,)
+        """
+        states = self.reservoir.run(seq_TX)  # (T, units) numpy
+
+        if self.agg == "last":
+            feat = states[-1]
+        elif self.agg == "mean":
+            feat = states.mean(axis=0)
+        elif self.agg == "mean_std_last":
+            feat = np.concatenate([states.mean(axis=0), states.std(axis=0), states[-1]], axis=0)
+        else:
+            raise RuntimeError("agg invalide")
+
+        return feat.astype(np.float32)
+
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, X, T) torch
+        retourne: (B, feat_dim) torch (sur le même device que x)
+        """
+        if x.ndim != 3:
+            raise ValueError("x doit être de forme (B, X, T)")
+        B, X, T = x.shape
+        # if X != self.in_features:
+        #     raise ValueError(f"in_features mismatch: attendu X={self.in_features}, reçu X={X}")
+
+        device = x.device
+
+        # IMPORTANT: on passe en CPU/NumPy pour ReservoirPy
+        x_np = x.detach().to("cpu").numpy().astype(np.float32)  # (B, X, T)
+
+        feats = []
+        for b in range(B):
+            seq_TX = x_np[b].T  # (T, X)
+            feats.append(self._seq_to_feature_np(seq_TX))
+
+        feats = np.stack(feats, axis=0)  # (B, feat_dim)
+        feats_t = torch.from_numpy(feats).to(device=device, dtype=torch.float32)
+        return feats_t
+
+    @torch.no_grad()
+    def fit_feature_norm(self, x: torch.Tensor, batch_size: int = 64):
+        """
+        Calcule mu/sigma des features réservoir sur un jeu (x) pour normaliser ensuite.
+        x: (B, X, T)
+        """
+        if not self.use_feat_norm:
+            self.feat_mu.zero_()
+            self.feat_sigma.fill_(1.0)
+            return
+
+        B = x.shape[0]
+        all_feats = []
+        for i in range(0, B, batch_size):
+            feats = self.extract_features(x[i:i + batch_size])
+            all_feats.append(feats.detach().cpu())
+        all_feats = torch.cat(all_feats, dim=0)  # (B, feat_dim)
+
+        mu = all_feats.mean(dim=0, keepdim=True)
+        sigma = all_feats.std(dim=0, keepdim=True).clamp_min(self.eps)
+
+        self.feat_mu.copy_(mu)
+        self.feat_sigma.copy_(sigma)
+
+    def forward(self, x: torch.Tensor, edge_index=None, graphs=None, z_prev=None) -> torch.Tensor:
+        """
+        Retourne des logits (B, n_classes).
+        """
+        if z_prev is None:
+            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
+        else:
+            z_prev = z_prev.view(x.shape[0], self.end_channels, self.n_sequences)
+
+        if self.horizon > 0:
+            x = torch.cat((x, z_prev), dim=1)
+
+        feats = self.extract_features(x)  # (B, feat_dim)
+
+        if self.use_feat_norm:
+            feats = (feats - self.feat_mu.to(feats.device)) / self.feat_sigma.to(feats.device)
+
+        x = self.layer_norm(feats)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.dropout_layer(x)
+        hidden = x
+        logits = self.linear2(hidden)
+        output = self.output_activation(logits)
+        return output, logits, hidden

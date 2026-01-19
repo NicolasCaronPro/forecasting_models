@@ -52,11 +52,10 @@ class EdgeScoreDotProductTransformer(nn.Module):
             g.srcdata['Q'] = Q
             g.dstdata['K'] = K
             g.apply_edges(fn.u_dot_v('Q', 'K', 'score'))   # 'score': (E, H)
-            score = g.edata['score'] / self.scale          # (E, H)
+            score = g.edata['score'][:, :, -1] / self.scale          # (E, H)
             if self.Be is not None and efeat is not None:
                 score = score + self.Be(efeat)             # (E, H)
             return score
-
 
 # ---------------------------
 # 2) Scores de type GAT
@@ -84,7 +83,6 @@ class EdgeScoreDotProductGAT(nn.Module):
             # 1) Projections par tête
             z_src = self.Wq(h_src).view(-1, self.H, self.Dh)   # (N_src, H, Dh)
             z_dst = self.Wk(h_dst).view(-1, self.H, self.Dh)   # (N_dst, H, Dh)
-
             # 2) Séparer a = [a_l | a_r]
             a_l, a_r = self.a[:, :self.Dh], self.a[:, self.Dh:]  # (H, Dh), (H, Dh)
 
