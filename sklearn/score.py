@@ -2555,6 +2555,8 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
             ent = entropy(y_pred_department_proba)
         except:
             ent = 0
+        ent = entropy(y_pred_department_proba)
+
         IoU_scores.append(IoU)
         F1_scores.append(F1)
         prec_scores.append(prec)

@@ -108,6 +108,39 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
             return torch.sum(weighted_loss) / torch.sum(sample_weight)
 
         return loss.mean()
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+=======
+
+class BCELoss(torch.nn.Module):
+    def __init__(self, reduction='mean'):
+        super(BCELoss, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, y_pred, y_true, sample_weight=None):
+        # y_pred: probabilities
+        # y_true: binary targets
+        loss = F.binary_cross_entropy(y_pred, y_true, reduction='none')
+        
+        if sample_weight is not None:
+            sample_weight = sample_weight.view(-1).to(loss.device)
+            loss = loss * sample_weight
+            if self.reduction == 'mean':
+                return loss.sum() / sample_weight.sum()
+            elif self.reduction == 'sum':
+                return loss.sum()
+            else:
+                return loss
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+>>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
+>>>>>>> 1ccea6c0aea708a26b128d58d32be8c39f8fd4ff
         
 def has_method(obj, method_name):
     """

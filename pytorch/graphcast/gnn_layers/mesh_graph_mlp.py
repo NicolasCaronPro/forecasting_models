@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from typing import Tuple, Union
+import copy
 
 import torch
 import torch.nn as nn
@@ -71,10 +72,10 @@ class MeshGraphMLP(nn.Module):
         super().__init__()
 
         if hidden_layers is not None:
-            layers = [nn.Linear(input_dim, hidden_dim), activation_fn]
+            layers = [nn.Linear(input_dim, hidden_dim), copy.deepcopy(activation_fn)]
             self.hidden_layers = hidden_layers
             for _ in range(hidden_layers - 1):
-                layers += [nn.Linear(hidden_dim, hidden_dim), activation_fn]
+                layers += [nn.Linear(hidden_dim, hidden_dim), copy.deepcopy(activation_fn)]
             layers.append(nn.Linear(hidden_dim, output_dim))
 
             self.norm_type = norm_type
@@ -356,10 +357,10 @@ class MeshGraphEdgeMLPSum(nn.Module):
         else:
             self.bias = None
 
-        layers = [activation_fn]
+        layers = [copy.deepcopy(activation_fn)]
         self.hidden_layers = hidden_layers
         for _ in range(hidden_layers - 1):
-            layers += [nn.Linear(hidden_dim, hidden_dim), activation_fn]
+            layers += [nn.Linear(hidden_dim, hidden_dim), copy.deepcopy(activation_fn)]
         layers.append(nn.Linear(hidden_dim, output_dim))
 
         self.norm_type = norm_type

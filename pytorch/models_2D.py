@@ -359,7 +359,7 @@ class OutConv(torch.nn.Module):
         return self.conv(x)
 
 class UNet(torch.nn.Module):
-    def __init__(self, n_channels, out_channels, conv_channels, bilinear=False, return_hidden=False, horizon=0):
+    def __init__(self, n_channels, out_channels, conv_channels, bilinear=False, return_hidden=False, horizon=0, task_type='classification'):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.out_channels = out_channels
@@ -380,6 +380,14 @@ class UNet(torch.nn.Module):
         self.return_hidden = return_hidden
         self.horizon = horizon
 
+        # Output activation depending on task
+        if task_type == 'classification':
+            self.output_activation = torch.nn.Softmax(dim=-1)
+        elif task_type == 'binary':
+            self.output_activation = torch.nn.Sigmoid()
+        else:
+            self.output_activation = torch.nn.Identity()  # For regression or custom handling
+
     def forward(self, x, edge_index=None, graph=None):
         if len(x.shape) == 5:
             x = x[:, :, :, :, -1]
@@ -399,7 +407,7 @@ class UNet(torch.nn.Module):
 
         hidden = x
         logits = self.outc(x)
-        output = logits
+        output = self.output_activation(logits)
 
         return output, logits, hidden
     

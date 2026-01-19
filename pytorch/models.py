@@ -114,6 +114,8 @@ class NetMLP(torch.nn.Module):
         self.horizon = horizon
         self.n_sequences = self.n_sequences
 
+        #if self.horizon > 0:
+        #    self.define_horizon_decodeur()
 
     def forward(self, features, z_prev=None, edges=None):
         if self.horizon > 0:
@@ -136,7 +138,6 @@ class NetMLP(torch.nn.Module):
             output = logits
 
         return output, logits, hidden
-    
     
 #####################################################
 
@@ -1430,8 +1431,6 @@ class GRU(torch.nn.Module):
         self.act_func1 = getattr(torch.nn, act_func)()
         self.act_func2 = getattr(torch.nn, act_func)()
 
-        self.act_func = getattr(torch.nn, act_func)()
-
         # Output activation depending on task
         if task_type == 'classification':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
@@ -2034,7 +2033,6 @@ class GraphCastGRU(torch.nn.Module):
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
 
-    # ----------------------------------------------------------------------
     # Forward pass
     # ----------------------------------------------------------------------
     def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
@@ -2074,8 +2072,6 @@ class GraphCastGRU(torch.nn.Module):
         output = self.output_activation(logits)
         return output, logits, hidden
 
-
-    
 class GraphCastGRUWithAttention(torch.nn.Module):
     def __init__(
         self,
@@ -2227,44 +2223,6 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         output = self.output_activation(logits)
         self._decoder_input = hidden
         return output, logits, hidden
-
-    def define_horizon_decodeur(self, decodeur_params=None):
-        if decodeur_params is None:
-            if self.horizon <= 0:
-                raise ValueError("horizon must be greater than zero to automatically define the decoder.")
-            decodeur_params = {
-                'device': next(self.parameters()).device,
-                'hidden_dim': self.end_channels,
-                'output_dim': self.out_channels * self.horizon,
-            }
-
-        device = decodeur_params.get('device', next(self.parameters()).device)
-        hidden_dim = decodeur_params['hidden_dim']
-        output_dim = decodeur_params['output_dim']
-        bias1 = decodeur_params.get('bias1', True)
-        bias2 = decodeur_params.get('bias2', True)
-
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.end_channels, hidden_dim, bias=bias1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, output_dim, bias=bias2)
-        ).to(device)
-        self._decoder_output_dim = output_dim
-
-    def forward_horizon(self, y_prev=None, X_futur=None):
-        if self.decoder is None:
-            raise RuntimeError("Decoder has not been defined. Call define_horizon_decodeur first.")
-
-        if y_prev is not None:
-            decoder_input = y_prev
-        elif X_futur is not None:
-            decoder_input = X_futur
-        elif self._decoder_input is not None:
-            decoder_input = self._decoder_input
-        else:
-            raise RuntimeError("No input available for decoder. Provide y_prev or X_futur, or run a forward pass first.")
-
-        return self.decoder(decoder_input)
 
 """class MultiScaleGraph(torch.nn.Module):
     def __init__(self, input_channels, graph_input_channels, graph_output_channels, device, graph_or_node, task_type,

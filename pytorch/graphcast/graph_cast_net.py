@@ -34,8 +34,6 @@ class GraphCastNet(torch.nn.Module):
 
         self.input_dim_grid_nodes = input_dim_grid_nodes
 
-        activation_fn = torch.nn.SiLU()
-
         # initial feature embedder
         self.encoder_embedder = GraphCastEncoderEmbedder(
             input_dim_grid_nodes=input_dim_grid_nodes,
@@ -44,7 +42,7 @@ class GraphCastNet(torch.nn.Module):
             output_dim=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
         )
 
@@ -59,7 +57,7 @@ class GraphCastNet(torch.nn.Module):
             output_dim_edges=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
             do_concat_trick=do_concat_trick,
             attention=attention
@@ -76,7 +74,7 @@ class GraphCastNet(torch.nn.Module):
             input_dim_edges=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
             has_time_dim=has_time_dim,
         )
@@ -88,7 +86,7 @@ class GraphCastNet(torch.nn.Module):
             input_dim_edges=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
             has_time_dim=has_time_dim,
         )
@@ -100,7 +98,7 @@ class GraphCastNet(torch.nn.Module):
             input_dim_edges=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
             has_time_dim=has_time_dim,
         )
@@ -110,7 +108,7 @@ class GraphCastNet(torch.nn.Module):
             output_dim=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
         )
 
@@ -124,7 +122,7 @@ class GraphCastNet(torch.nn.Module):
             output_dim_edges=hidden_dim,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=norm_type,
             do_concat_trick=do_concat_trick,
             attention=attention
@@ -136,7 +134,7 @@ class GraphCastNet(torch.nn.Module):
             output_dim=output_dim_grid_nodes,
             hidden_dim=hidden_dim,
             hidden_layers=hidden_layers,
-            activation_fn=activation_fn,
+            activation_fn=torch.nn.SiLU(),
             norm_type=None,
         )
 
