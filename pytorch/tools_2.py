@@ -311,10 +311,36 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type': task_type,
             'return_hidden': False,
             'dropout': dropout,
-            'horizon': horizon
+            'horizon': horizon,
+            'spatialContext' : False,
+            'd_channels' : 64
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
+        model = GRU(**default_params)
+        model_params.update(default_params)
+        
+    elif model_name == 'GRUAtt':
+        default_params = {
+            'in_channels': in_dim,
+            'hidden_channels': 256,
+            'gru_size': 128,
+            'out_channels' : out_channels,
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'num_layers': 2,
+            'device': device,
+            'act_func': act_func,
+            'task_type': task_type,
+            'return_hidden': False,
+            'dropout': dropout,
+            'horizon': horizon,
+            'spatialContext' : True,
+            'd_channels' : 64
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+            
         model = GRU(**default_params)
         model_params.update(default_params)
         
@@ -381,21 +407,21 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     elif model_name == 'TFN':   # Temporal Fusion Network (paper-aligned TFT)
         default_params = {
         'in_channels' : in_dim,
-        'tft_size' : 256,                  # d_model TFT
+        'tft_size' : 128,                  # d_model TFT
         'hidden_channels' : 256,
         'end_channels' : 128,
         'n_sequences' : k_days + 1,        # longueur historique
         'device' : device,
         'act_func' : 'ReLU',
         'task_type' : task_type,
-        'dropout' : 0.1,
+        'dropout' : 0.3,
         'num_layers' : 1,                  # LSTM encoder/decoder
         'return_hidden' : False,
         'out_channels' : out_channels,
         'use_layernorm' : True,
         'horizon' : horizon,
-        'n_heads' : 8,
-        'd_grn' : 512,                     # largeur GRN (paper ≈ 2×d_model)
+        'n_heads' : 4,
+        'd_grn' : 256,                     # largeur GRN (paper ≈ 2×d_model)
         'd_static' : 0,                    # 0 si tu n'utilises pas de static covariates
         'use_positional_encoding' : False
     }
@@ -764,8 +790,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
             'return_hidden': False,
-            'horizon': horizon
-
+            'horizon': horizon,
+            'spatialContext' : True
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)

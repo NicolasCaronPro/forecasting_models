@@ -108,10 +108,6 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
             return torch.sum(weighted_loss) / torch.sum(sample_weight)
 
         return loss.mean()
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-=======
 
 class BCELoss(torch.nn.Module):
     def __init__(self, reduction='mean'):
@@ -139,8 +135,6 @@ class BCELoss(torch.nn.Module):
             return loss.sum()
         else:
             return loss
->>>>>>> 5651ad3f0039da5d76fc1fb4dd748b18d3920c87
->>>>>>> 1ccea6c0aea708a26b128d58d32be8c39f8fd4ff
         
 def has_method(obj, method_name):
     """

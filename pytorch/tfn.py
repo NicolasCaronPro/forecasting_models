@@ -423,7 +423,7 @@ class TemporalFusionTransformerClassifier(nn.Module):
             h = self.norm(h)
         else:
             h = self.norm(h)
-
+            
         h = self.dropout(h)
         y = self.act_func1(self.linear1(h))
         y = self.act_func2(self.linear2(y))

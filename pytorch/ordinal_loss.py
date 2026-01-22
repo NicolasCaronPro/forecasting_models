@@ -2,7 +2,7 @@ import sys
 sys.path.insert(0,'/home/caron/Bureau/Model/HexagonalScale/ST-GNN-for-wildifre-prediction/Prediction/GNN/')
 
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Tuple, Union, List
 from forecasting_models.pytorch.tools_2 import *
 from forecasting_models.pytorch.loss_utils import *
 from forecasting_models.pytorch.classification_loss import WeightedCrossEntropyLoss
@@ -478,7 +478,13 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
         mce_result = self.mce(y_pred, y_true, sample_weight=sample_weight)
 
-        return C * wk_result + (1 - C) * mce_result
+        res = {
+            'total_loss' : C * wk_result + (1 - C) * mce_result,
+            'mce' : mce_result,
+            "wk" : wk_result
+        }
+
+        return res
     
     def get_learnable_parameters(self):
         if not self.learned:
@@ -586,7 +592,13 @@ class DiceAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
         dice_result = self.dice(y_pred, y_true, sample_weight=sample_weight)
 
-        return C * wk_result + (1 - C) * dice_result
+        res = {
+            'total_loss' : C * wk_result + (1 - C) * dice_result,
+            'dice' : dice_result,
+            "wk" : wk_result
+        }
+
+        return res
     
     def get_learnable_parameters(self):
         if not self.learned:
@@ -694,7 +706,13 @@ class ForegroundDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         wk_result = self.wk(y_pred, y_true, sample_weight=sample_weight)
         dice_result = self.dice(y_pred, y_true, sample_weight=sample_weight)
 
-        return C * wk_result + (1 - C) * dice_result
+        res = {
+            'total_loss' : C * wk_result + (1 - C) * dice_result,
+            'dice' : dice_result,
+            "wk" : wk_result
+        }
+
+        return res
     
     def get_learnable_parameters(self):
         if not self.learned:
@@ -907,7 +925,13 @@ class OrdinalDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         wk_result = self.wk(y_pred, y_true)
         dice_result = self.dice(y_pred, y_true)
 
-        return C * wk_result + (1 - C) * dice_result
+        res = {
+            'total_loss' : C * wk_result + (1 - C) * dice_result,
+            'dice' : dice_result,
+            "wk" : wk_result
+        }
+
+        return res
     
     def get_learnable_parameters(self):
         if not self.learned:
@@ -1544,8 +1568,14 @@ class FocalLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         # L = Focal + lambda * QWK
         # The user asked for L = CEfocal + lambda * LQWK
         # Here C is lambda.
+
+        res = {
+            'total_loss' : (1-C) * focal_result + C * wk_result,
+            'focal' : focal_result,
+            "wk" : wk_result
+        }
         
-        return (1-C) * focal_result + C * wk_result
+        return res
 
     def get_learnable_parameters(self):
         if not self.learned:
@@ -1842,5 +1872,9 @@ class FocalWKInversionLoss(torch.nn.modules.loss._WeightedLoss):
             sample_weight=sample_weight,
         )
 
-        # --- Combine ---
-        return self.B * focal_result + self.A * wk_result + self.C * inv_result
+        res = {'total_loss' :self.B * focal_result + self.A * wk_result + self.C * inv_result,
+        'focal' : focal_result,
+        'wk' : wk_result,
+        'inv' : inv_result}
+
+        return res
