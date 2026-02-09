@@ -7,6 +7,8 @@ import sympy as sp
 from xgboost import DMatrix
 from sklearn.metrics import log_loss, precision_score, recall_score, f1_score, balanced_accuracy_score, confusion_matrix
 import seaborn as sns
+import statsmodels.formula.api as smf
+from patsy import bs
 #from forecasting_models.sklearn.dico_departements import *
 
 def calculate_ks(data, score_col, event_col, thresholds, dir_output):
@@ -2488,27 +2490,221 @@ def entropy(prob_matrix):
     res = np.mean(H_norm)
     return res
 
-def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
+LEVELS = [0, 1, 2, 3, 4]
+
+PASSAGES = {
+    1: [(0, 1), (1, 2), (2, 3), (3, 4)],
+    2: [(0, 2), (1, 3), (2, 4)],
+    3: [(0, 3), (1, 4)],
+    4: [(0, 4)],
+}
+
+def fit_spline_mu(df, df_spline=5):
+    """
+    Fits a spline model Y ~ bs(score) + C(zone) + C(date)
+    and returns the predicted mean for each level in LEVELS.
+    """
+    d = df.dropna(subset=["score", "Y", "zone", "date"]).copy()
+    d["score"] = d["score"].clip(0, 4)
+    
+    # Ensure categorical types for fixed effects
+    d["zone"] = d["zone"].astype("category")
+    d["date"] = d["date"].astype("category")
+
+    formula = (
+        f"Y ~ bs(score, df={df_spline}, degree=3, include_intercept=False, "
+        f"lower_bound=0, upper_bound=4) + C(zone) + C(date)"
+    )
+    
+    try:
+        fit = smf.ols(formula, data=d).fit(cov_type="HC1")
+    except Exception as e:
+        # Fallback if too few data points or other issues
+        print(f"Warning: Spline fit failed: {e}")
+        return {lvl: np.nan for lvl in LEVELS}, None
+
+    template = d[["zone", "date"]].copy()
+    mu = {}
+    for s in LEVELS:
+        tmp = template.copy()
+        tmp["score"] = float(s)
+        mu[s] = float(fit.predict(tmp).mean())
+        
+    return mu, fit
+    
+# -----------------------------
+# Spline FE: mu(0..4) + passages (avec 4)
+# -----------------------------
+LEVELS = [0, 1, 2, 3, 4]
+
+PASSAGES = {
+    1: [(0,1), (1,2), (2,3), (3,4)],
+    2: [(0,2), (1,3), (2,4)],
+    3: [(0,3), (1,4)],
+    4: [(0,4)],
+}
+
+# Redefine compute_score_for_k to match comparison_analysis logic
+# 1. Use Median instead of Mean for average delta
+# 2. Use Weights: w_min=0.5, w_viol=0.5 (defaults in comparison_analysis)
+
+def fit_spline_mu(df, df_spline=5):
+    """
+    Fits a spline model Y ~ bs(score) + C(zone) + C(date)
+    and returns the predicted mean for each level in LEVELS.
+    """
+    # Hardcoded LEVELS for safety, matching notebook usage
+    LEVELS = [0, 1, 2, 3, 4]
+
+    d = df.dropna(subset=["score", "Y", "zone", "date"]).copy()
+    d["score"] = d["score"].clip(0, 4)
+    
+    # Ensure categorical types for fixed effects
+    d["zone"] = d["zone"].astype("category")
+    d["date"] = d["date"].astype("category")
+
+    formula = (
+        f"Y ~ bs(score, df={df_spline}, degree=3, include_intercept=False, "
+        f"lower_bound=0, upper_bound=4) + C(zone) + C(date)"
+    )
+    
+    try:
+        fit = smf.ols(formula, data=d).fit(cov_type="HC1")
+    except Exception as e:
+        # Fallback if too few data points or other issues
+        print(f"Warning: Spline fit failed: {e}")
+        return {lvl: np.nan for lvl in LEVELS}, None
+
+    template = d[["zone", "date"]].copy()
+    mu = {}
+    for s in LEVELS:
+        tmp = template.copy()
+        tmp["score"] = s
+        pred = fit.predict(tmp)
+        mu[s] = pred.mean()
+        
+    return mu, fit
+
+def compute_score_for_k(mu, sigma, k, lvl_counts,
+                        min_n=1, min_k=1,
+                        w_avg=1.0, w_min=1.0, w_neg=1.0, w_viol=1.0,  # FIXED WEIGHTS
+                        min_gain=0.0):
+    """
+    Computes the score for a given k based on deltas between levels.
+    Returns score and coverage (number of valid pairs |P_k*|).
+    """
+    pairs = PASSAGES.get(k, [])
+    deltas = []
+    
+    coverage = 0
+
+    for (a, b) in pairs:
+        # Filter based on min_n
+        n_a = lvl_counts.get(a, 0)
+        n_b = lvl_counts.get(b, 0)
+        
+        if (n_a >= min_n) and (n_b >= min_n):
+            delta = mu[b] - (mu[a] + min_gain)
+            deltas.append(delta)
+            coverage += min(n_a, n_b)
+    
+    # Filter based on min_k
+    if coverage < min_k:
+        return np.nan, coverage
+
+    if len(deltas) == 0:
+        return np.nan, coverage
+
+    deltas = np.array(deltas)
+    # Standardize by sigma
+    deltas_std = deltas / 1.0
+    
+    # FIXED: Use MEDIAN for average, consistent with comparison_analysis
+    avg_delta_std = np.median(deltas_std) 
+    
+    min_delta_std = np.min(deltas_std)
+    neg_mass_std = np.mean(np.clip(-deltas_std, 0.0, None))
+    viol_rate = np.mean(deltas_std < 0.0)
+    
+    score = (
+        (w_avg * avg_delta_std + w_min * min_delta_std) / 2
+        - w_neg * neg_mass_std * (1 + w_viol * viol_rate)
+    )
+
+    print(k, avg_delta_std, min_delta_std, neg_mass_std, viol_rate, np.unique(deltas_std))
+
+    # Coverage weighting (disabled as per comparison_analysis logic which doesn't seem to force it here)
+    return score, coverage
+
+# Redefine evaluation_scoring to capture new defaults
+def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0, min_gain=[0.0, 0.0, 0.0, 0.0]):
+    """
+    Main function to evaluate monotonic comparison analysis.
+    Returns score_high, score_low, coverage_k.
+    """
+    df = pd.DataFrame({
+        "score": ypred,
+        "Y": ytrue,
+        "date": dates,
+        "zone": zones
+    })
+    
+    # Calculate level counts
+    df["_lvl"] = df["score"].clip(0, 4).astype(int)
+    lvl_counts = df["_lvl"].value_counts().to_dict()
+    
+    sigma = df["Y"].std()
+    if sigma == 0 or np.isnan(sigma):
+        sigma = 1.0 # Avoid division by zero
+        
+    mu, fit = fit_spline_mu(df, df_spline=df_spline)
+    
+    if all(np.isnan(list(mu.values()))):
+        return np.nan, np.nan, {}
+    
+    score_adj_k = {}
+    coverage_k = {}
+    
+    # Using defaults from re-defined compute_score_for_k (w_min=0.5, w_viol=0.5)
+    for k in [1, 2, 3, 4]:
+        # Handle min_gain being float (scalar) or list
+        if isinstance(min_gain, (int, float)):
+             min_g = min_gain
+        else:
+             min_g = min_gain[k - 1]
+             
+        score, coverage = compute_score_for_k(mu, sigma, k, lvl_counts, min_n=min_n, min_k=min_k, min_gain=min_g)
+        score_adj_k[k] = score
+        coverage_k[k] = coverage
+        
+    score_low = score_adj_k[1] + score_adj_k[2]
+    score_high = score_adj_k[3] + score_adj_k[4]
+    
+    if np.isnan(score_low):
+        score_low = 0.0
+    if np.isnan(score_high):
+        score_high = 0.0
+    
+    return score_high, score_low, coverage_k, score_adj_k
+
+def evaluate_metrics(y_true, y_pred, dates=None, zones=None, y_pred_probas=None):
     """
     Calcule l'IoU et le F1-score sur chaque département, puis calcule l'aire sous la courbe normalisée (aire / aire maximale).
     
-    :param dff: DataFrame contenant les colonnes ['Department', 'Scale', 'nbsinister', 'target']
-    :param dataset: Nom du dataset à filtrer
-    :param y_true_col: Colonne représentant les cibles réelles
-    :param y_pred: Liste ou tableau des prédictions
-    :param metric: Choix de la métrique ('IoU' ou 'F1')
-    :param top: Nombre de départements à afficher (ou 'all' pour tout afficher)
-    :return: Dictionnaire contenant l'aire normalisée pour chaque modèle.
+    :param y_true: Tableau des cibles réelles
+    :param y_pred: Tableau des prédictions
+    :param dates: Tableau des dates (optionnel)
+    :param zones: Tableau des zones/départements (optionnel)
+    :param y_pred_probas: Tableau des probabilités de prédiction (optionnel)
+    :return: Dictionnaire contenant les métriques calculées.
     """
     
-    # Trier les valeurs par 'nbsinister' décroissant
-    #df_sorted = df.sort_values(by='nbsinister', ascending=False)
-    df_sorted = df
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
     if y_pred.ndim > 1:
         y_pred = y_pred[:, 0]
 
-    y_true = df[y_true_col]
-    
     iou = iou_score(y_true, y_pred)
     f1 = f1_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
     prec = precision_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
@@ -2532,54 +2728,80 @@ def evaluate_metrics(df, y_true_col='target', y_pred=None, y_pred_probas=None):
     results = {'iou' : iou, 'f1' : f1, 'under' : under, 'over' : over, 'prec' : prec, 'recall' : rec,
                'auoc' : auoc, 'f1_macro' : f1_macro, 'prec_macro' : prec_macro, 'rec_macro' : rec_macro, 'ent' : ent}
 
+    try:
+        if dates is not None and zones is not None:
+            score_high, score_low, coverage_k, score_adj_k = evaluation_scoring(y_pred, y_true, dates, zones)
+            results['score_high'] = score_high
+            results['score_low'] = score_low
+            results['score'] = score_high + score_low
+            
+            # Add coverage metrics
+            for k, count in coverage_k.items():
+                results[f'coverage_k{k}'] = count
+
+            # Add score k metrics
+            for k, val in score_adj_k.items():
+                results[f'score_k{k}'] = val
+        else:
+            results['score_high'] = np.nan
+            results['score_low'] = np.nan
+            results['score'] = np.nan
+    except Exception as e:
+        print(f"Warning: monotonic scoring failed in evaluate_metrics: {e}")
+        results['score_high'] = np.nan
+        results['score_low'] = np.nan
+        results['score'] = np.nan
+
     # Calculer l'IoU et F1 pour chaque département
     IoU_scores = []
     F1_scores = []
     rec_scores = []
     prec_scores = []
     
-    for i, department in enumerate(df_sorted['departement'].unique()):
-        # Extraire les valeurs pour chaque département
-        y_true = df_sorted[df_sorted['departement'] == department][y_true_col].values
-        if np.all(y_true == 0):
-            continue
-        y_pred_department = y_pred[df_sorted['departement'] == department]  # Récupérer les prédictions associées au département
-        y_pred_department_proba = y_pred_probas[df_sorted['departement'] == department] if y_pred_probas is not None else y_pred_department
+    if zones is not None:
+        zones = np.asarray(zones)
+        unique_zones = np.unique(zones)
+        for department in unique_zones:
+            # Extraire les valeurs pour chaque département
+            mask = (zones == department)
+            y_true_dept = y_true[mask]
+            if np.all(y_true_dept == 0):
+                continue
+            y_pred_department = y_pred[mask]
+            y_pred_department_proba = y_pred_probas[mask] if y_pred_probas is not None else None
+            
+            # Calcul des scores IoU et F1
+            IoU = iou_score(y_true_dept, y_pred_department)
+            F1 = f1_score(y_true_dept > 0, y_pred_department > 0, zero_division=0)
+            prec = precision_score(y_true_dept > 0, y_pred_department > 0, zero_division=0)
+            rec = recall_score(y_true_dept > 0, y_pred_department > 0, zero_division=0)
+            
+            IoU_scores.append(IoU)
+            F1_scores.append(F1)
+            prec_scores.append(prec)
+            rec_scores.append(rec)
+            
+        # Calcul de l'aire maximale possible (cas parfait où toutes les prédictions sont correctes)
+        unique_zones_with_fire = np.unique(zones[y_true > 0])
+        max_area = np.trapz(np.ones(len(unique_zones_with_fire)), dx=1)
         
-        # Calcul des scores IoU et F1
-        IoU = iou_score(y_true, y_pred_department)
-        F1 = f1_score(y_true > 0, y_pred_department > 0, zero_division=0)
-        prec = precision_score(y_true > 0, y_pred_department > 0, zero_division=0)
-        rec = recall_score(y_true > 0, y_pred_department > 0, zero_division=0)
-        try:
-            ent = entropy(y_pred_department_proba)
-        except:
-            ent = 0
-        ent = entropy(y_pred_department_proba)
+        # Calcul de l'aire sous la courbe pour l'IoU et le F1
+        IoU_area = calculate_area_under_curve(IoU_scores)
+        F1_area = calculate_area_under_curve(F1_scores)
 
-        IoU_scores.append(IoU)
-        F1_scores.append(F1)
-        prec_scores.append(prec)
-        rec_scores.append(rec)
-        
-    df_sorted_test_area = df_sorted[df_sorted[y_true_col] > 0]
-    # Calcul de l'aire maximale possible (cas parfait où toutes les prédictions sont correctes)
-    max_area = np.trapz(np.ones(len(df_sorted_test_area['departement'].unique())), dx=1)
-    
-    # Calcul de l'aire sous la courbe pour l'IoU et le F1
-    IoU_area = calculate_area_under_curve(IoU_scores)
-    F1_area = calculate_area_under_curve(F1_scores)
+        prec_area = calculate_area_under_curve(prec_scores)
+        rec_area = calculate_area_under_curve(rec_scores)
 
-    prec_area = calculate_area_under_curve(prec_scores)
-    rec_area = calculate_area_under_curve(rec_scores)
-
-    # Normalisation par l'aire maximale
-    normalized_IoU = IoU_area / max_area if max_area > 0 else 0
-    normalized_F1 = F1_area / max_area if max_area > 0 else 0
-    normalized_rec = rec_area / max_area if max_area > 0 else 0
-    normalized_prec = prec_area / max_area if max_area > 0 else 0
-    
-    y_true = df[y_true_col]
+        # Normalisation par l'aire maximale
+        normalized_IoU = IoU_area / max_area if max_area > 0 else 0
+        normalized_F1 = F1_area / max_area if max_area > 0 else 0
+        normalized_rec = rec_area / max_area if max_area > 0 else 0
+        normalized_prec = prec_area / max_area if max_area > 0 else 0
+    else:
+        normalized_IoU = np.nan
+        normalized_F1 = np.nan
+        normalized_rec = np.nan
+        normalized_prec = np.nan
     
     # Stocker les résultats dans le dictionnaire
     results['normalized_iou'] = normalized_IoU

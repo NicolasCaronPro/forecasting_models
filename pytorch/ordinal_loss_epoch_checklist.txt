@@ -1,0 +1,64 @@
+Checklist des métriques à sauvegarder / plot par epoch pour comprendre
+la dynamique de la loss
+
+1)  Loss et contributions
+
+-   Loss totale train / val
+-   Loss transitionnelle seule (somme des wk * Lk / somme wk)
+-   Terme mu(0) si présent : L_min0 et sa contribution pondérée
+
+2)  Par ordre k Pour chaque k :
+
+-   Lk moyen (avant poids)
+-   wk * Lk moyen (après poids)
+-   SCORE_k moyen
+-   MIN_k, MED_k, NEG_k, VIOL_k moyens
+
+3)  Statistiques des deltas Pour chaque k :
+
+-   médiane des deltas
+-   min des deltas
+-   % de deltas < 0 (violation hard)
+-   moyenne de sigmoid(-delta / t)
+-   std ou IQR des deltas
+
+4)  μ(s) : ordonnancement des classes Pour chaque classe s :
+
+-   mu(s) moyen
+-   percentiles 10–90 de mu(s)
+-   mu(s+1) - mu(s) moyen
+-   % de clusters avec mu(s+1) <= mu(s)
+
+5)  Masse de probabilité par classe Pour chaque classe s :
+
+-   pi_s = mean_i p_{i,s}
+-   entropie moyenne des p_i
+-   entropie de pi
+
+6)  Couverture soft et shrinkage Pour chaque classe s :
+
+-   counts_s moyen
+-   % de clusters avec counts_s faible
+-   lambda_s = counts_s / (counts_s + alpha)
+
+7)  Suivi des gains et des scales
+
+-   spread/scale global
+-   médiane des spreads par cluster
+-   gains adjacents g_j
+-   marges par k : médiane(sum g_j)
+
+8)  Suivi du terme mu(0)
+
+-   mu(0) moyen + percentiles
+-   corrélation entre y et p_{i,0}
+-   moyenne de p_{i,0} pour les plus grands y
+
+9)  (Optionnel) Norme des gradients
+
+-   norme globale des gradients
+-   comparaison gradient transitionnel vs mu(0)
+
+Les 6 plots minimum vitaux : 1) Loss totale + composantes 2) pi_s par
+classe 3) mu(s) par classe + gaps 4) Pour chaque k : médiane(delta),
+min(delta), %delta<0 5) wk * Lk par k 6) counts_s ou lambda_s par classe

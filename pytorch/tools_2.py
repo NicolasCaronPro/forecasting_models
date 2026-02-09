@@ -822,7 +822,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'graph_or_node':graph_or_node,
             'n_sequences' : k_days + 1,
             'return_hidden': False,
-            'horizon': horizon
+            'horizon': horizon,
+            'spatialContext' : True
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)

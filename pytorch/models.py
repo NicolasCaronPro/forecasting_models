@@ -45,7 +45,8 @@ class SpatialContext(nn.Module):
 
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(d_model)
+        self.norm_h = nn.LayerNorm(d_model)
+        self.norm_s = nn.LayerNorm(d_model)
 
     def forward(self, h_dyn: torch.Tensor, x_stat: torch.Tensor):
         """
@@ -59,8 +60,8 @@ class SpatialContext(nn.Module):
         s = self.stat_in(x_stat)        # [B, K, d_model]
 
         # Optional pre-norm (stabilise training)
-        h = self.norm(h)
-        s = self.norm(s)
+        h = self.norm_h(h)
+        s = self.norm_s(s)
 
         # Projections
         q = self.q_proj(h).view(B, self.n_heads, self.d_head)              # [B, H, Dh]
@@ -89,6 +90,134 @@ class SpatialContext(nn.Module):
 
         return c, attn_mean
     
+
+class SpatialContextSet(nn.Module):
+    """
+    Cross-attn/gating: h_dyn (query) -> x_stat (keys/values), BUT we keep per-variable
+    representations [B,K,d_model] before pooling with an MLP (DeepSets style).
+
+    Inputs:
+      h_dyn  : [B, D_dyn]
+      x_stat : [B, K, D_stat]
+
+    Outputs:
+      c        : [B, d_model]   pooled static context conditioned on h_dyn
+      w_mean   : [B, K]         mean weights over heads (interpretable)
+      z_tokens : [B, K, d_model] (optional, can be useful for debugging)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_dyn: int,
+        d_stat: int,
+        n_heads: int = 4,
+        dropout: float = 0.0,
+        use_sigmoid_gating: bool = True,
+        renorm_gates: bool = True,   # recommended when K is large (e.g., 61)
+        return_tokens: bool = False,
+    ):
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.scale = self.d_head ** -0.5
+
+        self.use_sigmoid_gating = use_sigmoid_gating
+        self.renorm_gates = renorm_gates
+        self.return_tokens = return_tokens
+
+        # Project to shared model dimension
+        self.dyn_in = nn.Linear(d_dyn, d_model)
+        self.stat_in = nn.Linear(d_stat, d_model)
+
+        # Separate norms (often better than sharing one LN for both streams)
+        self.norm_dyn = nn.LayerNorm(d_model)
+        self.norm_stat = nn.LayerNorm(d_model)
+
+        # Attention projections
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+
+        # Per-variable MLP (shared across K) before pooling: DeepSets style
+        self.var_mlp = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+        )
+
+        # Output projection and dropout
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        # Optional residual scaling (start small = safer)
+        self.res_scale = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, h_dyn: torch.Tensor, x_stat: torch.Tensor):
+        """
+        h_dyn  : [B, D_dyn]
+        x_stat : [B, K, D_stat]
+        """
+        B, K, _ = x_stat.shape
+
+        # Shared space + norms
+        h0 = self.dyn_in(h_dyn)          # [B, d_model]
+        s = self.stat_in(x_stat)         # [B, K, d_model]
+        h = self.norm_dyn(h0)
+        s = self.norm_stat(s)
+
+        # Projections
+        q = self.q_proj(h).view(B, self.n_heads, self.d_head)              # [B, H, Dh]
+        k = self.k_proj(s).view(B, K, self.n_heads, self.d_head)           # [B, K, H, Dh]
+        v = self.v_proj(s).view(B, K, self.n_heads, self.d_head)           # [B, K, H, Dh]
+
+        # Reorder
+        q = q.unsqueeze(2)                     # [B, H, 1, Dh]
+        k = k.permute(0, 2, 1, 3)              # [B, H, K, Dh]
+        v = v.permute(0, 2, 1, 3)              # [B, H, K, Dh]
+
+        # Logits
+        logits = (q * k).sum(-1) * self.scale  # [B, H, K]
+
+        # Weights/gates
+        if self.use_sigmoid_gating:
+            w = torch.sigmoid(logits)          # [B, H, K]  (multi-label style)
+            if self.renorm_gates:
+                w = w / (w.sum(dim=-1, keepdim=True) + 1e-6)
+        else:
+            w = F.softmax(logits, dim=-1)      # [B, H, K]  (classic attention)
+
+        w_drop = self.dropout(w)
+
+        # Keep per-variable tokens BEFORE pooling:
+        # z_tokens_head: [B, H, K, Dh]
+        z_tokens_head = w_drop.unsqueeze(-1) * v
+
+        # Merge heads -> [B, K, d_model]
+        z_tokens = z_tokens_head.permute(0, 2, 1, 3).contiguous().view(B, K, self.d_model)
+
+        # Per-variable nonlinearity then pool across K
+        z_tokens = self.var_mlp(z_tokens)      # [B, K, d_model]
+        c = z_tokens.mean(dim=1)               # [B, d_model]  (or .sum / max / attn-pool)
+
+        c = self.out_proj(c)
+        c = self.dropout(c)
+
+        # Optional residual update on h_dyn representation (often helps stability)
+        c = h0 + self.res_scale * c            # [B, d_model]
+
+        # For interpretability (use w, not w_drop)
+        w_mean = w.mean(dim=1)                 # [B, K]
+
+        if self.return_tokens:
+            return c, w_mean, z_tokens
+        return c, w_mean    
+
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
         super(MLPLayer, self).__init__()
@@ -186,12 +315,20 @@ class GRU(torch.nn.Module):
         self.dropout = torch.nn.Dropout(p=dropout).to(device)
         
         if self.spatialContext:
-            self.context_layer = SpatialContext(d_channels, gru_size, 1, n_heads=4, dropout=dropout)
+            self.context_layer = SpatialContextSet(d_channels, gru_size, 1, n_heads=4, dropout=dropout, use_sigmoid_gating=True, renorm_gates=True,)
 
         # Output linear layer
         self.linear1 = torch.nn.Linear(d_channels if self.spatialContext else gru_size + len(self.spatial_idx), hidden_channels).to(device)
         self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
         self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+        
+        # Custom Init to prevent "Inverted" start:
+        # Start with near-zero weights to ensure initial neutrality (deltas ~ 0)
+        print("Applying custom neutral initialization to GRU output layer.")
+        torch.nn.init.normal_(self.output_layer.weight, mean=0.0, std=0.001)
+        if self.output_layer.bias is not None:
+            torch.nn.init.zeros_(self.output_layer.bias)
+
 
         # Activation functions - separate instances for SHAP compatibility
         self.act_func1 = getattr(torch.nn, act_func)()
@@ -220,7 +357,7 @@ class GRU(torch.nn.Module):
             X = X[:, self.temporal_idx, :]
         
         batch_size = X.size(0)
-
+        
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
         else:
@@ -642,7 +779,7 @@ class GraphCastGRU(torch.nn.Module):
         if hasattr(self, 'spatialContext') and self.spatialContext:
             x, _ = self.context_layer(x, X_spa)
         elif hasattr(self, 'spatialContext'):
-            x = torch.concat((x, X_spa.permute(2, 0, 1)), dim=2)
+            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
             
         x = self.act_func(self.linear1(x))
         hidden = self.act_func(self.linear2(x))
@@ -814,8 +951,8 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         if hasattr(self, 'spatialContext') and self.spatialContext:
             x, _ = self.context_layer(x, X_spa)
         elif hasattr(self, 'spatialContext'):
-            x = torch.concat((x, X_spa.permute(2, 0, 1)), dim=2)
-            
+            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
+                        
         x = self.act_func(self.linear1(x))
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)

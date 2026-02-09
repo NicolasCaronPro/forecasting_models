@@ -547,13 +547,17 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                                     optimization='skip', grid_params=None, fit_params={}, cv_folds=10)
                     
                     prediction = copy_model.predict(X_val)
-                    metrics_run = evaluate_metrics(y_val, self.target_name, prediction)
+                    metrics_run = evaluate_metrics(y_val[self.target_name] if isinstance(y_val, pd.DataFrame) else y_val, prediction, 
+                                                   dates=y_val['date'] if isinstance(y_val, pd.DataFrame) and 'date' in y_val.columns else y_val[:, date_index], 
+                                                   zones=y_val['graph_id'] if isinstance(y_val, pd.DataFrame) and 'departement' in y_val.columns else y_val[:, graph_ids_index])
                     metrics_run = round_floats(metrics_run)
                     update_metrics_as_arrays(self, tp, metrics_run, 'val')
 
 
                     prediction = copy_model.predict(X_test)
-                    metrics_run = evaluate_metrics(y_test, self.target_name, prediction)
+                    metrics_run = evaluate_metrics(y_test[self.target_name] if isinstance(y_test, pd.DataFrame) else y_test, prediction, 
+                                                   dates=y_test['date'] if isinstance(y_test, pd.DataFrame) and 'date' in y_test.columns else y_val[:, date_index], 
+                                                   zones=y_test['graph_id'] if isinstance(y_test, pd.DataFrame) and 'departement' in y_test.columns else y_test[:, graph_ids_index])
                     metrics_run = round_floats(metrics_run)
                     update_metrics_as_arrays(self, tp, metrics_run, 'test')
                     
@@ -892,7 +896,10 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                 'method': 'bfgs'
             })
 
-        self.metrics['final'] = evaluate_metrics(y_test, self.target_name, self.predict(X_test))
+        y_test_true = y_test[self.target_name] if isinstance(y_test, pd.DataFrame) else y_test
+        y_test_dates = y_test['date'] if isinstance(y_test, pd.DataFrame) and 'date' in y_test.columns else None
+        y_test_zones = y_test['graph_id'] if isinstance(y_test, pd.DataFrame) and 'departement' in y_test.columns else None
+        self.metrics['final'] = evaluate_metrics(y_test_true, self.predict(X_test), dates=y_test_dates, zones=y_test_zones)
         #print(self.metrics)
         
     def get_model(self):

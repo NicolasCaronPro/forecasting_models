@@ -1919,7 +1919,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
 
     # ---------- NLL TRONQUÉE ----------
     def forward(self, inputs: torch.Tensor, y: torch.Tensor,
-                weight: torch.Tensor = None, from_logits: bool = True) -> torch.Tensor:
+                weight: torch.Tensor = None, from_logits: bool = True, sample_weight=None) -> torch.Tensor:
         """
         inputs shape: (..., 3) with [sigma, kappa, xi] on the last dim.
         """
