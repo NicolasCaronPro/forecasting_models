@@ -2516,7 +2516,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
     ):
         super().__init__()
         self.id = id
-        self.C = int(numclasses)
+        self.C = int(num_classes)
         if self.C < 2:
             raise ValueError("num_classes doit être >= 2.")
         if len(quantileedges) != (self.C - 2):
@@ -2536,7 +2536,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
 
         self.P = self._build_Pk(self.C)
         self.wk = {k: 1.0 for k in range(1, self.C)} if wk is None else wk
-
+        
         self.enablelogs = bool(enablelogs)
         self.lambdamu0 = lambdamu0
         self.lambdaentropy = lambdaentropy
@@ -2549,6 +2549,8 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         self.wmin = float(wmin)
         self.wneg = float(wneg)
         self.wviol = float(wviol)
+
+        self._log("Ordinal Loss Config:", self.get_config())
 
     def get_config(self):
         return {
