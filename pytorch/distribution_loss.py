@@ -193,7 +193,7 @@ class EGPDNLLLoss(torch.nn.Module):
         else:
             return [('kappa', self.kappa), ('xi', self.xi)]
         
-    def plot_params(self, egpd_logs, dir_output):
+    def plot_params(self, egpd_logs, dir_output, best_epoch=None):
         """Sauvegarde les paramètres EGPD (kappa, xi) et trace leurs évolutions en fonction des epochs."""
 
         # Extraction directe (car egpd_log est un dict {epoch: {"kappa":..., "xi":...}})
@@ -618,7 +618,7 @@ class EGPDNLLLossSqrt(torch.nn.Module):
         else:
             return [('kappa', self.kappa), ('xi', self.xi)]
 
-    def plot_params(self, egpd_logs, dir_output):
+    def plot_params(self, egpd_logs, dir_output, best_epoch=None):
         kappas = [egpd_log["kappa"] for egpd_log in egpd_logs]
         xis    = [egpd_log["xi"] for egpd_log in egpd_logs]
         epochs = [egpd_log["epoch"] for egpd_log in egpd_logs]

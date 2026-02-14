@@ -2577,11 +2577,25 @@ def fit_spline_mu(df, df_spline=5):
 
     template = d[["zone", "date"]].copy()
     mu = {}
+    
+    Y_max = d["Y"].max()
+    if np.isnan(Y_max) or Y_max == 0:
+        Y_max = 1.0 # arbitrary fallback if Y is all 0 or nan
+
     for s in LEVELS:
         tmp = template.copy()
         tmp["score"] = s
         pred = fit.predict(tmp)
-        mu[s] = pred.mean()
+        
+        # Clamp predictions to avoid extreme extrapolation
+        # Use 2.0 * Y_max as upper bound
+        pred_clamped = np.clip(pred, 0, Y_max * 2.0)
+        
+        # Check if clamping was active and warn if significant
+        if np.any(pred > Y_max * 100):
+             print(f"Warning: Spline prediction for score {s} was extremely high ({pred.max()}). Clamped to {Y_max*2.0}.")
+        
+        mu[s] = pred_clamped.mean()
         
     return mu, fit
 
@@ -2607,17 +2621,19 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
             delta = mu[b] - (mu[a] + min_gain)
             deltas.append(delta)
             coverage += min(n_a, n_b)
-    
+            
     # Filter based on min_k
     if coverage < min_k:
+        print(f"DEBUG: compute_score_for_k: coverage {coverage} < min_k {min_k} for k={k}")
         return np.nan, coverage
 
     if len(deltas) == 0:
+        print(f"DEBUG: compute_score_for_k: len(deltas) is 0 for k={k}")
         return np.nan, coverage
 
     deltas = np.array(deltas)
     # Standardize by sigma
-    deltas_std = deltas / 1.0
+    deltas_std = deltas / sigma
     
     # FIXED: Use MEDIAN for average, consistent with comparison_analysis
     avg_delta_std = np.median(deltas_std) 
@@ -2630,6 +2646,11 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         (w_avg * avg_delta_std + w_min * min_delta_std) / 2
         - w_neg * neg_mass_std * (1 + w_viol * viol_rate)
     )
+
+    # 2026-02-13: Clamp score to avoid numerical explosion
+    if np.abs(score) > 1e6:
+        print(f"DEBUG: Score for k={k} exploded ({score}). Clamped to +/- 1e6.")
+        score = np.clip(score, -1e6, 1e6)
 
     print(k, avg_delta_std, min_delta_std, neg_mass_std, viol_rate, np.unique(deltas_std))
 
@@ -2654,13 +2675,19 @@ def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0
     lvl_counts = df["_lvl"].value_counts().to_dict()
     
     sigma = df["Y"].std()
-    if sigma == 0 or np.isnan(sigma):
-        sigma = 1.0 # Avoid division by zero
-        
+    
+    # 2026-02-13: Clamp sigma to avoid division by zero or very small numbers
+    if sigma < 1e-6 or np.isnan(sigma):
+        print(f"DEBUG: Sigma {sigma} is too small or NaN. Clamped to 1.0.")
+        sigma = 1.0 # arbitrary fallback
+    
+    print(f"DEBUG: lvl_counts={lvl_counts}, sigma={sigma}, Y_max={df['Y'].max()}")
+    
     mu, fit = fit_spline_mu(df, df_spline=df_spline)
     
     if all(np.isnan(list(mu.values()))):
-        return np.nan, np.nan, {}
+        print("DEBUG: fit_spline_mu returned all NaNs")
+        return np.nan, np.nan, {}, {}
     
     score_adj_k = {}
     coverage_k = {}

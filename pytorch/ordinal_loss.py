@@ -494,7 +494,7 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     def get_attribute(self):
         return [('C', torch.nn.functional.sigmoid(self.C))]
     
-    def plot_params(self, mcewk_logs, dir_output):
+    def plot_params(self, mcewk_logs, dir_output, best_epoch=None):
 
         Cs = [mcewk_log["C"] for mcewk_log in mcewk_logs]
         epochs = [mcewk_log["epoch"] for mcewk_log in mcewk_logs]
@@ -608,7 +608,7 @@ class DiceAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     def get_attribute(self):
         return [('C', torch.nn.functional.sigmoid(self.C))]
     
-    def plot_params(self, mcewk_logs, dir_output):
+    def plot_params(self, mcewk_logs, dir_output, best_epoch=None):
 
         Cs = [mcewk_log["C"] for mcewk_log in mcewk_logs]
         epochs = [mcewk_log["epoch"] for mcewk_log in mcewk_logs]
@@ -723,7 +723,7 @@ class ForegroundDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     def get_attribute(self):
         return [('C', torch.nn.functional.sigmoid(self.C))]
     
-    def plot_params(self, mcewk_logs, dir_output):
+    def plot_params(self, mcewk_logs, dir_output, best_epoch=None):
 
         Cs = [mcewk_log["C"] for mcewk_log in mcewk_logs]
         epochs = [mcewk_log["epoch"] for mcewk_log in mcewk_logs]
@@ -942,7 +942,7 @@ class OrdinalDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     def get_attribute(self):
         return [('C', torch.nn.functional.sigmoid(self.C))]
     
-    def plot_params(self, mcewk_logs, dir_output):
+    def plot_params(self, mcewk_logs, dir_output, best_epoch=None):
 
         Cs = [mcewk_log["C"] for mcewk_log in mcewk_logs]
         epochs = [mcewk_log["epoch"] for mcewk_log in mcewk_logs]
@@ -1202,6 +1202,7 @@ class GeneralizedWassersteinDiceLoss(nn.Module):
     def plot_params(self,
                 log,
                 dir_output,
+                best_epoch=None,
                 class_names=None,      # list of class names (length C) or None
                 title="Misclassification cost matrix",
                 figsize=(6, 5),
@@ -1585,7 +1586,7 @@ class FocalLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
     def get_attribute(self):
         return [('C', torch.sigmoid(self.C))]
     
-    def plot_params(self, mcewk_logs, dir_output):
+    def plot_params(self, mcewk_logs, dir_output, best_epoch=None):
         Cs = [mcewk_log["C"] for mcewk_log in mcewk_logs]
         epochs = [mcewk_log["epoch"] for mcewk_log in mcewk_logs]
 
@@ -2495,7 +2496,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         self,
         num_classes=5,
         betasoftmin=10.0,
-        tviolation=0.1,
+        tviolation=0.01,
         mushrinkalpha=1.0,
         eps=1e-8,
         wk=None,
@@ -2507,14 +2508,32 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         enforcegainmonotone=True,
         id=None,
         enablelogs=True,
-        lambdamu0 = 0.1,
+        lambdamu0 = 0.0,
         lambdaentropy = 0.0,
         wmed=1.0,
         wmin=1.0,
         wneg=1.0,
-        wviol=1.0
+        wviol=1.0,
+        addglobal=False,
+        lambdadir=0.0, # Default as requested in "Valeurs de départ"
+        diralpha=1.05,
+        lambdace=0.0,
+        class_weights=None
     ):
         super().__init__()
+        self.addglobal = bool(addglobal)
+        self.lambdadir = float(lambdadir)
+        self.diralpha = float(diralpha)
+        self.lambdace = float(lambdace)
+
+        # Weighted Cross Entropy Setup
+        if class_weights is not None:
+             if not torch.is_tensor(class_weights):
+                  class_weights = torch.tensor(class_weights, dtype=torch.float32)
+             self.register_buffer('class_weights', class_weights)
+             self.ce_loss = FocalLoss(gamma=2.0, alpha=self.class_weights, reduction='none')
+        else:
+             self.ce_loss = FocalLoss(gamma=2.0, alpha=1.0, reduction='none')
         self.id = id
         self.C = int(num_classes)
         if self.C < 2:
@@ -2543,6 +2562,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         # cluster_id -> torch.FloatTensor(C-1)
         self.gain_k = {}
         self.register_buffer("global_gains", torch.zeros(self.C - 1, dtype=torch.float32))
+        self.register_buffer("global_scale", torch.tensor(1.0, dtype=torch.float32))
 
         # Component weights
         self.wmed = float(wmed)
@@ -2550,7 +2570,9 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         self.wneg = float(wneg)
         self.wviol = float(wviol)
 
-        self._log("Ordinal Loss Config:", self.get_config())
+        self.call_preprocess = False
+
+        #self._log("Ordinal Loss Config:", self.get_config())
 
     def get_config(self):
         return {
@@ -2571,7 +2593,11 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             "wmin": self.wmin,
             "wneg": self.wneg,
             "wviol": self.wviol,
-            "id": self.id
+
+            "id": self.id,
+            "addglobal": self.addglobal,
+            "lambdadir": self.lambdadir,
+            "diralpha": self.diralpha
         }
 
     # ------------------------------------------------------------
@@ -2642,6 +2668,209 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             np.array(used_q, dtype=np.float32),
             bool(forced_flat),
         )
+    
+    def _dirichlet_barrier(self, pi):
+        """
+        R(pi) = -(diralpha - 1) * sum_k log(pi_k + eps)
+        """
+        eps = 1e-9
+        pi_safe = pi.clamp(min=eps)
+        return -(self.diralpha - 1.0) * pi_safe.log().sum()
+
+    def _compute_single_loss_component(
+        self, 
+        probs, 
+        y, 
+        sw, 
+        gains, 
+        scale, 
+        wk_dict, 
+        lam0, 
+        logits_factory, # tensor to create new tensors on same device
+        thresholds=None,
+        lambdace=None,
+        lambdaentropy=None,
+        lambdadir=None
+    ):
+        """
+        Helper to compute loss components (Trans, Mu0) + stats for a given subset (cluster or global).
+        Returns:
+            loss_val: scalar tensor
+            w_val: scalar tensor
+            stats_dict: dict with various metrics (mu, pi, entropy, deltas, etc.)
+        """
+        # Resolve lambdas
+        lambdace = lambdace if lambdace is not None else self.lambdace
+        lambdaentropy = lambdaentropy if lambdaentropy is not None else self.lambdaentropy
+        lambdadir = lambdadir if lambdadir is not None else self.lambdadir
+
+        # --- 5) Masse de proba pi_s ---
+        if sw is not None:
+            p_weighted = probs * sw.unsqueeze(1)
+            pi_s = p_weighted.sum(dim=0) / sw.sum().clamp_min(self.eps)
+        else:
+            pi_s = probs.mean(dim=0)
+        
+        mu = self._mu_soft(probs, y, sw=sw)  # (C,)
+        
+        # Entropy of pi_s
+        pi_log_pi = pi_s * torch.log(pi_s.clamp_min(1e-9))
+        entropy_pi = -pi_log_pi.sum()
+
+        cluster_loss = logits_factory.new_tensor(0.0)
+        cluster_w = logits_factory.new_tensor(0.0)
+        
+        # --- 8) Terme mu(0) ---
+        mu0_val = mu[0]
+        mu0_term = F.softplus(mu0_val / (scale + self.eps))
+
+        stats_loss_trans = logits_factory.new_tensor(0.0)
+        stats_w_trans = logits_factory.new_tensor(0.0)
+        
+        Lk_w_batch = {}
+        SCORE_k_batch = {}
+        VIOL_k_batch = {}
+        NEG_k_batch = {}
+        deltas_batch = {}
+
+        # SCORE_k with margined deltas
+        for k, pairs in self.P.items():
+            if not pairs:
+                continue
+
+            raw = torch.stack([mu[b] - mu[a] for (a, b) in pairs], dim=0)
+            margins = torch.stack([gains[a:b].sum() for (a, b) in pairs], dim=0)
+            raw = raw / (scale + self.eps)
+            deltas = raw - margins
+            
+            deltas_batch[k] = deltas.detach().cpu().numpy()
+
+            MINk = self._softmin(deltas)
+            MEDk = self._soft_median(deltas)
+            VIOLk = torch.sigmoid(-deltas / self.t).mean()
+            NEGk = F.softplus(-deltas).mean()
+
+            SCOREk = (self.wmed * MEDk + self.wmin * MINk) - self.wneg * NEGk * (1.0 + self.wviol * VIOLk)
+            Lk = F.softplus(-SCOREk)
+
+            w = float(wk_dict.get(k, 1.0))
+            cluster_loss = cluster_loss + w * Lk
+            cluster_w = cluster_w + w
+            
+            stats_loss_trans = stats_loss_trans + w * Lk
+            stats_w_trans = stats_w_trans + w
+
+            Lk_w_batch[k] = (w * Lk).detach().item()
+            SCORE_k_batch[k] = SCOREk.detach().item()
+            VIOL_k_batch[k] = VIOLk.detach().item()
+            NEG_k_batch[k] = NEGk.detach().item()
+
+        # Normalize transition loss
+        if cluster_w > 0:
+            cluster_loss = cluster_loss / cluster_w.clamp_min(self.eps)
+            # cluster_w becomes "normalization factor for this cluster" -> 1.0 effectively
+            # but we return 1.0 later to tell forward to just average.
+        else:
+            cluster_loss = logits_factory.new_tensor(0.0)
+
+        # Add Mu0
+        if lam0 > 0:
+             cluster_loss = cluster_loss + lam0 * mu0_term
+        
+        # Add CE
+        ce_mean = logits_factory.new_tensor(0.0)
+        if lambdace > 0:
+            logit_tens = logits_factory
+
+            if thresholds is None:
+                y_disc = y.long()
+            else:
+                y_disc = self._discretize_y(y, thresholds)
+
+            ce_val = self.ce_loss(logit_tens, y_disc)
+
+            if sw is not None:
+                ce_mean = (ce_val * sw).sum() / sw.sum().clamp_min(self.eps)
+            else:
+                ce_mean = ce_val.mean()
+
+            ce_mean = ce_mean
+            cluster_loss = cluster_loss + lambdace * ce_mean
+            
+        # Add Entropy
+        if lambdaentropy > 0:
+            cluster_loss = cluster_loss - lambdaentropy * entropy_pi
+            
+        # Add Dirichlet Regularization (moved to cluster level)
+        dir_reg = logits_factory.new_tensor(0.0)
+        if lambdadir > 0:
+            dir_reg = self._dirichlet_barrier(pi_s)
+            cluster_loss = cluster_loss + lambdadir * dir_reg
+
+        stats_dict = {
+            'loss_total': cluster_loss.detach().item(),
+            'loss_trans': (stats_loss_trans / stats_w_trans.clamp_min(self.eps)).detach().item() if stats_w_trans > 0 else 0.0,
+            'mu0_term': (lam0 * mu0_term).detach().item(),
+            'mu': mu.detach().cpu().numpy(),
+            'pi': pi_s.detach().cpu().numpy(),
+            'entropy_pi': entropy_pi.item(),
+            'entropy_weighted': (-lambdaentropy * entropy_pi).detach().item() if lambdaentropy > 0 else 0.0,
+            'dirichlet_reg': dir_reg.detach().item() if lambdadir > 0 else 0.0,
+            'dirichlet_weighted': (lambdadir * dir_reg).detach().item() if lambdadir > 0 else 0.0,
+            'ce_loss': ce_mean.detach().item() if lambdace > 0 else 0.0,
+            'ce_weighted': (lambdace * ce_mean).detach().item() if lambdace > 0 else 0.0,
+            'deltas': deltas_batch,
+            'gains': gains.detach().cpu().numpy(),
+            'scale': scale.detach().cpu().numpy(),
+            'Lk_weighted': Lk_w_batch,
+            'SCORE_k': SCORE_k_batch,
+            'VIOL_k': VIOL_k_batch,
+            'NEG_k': NEG_k_batch,
+            'mu0_stats': {'mu0': mu0_val.detach().item()}
+        }
+        
+        # Stats for scales and margins
+        # scale can be scalar or tensor.
+        if scale.numel() > 1:
+            scale_min = scale.min().item()
+            scale_mean = scale.mean().item()
+            scale_max = scale.max().item()
+        else:
+            v_sc = scale.item()
+            scale_min = v_sc
+            scale_mean = v_sc
+            scale_max = v_sc
+            
+        # raw diffs = diffs_batch (already computed: mu[1:] - mu[:-1])
+        # diffs_batch is a list in current code? No, let's see where it comes from.
+        # It's calculated inside the loop over k. We need it as a tensor.
+        # Actually diffs are computed as (mu[b] - mu[a]) in loop.
+        # But we want the mean of adjacent diffs.
+        # mu is [num_classes] shape.
+        diffs_mu = mu[1:] - mu[:-1]
+        raw_mean = diffs_mu.mean().item()
+        
+        # scaled raw
+        # If scale is scalar, it's raw_mean / scale. If vector?
+        if scale.numel() > 1:
+             # Just an approximation if scale varies per class (not the case usually)
+             scaled_raw_mean = (diffs_mu / (scale.mean() + 1e-9)).mean().item()
+        else:
+             scaled_raw_mean = raw_mean / (scale.item() + 1e-9)
+             
+        # margins (gains)
+        margin_mean = gains.mean().item()
+        
+        stats_dict.update({
+             'scale_min': scale_min,
+             'scale_mean': scale_mean,
+             'scale_max': scale_max,
+             'diff_raw_mean': raw_mean,
+             'diff_scaled_mean': scaled_raw_mean,
+             'margin_mean': margin_mean
+        })
+        
+        return cluster_loss, 1.0, stats_dict
 
     def _auto_wk_from_gains_np(self, g_np: np.ndarray, eps: float = 1e-8):
         """
@@ -2655,8 +2884,12 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             for a in range(0, C - k):
                 b = a + k
                 margins_k.append(float(np.sum(g_np[a:b])))
-            mk = float(np.median(margins_k))  # médiane robuste :contentReference[oaicite:0]{index=0}
+            mk = float(np.median(margins_k))  # médiane robuste
+            
+            # Normalization
             #wk[k] = (1.0 / (mk + eps)) * self.wk.get(k, 1.0)
+            
+            # Simple weight
             wk[k] = self.wk.get(k, 1.0)
         return wk
 
@@ -2761,15 +2994,21 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         if y_pos.size >= 10:
             q50 = float(np.quantile(y_pos, 0.5))
             q95 = float(np.quantile(y_pos, 0.95))
-            spread = q95 - q50
+            #spread = q95 - q50
+            spread = 1.0 # No normalization
         else:
             q50 = float(np.quantile(y_pos, 0.5)) if y_pos.size > 0 else 0.0
             q95 = float(np.quantile(y_pos, 0.95)) if y_pos.size > 0 else 0.0
-            spread = float(np.std(y_pos)) if y_pos.size > 1 else 0.0
+            #spread = float(np.std(y_pos)) if y_pos.size > 1 else 0.0
+            spread = 1.0 # No normalization
 
-        spread = max(spread, 1e-6)
+        #spread = max(spread, 1e-6)
         floor = max(0.0, self.gainsfloorfrac)
-        base = self.gainsalpha * (diffs / spread)
+        
+        # Normailzation
+        #base = self.gainsalpha * (diffs / spread)
+        
+        base = self.gainsalpha * diffs
         gains = np.maximum(base, floor).astype(np.float32)
 
         if self.enforcegainmonotone:
@@ -2795,6 +3034,8 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         min_pos_per_bin=3,
         enforcegainmonotone=None,
     ):
+
+        self.call_preprocess = True
         y = np.asarray(y_cont)
         c = np.asarray(clusters_ids)
 
@@ -2843,6 +3084,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         if bm_g is not None and ok_g:
             global_g, global_spread = self._gains_from_bin_means(bm_g, y, tag="GLOBAL")
             self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
+            self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
         else:
             raise ValueError('Can t calcule bin means')
             # robust fallback
@@ -2857,6 +3099,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         # ---- PER CLUSTER ----
         self.gain_k = {}
         self.scale_k = {}
+        self.thresholds_k = {}
         self._log("==== CLUSTER GAINS ====")
 
         for cl in unique_clusters:
@@ -2868,7 +3111,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
                 y_cl, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
                 tag="CL_%s" % str(cl)
             )
-
+            
             if bm is not None and ok:
                 g_cl, spread_cl = self._gains_from_bin_means(bm, y_cl, tag="CL_%s" % str(cl))
             else:
@@ -2908,6 +3151,26 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
 
             self.gain_k[cl] = torch.tensor(g_cl, dtype=torch.float32, device=self.global_gains.device)
             self.scale_k[cl] = torch.tensor(spread_cl, dtype=torch.float32, device=self.global_gains.device)
+            
+            # Store per-cluster thresholds for CE discretization
+            # If pooling/fallback used, we might not have specific qs.
+            # If ok is True, we have qs.
+            # If pooled (ok2 is True), we have qs2.
+            # Else fallback global -> global_thresholds.
+            
+            if ok:
+                 res_qs = qs
+            elif pooled and ok2:
+                 res_qs = qs2
+            else:
+                 res_qs = qs_g # Fallback to global thresholds
+            
+            if res_qs is not None:
+                self.thresholds_k[cl] = torch.tensor(res_qs, dtype=torch.float32, device=self.global_gains.device)
+            else:
+                # Should correspond to global fallback if qs_g is available
+                # If even qs_g is None (which raises ValueError above anyway), we are in trouble.
+                self.thresholds_k[cl] = self.global_thresholds
 
             self._log(f"[CLUSTER GAINS] {cl} -> {g_cl}")
         
@@ -2935,7 +3198,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         P = {}
         for k in range(1, C):
             P[k] = [(a, a + k) for a in range(0, C - k)]
-        print("[TRANSITION AND K]:", P)
+        #print("[TRANSITION AND K]:", P)
         return P
 
     def _get_cluster_scale(self, cluster_id, device, dtype):
@@ -2984,6 +3247,48 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             g = self.global_gains
         return g.to(device=device, dtype=dtype)
 
+    def _get_cluster_thresholds(self, cluster_id, device, dtype):
+        if hasattr(self, "thresholds_k") and (cluster_id in self.thresholds_k):
+            t = self.thresholds_k[cluster_id]
+        else:
+            t = self.global_thresholds
+        return t.to(device=device, dtype=dtype)
+
+    def _discretize_y(self, y_cont, thresholds):
+        # Discretize continuous y into classes based on thresholds
+        # Class 0: y <= 0 (handled by y > 0 check generally)
+        # Class k: thresholds[k-1] < y <= thresholds[k]
+        
+        # We start with 0s.
+        y_disc = torch.zeros_like(y_cont, dtype=torch.long)
+        
+        # Positive values
+        mask_pos = y_cont > 0
+        if not mask_pos.any():
+            return y_disc
+            
+        y_pos = y_cont[mask_pos]
+        
+        if thresholds.numel() == 0:
+            # If no thresholds (C=2 case?), implies only 1 positive class? 
+            # If thresholds is empty, bucketize returns 0 for all.
+            # We want Class 1. so +1.
+            y_disc[mask_pos] = 1
+        else:
+            # bucketize: 
+            # right=True: bins[i-1] < x <= bins[i]
+            # output index i.
+            # For thresholds [t1, t2] (C=4 classes: 0, 1, 2, 3)
+            # y <= 0 -> Class 0 (handled separately)
+            # 0 < y <= t1 -> bucket 0 -> Class 1
+            # t1 < y <= t2 -> bucket 1 -> Class 2
+            # y > t2      -> bucket 2 -> Class 3
+            
+            buckets = torch.bucketize(y_pos, thresholds, right=True)
+            y_disc[mask_pos] = buckets + 1
+            
+        return y_disc
+
     # ------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------
@@ -2993,6 +3298,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             self.epoch_stats = {}
 
     def forward(self, logits, y_cont, clusters_ids, sample_weight=None):
+        assert self.call_preprocess is True, f'You have to call preprocess before forward'
         if logits.dim() != 2:
             raise ValueError("logits doit etre (N,C). Recu: %s" % (tuple(logits.shape),))
         if y_cont.dim() != 1 or clusters_ids.dim() != 1:
@@ -3013,8 +3319,10 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
 
         total_loss = logits.new_tensor(0.0)
         total_w = logits.new_tensor(0.0)
+        
+        unique_clusters = torch.unique(clusters_ids)
 
-        for d in torch.unique(clusters_ids):
+        for d in unique_clusters:
             idx = torch.nonzero(clusters_ids == d, as_tuple=False).squeeze(1)
             if idx.numel() < 2:
                 continue
@@ -3023,150 +3331,111 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             y = y_cont[idx]
             sw_d = sw[idx] if sw is not None else None
 
-            # --- 4) Mu(s) & 5) Pi(s)
-            
-            # --- 5) Masse de proba pi_s ---
-            # --- 5) Masse de proba pi_s ---
-            if sw_d is not None:
-                p_weighted = p * sw_d.unsqueeze(1)
-                pi_s = p_weighted.sum(dim=0) / sw_d.sum().clamp_min(self.eps)
-            else:
-                pi_s = p.mean(dim=0)
-            
-            mu = self._mu_soft(p, y, sw=sw_d)  # (C,)
-            
-            # Entropy of pi_s
-            pi_log_pi = pi_s * torch.log(pi_s.clamp_min(1e-9))
-            entropy_pi = -pi_log_pi.sum()
-
             cl_id = d.item() if torch.is_tensor(d) else d
             # Init stats for this cluster if needed
             if cl_id not in self.epoch_stats:
                 self.epoch_stats[cl_id] = {
                     'loss_total': [], 'loss_trans': [], 'mu0_term': [],
-                    'mu': [],        # list of (C,) arrays
-                    'pi': [],        # list of (C,) arrays (masses)
-                    'entropy_pi': [],
-                    'deltas': [],    # list of dicts {k: array}
-                    'gains': [],     # list of (C-1,) values
-                    'scale': [],
-                    'Lk_weighted': [], # list of dict {k: val}
-                    'SCORE_k': [],     # list of dict {k: val}
-                    'SCORE_k': [],     # list of dict {k: val}
-                    'VIOL_k': [],      # list of dict {k: val}
-                    'NEG_k': [],       # list of dict {k: val}
-                    'mu0_stats': [],   # list of dict
+                    'mu': [], 'pi': [], 'entropy_pi': [], 'dirichlet_reg': [], 'ce_loss': [],
+                    'deltas': [], 'gains': [], 'scale': [],
+                    'Lk_weighted': [], 'SCORE_k': [], 'VIOL_k': [],
+                    'NEG_k': [], 'mu0_stats': [],
                 }
-
-            gains_adj = self._get_cluster_gains(cl_id, mu.device, mu.dtype)  # (C-1,)
+            
+            gains_adj = self._get_cluster_gains(cl_id, p.device, p.dtype)
             wk_dict = self._get_cluster_wk(cl_id)
-            scale = self._get_cluster_scale(cl_id, mu.device, mu.dtype)
-
-            # Decoupled from wk: use raw lambda_mu0 to allow separation (wk) to grow without strengthening anchor
+            scale = self._get_cluster_scale(cl_id, p.device, p.dtype)
             lam0 = self.lambdamu0
-            cluster_loss = logits.new_tensor(0.0)
-            cluster_w = logits.new_tensor(0.0)
+            thresholds = self._get_cluster_thresholds(cl_id, p.device, p.dtype)
             
-            # --- 8) Terme mu(0) ---
-            mu0_val = mu[0]
-            mu0_term = F.softplus(mu0_val / (scale + self.eps))
-            cluster_loss = cluster_loss + lam0 * mu0_term
-            cluster_w = cluster_w + lam0
-            
-            # --- Entropy Regularization ---
-            # Maximize entropy => Minimize -entropy
-            if self.lambdaentropy > 0:
-                cluster_loss = cluster_loss - self.lambdaentropy * entropy_pi
-                # We do not increase cluster_w to avoid diluting other terms, 
-                # or we consider this a regularization term added on top.
+            # Slice logits for this cluster!
+            l_d = logits[idx]
 
-            
-            # Stats mu0
-            stats_loss_trans = logits.new_tensor(0.0)
-            stats_w_trans = logits.new_tensor(0.0)
-            
-            # Store Lk weighted for this batch
-            Lk_w_batch = {}
-            SCORE_k_batch = {}
-            Lk_w_batch = {}
-            SCORE_k_batch = {}
-            VIOL_k_batch = {}
-            NEG_k_batch = {}
+            c_loss, c_w, stats = self._compute_single_loss_component(
+                p, y, sw_d, gains_adj, scale, wk_dict, lam0, l_d, thresholds
+            )
 
-            # Save deltas for this batch
-            deltas_batch = {}
-
-            # SCORE_k with margined deltas
-            for k, pairs in self.P.items():
-                if not pairs:
-                    continue
-
-                raw = torch.stack([mu[b] - mu[a] for (a, b) in pairs], dim=0)
-                margins = torch.stack([gains_adj[a:b].sum() for (a, b) in pairs], dim=0)
-                raw = raw / (scale + self.eps)
-                deltas = raw - margins
-                
-                # --- 3) Stats deltas ---
-                deltas_batch[k] = deltas.detach().cpu().numpy()
-
-                MINk = self._softmin(deltas)
-                MEDk = self._soft_median(deltas)
-                VIOLk = torch.sigmoid(-deltas / self.t).mean()
-                NEGk = F.softplus(-deltas).mean()
-
-                NEGk = F.softplus(-deltas).mean()
-
-                SCOREk = (self.wmed * MEDk + self.wmin * MINk) - self.wneg * NEGk * (1.0 + self.wviol * VIOLk)
-                Lk = F.softplus(-SCOREk)
-
-                w = float(wk_dict.get(k, 1.0))
-                cluster_loss = cluster_loss + w * Lk
-                cluster_w = cluster_w + w
-                
-                stats_loss_trans = stats_loss_trans + w * Lk
-                stats_w_trans = stats_w_trans + w
-                
-                Lk_w_batch[k] = (w * Lk).detach().item()
-                SCORE_k_batch[k] = SCOREk.detach().item()
-                SCORE_k_batch[k] = SCOREk.detach().item()
-                VIOL_k_batch[k] = VIOLk.detach().item()
-                NEG_k_batch[k] = NEGk.detach().item()
-
-            if cluster_w > 0:
-                total_loss = total_loss + cluster_loss
-                total_w = total_w + cluster_w
+            if c_w > 0:
+                total_loss = total_loss + c_loss
+                total_w = total_w + c_w
             
             # Keep track of everything (detached)
             est = self.epoch_stats[cl_id]
-            
-            est['loss_total'].append((cluster_loss / cluster_w.clamp_min(self.eps)).detach().item())
-            est['loss_trans'].append((stats_loss_trans / stats_w_trans.clamp_min(self.eps)).detach().item())
-            est['mu0_term'].append((lam0 * mu0_term).detach().item())
-            
-            est['mu'].append(mu.detach().cpu().numpy())
-            est['pi'].append(pi_s.detach().cpu().numpy())
-            est['entropy_pi'].append(entropy_pi.detach().item())
-            
-            est['gains'].append(gains_adj.detach().cpu().numpy())
-            est['scale'].append(scale.detach().cpu().numpy())
-            
-            est['Lk_weighted'].append(Lk_w_batch)
-            est['SCORE_k'].append(SCORE_k_batch)
-            est['Lk_weighted'].append(Lk_w_batch)
-            est['SCORE_k'].append(SCORE_k_batch)
-            est['VIOL_k'].append(VIOL_k_batch)
-            est['NEG_k'].append(NEG_k_batch)
-            
-            est['deltas'].append(deltas_batch)
-            
-            # mu0 stats: correlation with y? batch too small?
-            # store simple mu0 value
-            est['mu0_stats'].append({'mu0': mu0_val.detach().item()})
+            for k, v in stats.items():
+                if k in est:
+                    est[k].append(v)
 
         if total_w.abs() < self.eps:
-            return logits.new_tensor(0.0)
+            final_loss = logits.new_tensor(0.0)
+        else:
+            final_loss = total_loss / total_w
+            
+        # --- GLOBAL LOSS COMPONENT ---
+        # If more than one cluster, add global loss (on all data).
+        # If only one cluster, the above loop effectively computed the global loss already 
+        # (and normalized it). 
+        # User request: "le cas où on en voit pas qu'un seul cluster, je veux que tu ajoutes la même loss mais calculé sur l'ensemble des logits"
+        
+        if self.addglobal:
+            if len(unique_clusters) > 1:
+                # Global setup
+                # gains -> global_gains
+                # scale -> global_scale
+                # wk -> self.wk
+                g_gains = self.global_gains.to(device=logits.device, dtype=probs.dtype)
+                g_scale = self.global_scale.to(device=logits.device, dtype=probs.dtype)
+                g_wk = self.wk # default / global
+                g_thresholds = self.global_thresholds.to(device=logits.device, dtype=probs.dtype)
+                
+                # We treat the whole batch as one "global cluster"
+                # Note: sample_weight is sw
+                # lambdace=0.0, lambdaentropy=0.0, lambdadir=0.0 for GLOBAL component as requested
+                g_loss, g_w, g_stats = self._compute_single_loss_component(
+                    probs, y_cont, sw, g_gains, g_scale, g_wk, self.lambdamu0, logits, None,
+                    lambdace=0.0, lambdaentropy=0.0, lambdadir=0.0
+                )
+                
+                if g_w > 0:
+                    global_loss_val = g_loss / g_w
+                    final_loss = final_loss + global_loss_val
+                    
+                    # Option: log global stats?
+                    # The user didn't explicitly ask for logging, but it helps debugging.
+                    # We can store it under a special key "global" if we want, or -1.
+                    if "global" not in self.epoch_stats:
+                        self.epoch_stats["global"] = {
+                            'loss_total': [], 'loss_trans': [], 'mu0_term': [],
+                            'mu': [], 'pi': [], 'entropy_pi': [], 'dirichlet_reg': [], 'ce_loss': [],
+                            'deltas': [], 'gains': [], 'scale': [],
+                            'Lk_weighted': [], 'SCORE_k': [], 'VIOL_k': [],
+                            'NEG_k': [], 'mu0_stats': [],
+                        }
+                    est_g = self.epoch_stats["global"]
+                    for k, v in g_stats.items():
+                         if k in est_g:
+                            est_g[k].append(v)
 
-        return total_loss / total_w
+            elif len(unique_clusters) == 1:
+                # Single cluster case: copy the stats from that cluster to "global"
+                # because the user requested "tout les logs possibles par cluster et au global".
+                cl_id = unique_clusters[0].item() if torch.is_tensor(unique_clusters[0]) else unique_clusters[0]
+                if cl_id in self.epoch_stats:
+                    src_stats = self.epoch_stats[cl_id]
+                    if "global" not in self.epoch_stats:
+                       self.epoch_stats["global"] = {
+                            'loss_total': [], 'loss_trans': [], 'mu0_term': [],
+                            'mu': [], 'pi': [], 'entropy_pi': [], 'dirichlet_reg': [], 'ce_loss': [],
+                            'deltas': [], 'gains': [], 'scale': [],
+                            'Lk_weighted': [], 'SCORE_k': [], 'VIOL_k': [],
+                            'NEG_k': [], 'mu0_stats': [],
+                        }
+                    est_g = self.epoch_stats["global"]
+                    # Append last values from src_stats
+                    for k in est_g.keys():
+                        if k in src_stats and len(src_stats[k]) > 0:
+                            est_g[k].append(src_stats[k][-1])
+        
+        return final_loss
 
     def get_attribute(self):
         """
@@ -3180,7 +3449,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         for cl_id, stats in self.epoch_stats.items():
             agg_cl = {}
             # Means of scalars
-            for k in ['loss_total', 'loss_trans', 'mu0_term', 'entropy_pi']:
+            for k in ['loss_total', 'loss_trans', 'mu0_term', 'entropy_pi', 'ce_loss']:
                 if k in stats and stats[k]:
                     agg_cl[k] = np.mean(stats[k])
                 else:
@@ -3232,249 +3501,443 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
 
         return [('ordinal_stats', DictWrapper(aggregated))]
         
-    def plot_params(self, param_history, dir_output, best_epoch=None):
+    def plot_params(self, params_history, log_dir, best_epoch=None):
         """
-        param_history: list of dicts {'epoch': e, 'ordinal_stats': aggregated_stats_dict}
+        Génère des courbes d'évolution des paramètres.
+        params_history: list of dicts [{'epoch': E, 'ordinal_stats': aggregated_stats}, ...]
         """
         import matplotlib.pyplot as plt
-        import os
+        import pathlib
 
-        # Organiser les données par cluster
+        root_dir = pathlib.Path(log_dir) / 'ordinal_params'
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-organize data: cluster_id -> { metric -> [values over epochs] }
         cluster_series = {}
-
-        for entry in param_history:
-            epoch = entry['epoch']
-            if 'ordinal_stats' not in entry:
+        
+        # Determine if params_history is list or dict
+        # Based on previous error, it is a list
+        if isinstance(params_history, dict):
+            # Sort by epoch if keys are epochs
+            iterator = sorted(params_history.items())
+        else:
+            # Assume list of dicts
+            iterator = []
+            for entry in params_history:
+                if 'epoch' in entry:
+                    iterator.append((entry['epoch'], entry))
+            iterator.sort(key=lambda x: x[0])
+        
+        for ep, entry in iterator:
+            # Extract ordinal_stats
+            # In pytorch_model_tools, it does: dict_params[name] = value
+            # define name='ordinal_stats' in get_attribute
+            if 'ordinal_stats' in entry:
+                stats_container = entry['ordinal_stats']
+                # Check if DictWrapper
+                if hasattr(stats_container, 'd'):
+                    ep_data = stats_container.d
+                else:
+                    ep_data = stats_container
+            else:
+                # Maybe params_history was passed as dict {cl_id: stats} if old format?
+                # But let's assume new format from get_attribute
                 continue
-            stats_by_cluster = entry['ordinal_stats'].d if hasattr(entry['ordinal_stats'], 'd') else entry['ordinal_stats']
+
+            if not ep_data:
+                continue
             
-            for cl_id, agg in stats_by_cluster.items():
+            for cl_id, stats in ep_data.items():
                 if cl_id not in cluster_series:
                     cluster_series[cl_id] = {
                         'epochs': [],
                         'loss_total': [], 'loss_trans': [], 'mu0_term': [],
-                        'mu': [], 'pi': [], 'gains': [], 'scale': [],
-                        'entropy_pi': [], 'mu0_mean': [],
-                        'deltas': {}, 'Lk_weighted': {}, 'SCORE_k': {}, 'VIOL_k': {}, 'NEG_k': {}
+                        'pi': [], 'entropy_pi': [], 'ce_loss': [],
+                        'mu': [],
+                        'deltas': {}, # k -> {median:[], min:[], viol:[], neg:[]}
+                        'gains': [], 'scale': [],
+                        'Lk_weighted': {}, 'SCORE_k': {}, 'VIOL_k': {}, 'NEG_k': {},
+                        'mu0_mean': [],
+                        'delta_min_history': [], 'delta_max_history': []
                     }
                 
-                cs = cluster_series[cl_id]
-                cs['epochs'].append(epoch)
-                cs['loss_total'].append(agg.get('loss_total', 0))
-                cs['loss_trans'].append(agg.get('loss_trans', 0))
-                cs['mu0_term'].append(agg.get('mu0_term', 0))
-                cs['entropy_pi'].append(agg.get('entropy_pi', 0))
-                cs['mu0_mean'].append(agg.get('mu0_mean', 0))
+                s = cluster_series[cl_id]
+                s['epochs'].append(ep)
+                s['loss_total'].append(stats.get('loss_total', 0.0))
+                s['loss_trans'].append(stats.get('loss_trans', 0.0))
+                s['mu0_term'].append(stats.get('mu0_term', 0.0))
+                s['entropy_pi'].append(stats.get('entropy_pi', 0.0))
+                s['ce_loss'].append(stats.get('ce_loss', 0.0))
                 
-                cs['mu'].append(agg['mu'])
-                cs['pi'].append(agg['pi'])
-                cs['gains'].append(agg['gains'])
-                cs['scale'].append(agg['scale'])
+                s['pi'].append(stats.get('pi', None))
+                s['mu'].append(stats.get('mu', None))
+                s['gains'].append(stats.get('gains', None))
+                s['scale'].append(stats.get('scale', 1.0)) # Default scale 1.0
+                s['mu0_mean'].append(stats.get('mu0_mean', 0.0))
                 
-                # Deltas: Compute summaries
-                for k, arr in agg['deltas'].items():
-                    if k not in cs['deltas']:
-                        cs['deltas'][k] = {'median': [], 'min': [], 'viol': [], 'neg': [], 'sigmoid': []}
-                    
-                    if arr is not None and arr.size > 0:
-                        cs['deltas'][k]['median'].append(np.median(arr))
-                        cs['deltas'][k]['min'].append(np.min(arr))
-                        cs['deltas'][k]['viol'].append(np.mean(arr < 0))
-                        cs['deltas'][k]['sigmoid'].append(np.mean(1.0 / (1.0 + np.exp(arr/self.t)))) 
-                    else:
-                        cs['deltas'][k]['median'].append(np.nan)
-                        cs['deltas'][k]['min'].append(np.nan)
-                        cs['deltas'][k]['viol'].append(np.nan)
-                        cs['deltas'][k]['sigmoid'].append(np.nan)
+                # Deltas stats
+                # stats['deltas'] is dict k->array of deltas for this epoch-cluster
+                # We want to compute scalar stats (median, min...) for the plot
+                deltas_map = stats.get('deltas', {})
+                if deltas_map:
+                    for k, d_vals in deltas_map.items():
+                        if k not in s['deltas']:
+                            s['deltas'][k] = {'median':[], 'min':[], 'viol':[], 'neg':[]}
+                        
+                        if d_vals is not None and d_vals.size > 0:
+                            s['deltas'][k]['median'].append(np.median(d_vals))
+                            s['deltas'][k]['min'].append(np.min(d_vals))
+                            viol = (d_vals < 0).mean()
+                            s['deltas'][k]['viol'].append(viol)
+                            neg = np.mean(np.log(1 + np.exp(-d_vals)))
+                            s['deltas'][k]['neg'].append(neg)
+                            
+                            s['delta_min_history'].append(np.min(d_vals))
+                            s['delta_max_history'].append(np.max(d_vals))
+                        else:
+                            s['deltas'][k]['median'].append(0)
+                            s['deltas'][k]['min'].append(0)
+                            s['deltas'][k]['viol'].append(0)
+                            s['deltas'][k]['neg'].append(0)
+                
+                # Metrics per k
+                for mKey in ['Lk_weighted', 'SCORE_k', 'VIOL_k', 'NEG_k']:
+                    mDict = stats.get(mKey, {})
+                    if mDict:
+                        for k, val in mDict.items():
+                            if k not in s[mKey]:
+                                s[mKey][k] = []
+                            s[mKey][k].append(val)
+                # Ensure all k have same length (fill missing with nan or 0)
+                # (For simplicity we assume strict structure)
 
-                # Dict metrics
-                for metric in ['Lk_weighted', 'SCORE_k', 'VIOL_k', 'NEG_k']:
-                    if metric not in agg: continue
-                    for k, val in agg[metric].items():
-                        if k not in cs[metric]:
-                            cs[metric][k] = []
-                        cs[metric][k].append(val)
-
-        # Plotting per cluster
+        # Now Plot per cluster
         for cl_id, series in cluster_series.items():
-            if len(series['epochs']) == 0:
+            cl_dir = root_dir / str(cl_id)
+            cl_dir.mkdir(parents=True, exist_ok=True)
+            
+            epochs = series['epochs']
+            if not epochs:
                 continue
 
-            cl_dir = dir_output / f"cluster_{cl_id}"
-            os.makedirs(cl_dir, exist_ok=True)
-            epochs = series['epochs']
-
             # 1) Loss components
-            plt.figure(figsize=(10, 6))
-            plt.plot(epochs, series['loss_total'], label='Total Loss', linewidth=2)
-            plt.plot(epochs, series['loss_trans'], label='Transitional Loss', linestyle='--')
-            plt.plot(epochs, series['mu0_term'], label='Mu0 Term', linestyle=':')
-            if best_epoch is not None:
-                plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
-            plt.title(f'Cluster {cl_id} - Loss Components')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.savefig(cl_dir / '1_loss_components.png')
-            plt.close()
+            try:
+                plt.figure(figsize=(10, 6))
+                plt.plot(epochs, series['loss_total'], label='Total Loss', linewidth=2)
+                plt.plot(epochs, series['loss_trans'], label='Transitional Loss', linestyle='--')
+                plt.plot(epochs, series['mu0_term'], label='Mu0 Term', linestyle=':')
+                if any(v != 0 for v in series['ce_loss']):
+                    plt.plot(epochs, series['ce_loss'], label='CE Loss', color='purple', linestyle='-.')
+                if best_epoch is not None:
+                    plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                plt.title(f'Cluster {cl_id} - Loss Components')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.savefig(cl_dir / '1_loss_components.png')
+                plt.close()
+            except Exception as e:
+                print(f"Error plotting loss components for cluster {cl_id}: {e}")
+                plt.close()
 
             # 2) Pi_s (Masses) & Entropy
-            pi_stack = np.stack(series['pi']) # (E, C)
-            fig, ax1 = plt.subplots(figsize=(10, 6))
-            ax2 = ax1.twinx()
-            C = pi_stack.shape[1]
-            for c in range(C):
-                ax1.plot(epochs, pi_stack[:, c], label=f'Class {c}')
-            ax2.plot(epochs, series['entropy_pi'], label='Entropy', color='black', linestyle='--')
-            
-            ax1.set_xlabel('Epoch')
-            ax1.set_ylabel('Probability Mass')
-            ax2.set_ylabel('Entropy')
-            lines1, labels1 = ax1.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            
-            if best_epoch is not None:
-                ax1.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
-                # Re-gather handles to include best epoch if added to ax1
-                lines1, labels1 = ax1.get_legend_handles_labels()
+            try:
+                valid_pi = [p for p in series['pi'] if p is not None]
+                if valid_pi:
+                    pi_stack = np.stack(valid_pi) # (E, C)
+                    if pi_stack.ndim == 1:
+                         pi_stack = pi_stack.reshape(-1, 1)
+                    
+                    if pi_stack.ndim >= 2 and pi_stack.shape[0] == len(epochs):
+                        fig, ax1 = plt.subplots(figsize=(10, 6))
+                        ax2 = ax1.twinx()
+                        C = pi_stack.shape[1]
+                        for c in range(C):
+                            ax1.plot(epochs, pi_stack[:, c], label=f'Class {c}')
+                        ax2.plot(epochs, series['entropy_pi'], label='Entropy', color='black', linestyle='--')
+                        
+                        ax1.set_xlabel('Epoch')
+                        ax1.set_ylabel('Probability Mass')
+                        ax2.set_ylabel('Entropy')
+                        lines1, labels1 = ax1.get_legend_handles_labels()
+                        lines2, labels2 = ax2.get_legend_handles_labels()
+                        
+                        if best_epoch is not None:
+                            ax1.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                            lines1, labels1 = ax1.get_legend_handles_labels()
 
-            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-            plt.title(f'Cluster {cl_id} - Predicted Mass distribution (pi_s)')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(cl_dir / '2_pi_s_entropy.png')
-            plt.close()
-
-            # 3) Mu(s) & Gaps
-            mu_stack = np.stack(series['mu']) # (E, C)
-            plt.figure(figsize=(10, 6))
-            for c in range(C):
-                plt.plot(epochs, mu_stack[:, c], label=f'mu({c})')
-            if best_epoch is not None:
-                plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
-            plt.title(f'Cluster {cl_id} - Mu(s) evolution')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.savefig(cl_dir / '3_mu_s.png')
-            plt.close()
+                        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                        plt.title(f'Cluster {cl_id} - Predicted Mass distribution (pi_s)')
+                        plt.grid(True, alpha=0.3)
+                        plt.savefig(cl_dir / '2_pi_s_entropy.png')
+                        plt.close()
+                else:
+                    # just plot entropy
+                     plt.figure(figsize=(10, 6))
+                     plt.plot(epochs, series['entropy_pi'], label='Entropy')
+                     plt.title(f'Cluster {cl_id} - Entropy')
+                     plt.savefig(cl_dir / '2_entropy_only.png')
+                     plt.close()
+            except Exception as e:
+                print(f"Error plotting pi/entropy for cluster {cl_id}: {e}")
+                plt.close()
+            
+            # 3) Mu(s)
+            try:
+                valid_mu = [m for m in series['mu'] if m is not None]
+                if valid_mu:
+                    mu_stack = np.stack(valid_mu)
+                    if mu_stack.ndim == 1:
+                        mu_stack = mu_stack.reshape(-1, 1)
+                    
+                    if mu_stack.ndim >= 2 and mu_stack.shape[0] == len(epochs):
+                        plt.figure(figsize=(10, 6))
+                        C_mu = mu_stack.shape[1]
+                        for c in range(C_mu):
+                            plt.plot(epochs, mu_stack[:, c], label=f'mu({c})')
+                        if best_epoch is not None:
+                            plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                        plt.title(f'Cluster {cl_id} - Mu(s) evolution')
+                        plt.legend()
+                        plt.grid(True, alpha=0.3)
+                        plt.savefig(cl_dir / '3_mu_s.png')
+                        plt.close()
+            except Exception as e:
+                print(f"Error plotting mu for cluster {cl_id}: {e}")
+                plt.close()
 
             # 4) Deltas stats per k
-            ks = sorted(series['deltas'].keys())
-            if ks:
-                fig, axes = plt.subplots(len(ks), 4, figsize=(20, 3*len(ks)), sharex=True)
-                if len(ks) == 1: axes = axes[None, :] 
-                
-                for i, k in enumerate(ks):
-                    dstats = series['deltas'][k]
-                    # Median
-                    axes[i, 0].plot(epochs, dstats['median'], color='blue')
-                    axes[i, 0].set_title(f'k={k} Median Delta')
-                    axes[i, 0].grid(True)
-                    # Min
-                    axes[i, 1].plot(epochs, dstats['min'], color='red')
-                    axes[i, 1].set_title(f'k={k} Min Delta')
-                    axes[i, 1].grid(True)
-                    # Violation %
-                    axes[i, 2].plot(epochs, dstats['viol'], color='orange')
-                    axes[i, 2].set_title(f'k={k} Violation Rate (<0)')
-                    axes[i, 2].set_ylim(-0.1, 1.1)
-                    axes[i, 2].grid(True)
-                    # Sigmoid avg
-                    axes[i, 3].plot(epochs, dstats['sigmoid'], color='purple')
-                    axes[i, 3].set_title(f'k={k} Mean Sigmoid Viol')
-                    axes[i, 3].grid(True)
-                
-                
-                if best_epoch is not None:
-                    for ax_row in axes:
-                        for ax in ax_row:
-                            ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5)
+            try:
+                ks = sorted(series['deltas'].keys())
+                if ks:
+                    fig, axes = plt.subplots(len(ks), 4, figsize=(20, 3*len(ks)), sharex=True)
+                    if len(ks) == 1: axes = axes[None, :] 
+                    
+                    for i, k in enumerate(ks):
+                        dstats = series['deltas'][k]
+                        if len(dstats['median']) == len(epochs):
+                            axes[i, 0].plot(epochs, dstats['median'], color='blue')
+                            axes[i, 0].set_title(f'k={k} Median Delta')
+                            axes[i, 0].grid(True)
+                            
+                            axes[i, 1].plot(epochs, dstats['min'], color='red')
+                            axes[i, 1].set_title(f'k={k} Min Delta')
+                            axes[i, 1].grid(True)
+                            
+                            axes[i, 2].plot(epochs, dstats['viol'], color='orange')
+                            axes[i, 2].set_title(f'k={k} Violation Rate (<0)')
+                            axes[i, 2].set_ylim(-0.1, 1.1)
+                            axes[i, 2].grid(True)
+                            
+                            axes[i, 3].plot(epochs, dstats['neg'], color='purple')
+                            axes[i, 3].set_title(f'k={k} Mean NEG (Softplus)')
+                            axes[i, 3].grid(True)
+                    
+                    if best_epoch is not None:
+                        for ax_row in axes:
+                            for ax in ax_row:
+                                ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5)
 
-                plt.tight_layout()
-                plt.savefig(cl_dir / '4_deltas_stats.png')
+                    plt.tight_layout()
+                    plt.savefig(cl_dir / '4_deltas_stats.png')
+                    plt.close()
+            except Exception as e:
+                print(f"Error plotting deltas for cluster {cl_id}: {e}")
                 plt.close()
 
             # 5) Metrics per k (Lk, SCORE_k, VIOL_k, NEG_k)
-            # Need subplots for these
-            fig, axes = plt.subplots(4, 1, figsize=(10, 20), sharex=True)
-            
-            for k, vals in series['Lk_weighted'].items():
-                axes[0].plot(epochs, vals, label=f'k={k}')
-            axes[0].set_title('Weighted Level Losses (wk * Lk)')
-            axes[0].legend()
-            axes[0].grid(True)
-            
-            for k, vals in series['SCORE_k'].items():
-                axes[1].plot(epochs, vals, label=f'k={k}')
-            axes[1].set_title('SCORE_k')
-            axes[1].legend()
-            axes[1].grid(True)
-            
-            for k, vals in series['VIOL_k'].items():
-                axes[2].plot(epochs, vals, label=f'k={k}')
-            axes[2].set_title('VIOL_k')
-            axes[2].set_ylim(-0.1, 1.1)
-            axes[2].legend()
-            axes[2].grid(True)
+            try:
+                fig, axes = plt.subplots(4, 1, figsize=(10, 20), sharex=True)
+                
+                # Helper to plot dict of k->vals
+                def plot_k_lines(ax, data_dict, title):
+                    did_plot = False
+                    for k, vals in data_dict.items():
+                        if len(vals) == len(epochs):
+                             ax.plot(epochs, vals, label=f'k={k}')
+                             did_plot = True
+                    ax.set_title(title)
+                    if did_plot: ax.legend()
+                    ax.grid(True)
+                
+                plot_k_lines(axes[0], series['Lk_weighted'], 'Weighted Level Losses (wk * Lk)')
+                plot_k_lines(axes[1], series['SCORE_k'], 'SCORE_k')
+                plot_k_lines(axes[2], series['VIOL_k'], 'VIOL_k')
+                axes[2].set_ylim(-0.1, 1.1)
+                plot_k_lines(axes[3], series['NEG_k'], 'NEG_k (Softplus penalty)')
 
-            axes[2].legend()
-            axes[2].grid(True)
-            
-            for k, vals in series['NEG_k'].items():
-                axes[3].plot(epochs, vals, label=f'k={k}')
-            axes[3].set_title('NEG_k (Softplus penalty)')
-            axes[3].legend()
-            axes[3].grid(True)
+                if best_epoch is not None:
+                    for ax in axes:
+                        ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5)
 
-            if best_epoch is not None:
-                for ax in axes:
-                    ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5)
-
-            plt.tight_layout()
-            plt.savefig(cl_dir / '5_metrics_per_k.png')
-            plt.close()
+                plt.tight_layout()
+                plt.savefig(cl_dir / '5_metrics_per_k.png')
+                plt.close()
+            except Exception as e:
+                 print(f"Error plotting metrics per k for cluster {cl_id}: {e}")
+                 plt.close()
 
             # 6) Counts/Lambda & Gains
-            gains_stack = np.stack(series['gains']) # (E, C-1)
-            scale_stack = np.array(series['scale'])
-            
-            # Convert to absolute scale for easier reading
-            abs_gains_stack = gains_stack * scale_stack[:, None]
+            try:
+                valid_gains = [g for g in series['gains'] if g is not None]
+                if valid_gains and len(valid_gains) == len(epochs):
+                     gains_stack = np.stack(valid_gains) # (E, C-1) ?
+                     scale_stack = np.array(series['scale'])
+                     
+                     # Check shapes
+                     if gains_stack.ndim == 1:
+                         gains_stack = gains_stack.reshape(-1, 1)
+                     
+                     if gains_stack.shape[0] == scale_stack.shape[0]:
+                         # Convert to absolute scale for easier reading
+                         abs_gains_stack = gains_stack * scale_stack[:, None]
 
-            fig, ax1 = plt.subplots(figsize=(10, 6))
-            ax2 = ax1.twinx()
-            
-            for i in range(abs_gains_stack.shape[1]):
-                ax1.plot(epochs, abs_gains_stack[:, i], label=f'Abs Gain {i}', linestyle='-')
-            
-            ax2.plot(epochs, scale_stack, label='Scale', color='black', linewidth=2, linestyle='--')
-            
-            ax1.set_xlabel('Epoch')
-            ax1.set_ylabel('Absolute Gains (Gain * Scale)')
-            ax2.set_ylabel('Global Scale')
-            
-            lines1, labels1 = ax1.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            if best_epoch is not None:
-                ax1.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
-                # Re-gather handles to include best epoch if added to ax1
-                lines1, labels1 = ax1.get_legend_handles_labels()
+                         fig, ax1 = plt.subplots(figsize=(10, 6))
+                         ax2 = ax1.twinx()
+                        
+                         for i in range(abs_gains_stack.shape[1]):
+                            ax1.plot(epochs, abs_gains_stack[:, i], label=f'Abs Gain {i}', linestyle='-')
+                        
+                         ax2.plot(epochs, scale_stack, label='Scale', color='black', linewidth=2, linestyle='--')
+                        
+                         ax1.set_xlabel('Epoch')
+                         ax1.set_ylabel('Absolute Gains (Gain * Scale)')
+                         ax2.set_ylabel('Global Scale')
+                        
+                         lines1, labels1 = ax1.get_legend_handles_labels()
+                         lines2, labels2 = ax2.get_legend_handles_labels()
+                         if best_epoch is not None:
+                            ax1.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                            lines1, labels1 = ax1.get_legend_handles_labels()
 
-            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-            
-            plt.title(f'Cluster {cl_id} - Gains & Scale Evolution')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(cl_dir / '6_gains_scale.png')
-            plt.close()
+                         ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                        
+                         plt.title(f'Cluster {cl_id} - Gains & Scale Evolution')
+                         plt.grid(True, alpha=0.3)
+                         plt.savefig(cl_dir / '6_gains_scale.png')
+                         plt.close()
+            except Exception as e:
+                 print(f"Error plotting gains/scale for cluster {cl_id}: {e}")
+                 plt.close()
             
             # 8) Mu0 stats
-            plt.figure(figsize=(10, 6))
-            plt.plot(epochs, series['mu0_mean'], label='Mu0 Mean')
-            plt.title(f'Cluster {cl_id} - Mu(0) Mean')
-            plt.xlabel('Epoch')
-            plt.ylabel('Mu(0)')
-            if best_epoch is not None:
-                plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
-            plt.grid(True, alpha=0.3)
-            plt.savefig(cl_dir / '8_mu0_stats.png')
-            plt.close()
+            try:
+                plt.figure(figsize=(10, 6))
+                plt.plot(epochs, series['mu0_mean'], label='Mu0 Mean')
+                plt.title(f'Cluster {cl_id} - Mu(0) Mean')
+                plt.xlabel('Epoch')
+                plt.ylabel('Mu(0)')
+                if best_epoch is not None:
+                    plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                plt.grid(True, alpha=0.3)
+                plt.savefig(cl_dir / '8_mu0_stats.png')
+                plt.close()
+            except Exception as e:
+                print(f"Error plotting mu0 stats for cluster {cl_id}: {e}")
+                plt.close()
+
+            # 9) Hyperparameter Effects
+            try:
+                # Determine range from history
+                if len(series['delta_max_history']) > 0 and len(series['delta_min_history']) > 0:
+                    global_min = np.min(series['delta_min_history'])
+                    global_max = np.max(series['delta_max_history'])
+                    # Add 10% margin
+                    span = global_max - global_min
+                    if span < 1e-6: span = 1.0
+                    global_min -= 0.1 * span
+                    global_max += 0.1 * span
+                else:
+                    global_min, global_max = -2.0, 2.0
+
+                self.plot_hyperparams_effects(cl_dir, delta_range=(global_min, global_max))
+            except Exception as e:
+                 print(f"Error plotting hyperparams effects for cluster {cl_id}: {e}")
+
+
+    def plot_hyperparams_effects(self, dir_output, delta_range=(-2.0, 2.0)):
+        """
+        Plots the effect of betasoftmin on SoftMin and tviolation on Violation Penalty.
+        Generates 'hyperparams_effects.png'.
+        delta_range: (min, max) tuple to define the x-axis.
+        """
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+        
+        # Range of deltas
+        dmin, dmax = delta_range
+        # Ensure 0 is included if possible or at least cover it if range is close
+        if dmax < 0: dmax = 0.5
+        if dmin > 0: dmin = -0.5
+        
+        deltas = np.linspace(dmin, dmax, 400)
+        deltas_t = torch.tensor(deltas, dtype=torch.float32)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # --- 1) SoftMin Effect (beta) ---
+        # SoftMin is usually applied to a set. Here we visualize SoftMin([0, delta])
+        # which approximates min(0, delta).
+        betas = [1.0, 2.0, 5.0, 10.0, 20.0]
+        # Include current beta
+        if self.beta not in betas:
+            betas.append(self.beta)
+        betas = sorted(list(set(betas)))
+        
+        # Reference: true min(0, delta)
+        min_vals = np.minimum(0, deltas)
+        axes[0].plot(deltas, min_vals, 'k--', label='min(0, x)', linewidth=2, alpha=0.5)
+        
+        for b in betas:
+            # SoftMin([0, x]) = -(1/b) * log( exp(0) + exp(-b*x) ) = -(1/b) * log( 1 + exp(-b*x) )
+            # We compute it using torch for stability
+            # But wait, self._softmin computes softmin of a vector. 
+            # If we pass [0, x], it reduces those 2.
+            
+            # Vectorized calculation for plotting:
+            # y = -(1/b) * log( 1 + exp(-b * delta) )
+            # equals -softplus(-b * delta) / b ? No.
+            # log(1 + exp(z)) = softplus(z).
+            # So -(1/b) * softplus(-b * delta).
+            
+            y = -(1.0 / b) * F.softplus(-b * deltas_t)
+            
+            style = '-' if b == self.beta else ':'
+            width = 2 if b == self.beta else 1
+            label = f'beta={b}' + (' (current)' if b == self.beta else '')
+            axes[0].plot(deltas, y.numpy(), style, label=label, linewidth=width)
+            
+        axes[0].set_title('SoftMin Approximation of min(0, delta)')
+        axes[0].set_xlabel('delta')
+        axes[0].set_ylabel('SoftMin(0, delta)')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # --- 2) Violation Penalty Effect (tviolation) ---
+        # Violation = Sigmoid(-delta / t)
+        ts = [0.01, 0.05, 0.1, 0.5, 1.0]
+        # Include current t
+        if self.t not in ts:
+            ts.append(self.t)
+        ts = sorted(list(set(ts)))
+        
+        for t in ts:
+            # Sigmoid(-delta / t)
+            y = torch.sigmoid(-deltas_t / t)
+            
+            style = '-' if t == self.t else ':'
+            width = 2 if t == self.t else 1
+            label = f't={t}' + (' (current)' if t == self.t else '')
+            axes[1].plot(deltas, y.numpy(), style, label=label, linewidth=width)
+            
+        axes[1].set_title('Violation Penalty (Sigmoid(-delta/t))')
+        axes[1].set_xlabel('delta')
+        axes[1].set_ylabel('Penalty')
+        axes[1].axvline(0, color='k', linestyle='--', alpha=0.3)
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(dir_output / 'hyperparams_effects.png')
+        plt.close()
