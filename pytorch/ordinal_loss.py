@@ -2514,14 +2514,13 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         wmin=1.0,
         wneg=1.0,
         wviol=1.0,
-        addglobal=False,
         lambdadir=0.0, # Default as requested in "Valeurs de départ"
         diralpha=1.05,
         lambdace=0.0,
-        class_weights=None
+        class_weights=None,
+        lambdagl=0.0
     ):
         super().__init__()
-        self.addglobal = bool(addglobal)
         self.lambdadir = float(lambdadir)
         self.diralpha = float(diralpha)
         self.lambdace = float(lambdace)
@@ -2531,9 +2530,11 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
              if not torch.is_tensor(class_weights):
                   class_weights = torch.tensor(class_weights, dtype=torch.float32)
              self.register_buffer('class_weights', class_weights)
-             self.ce_loss = FocalLoss(gamma=2.0, alpha=self.class_weights, reduction='none')
+             #self.ce_loss = FocalLoss(gamma=2.0, alpha=self.class_weights, reduction='none')
+             self.ce_loss = WeightedCrossEntropyLoss()
         else:
-             self.ce_loss = FocalLoss(gamma=2.0, alpha=1.0, reduction='none')
+             #self.ce_loss = FocalLoss(gamma=2.0, alpha=1.0, reduction='none')
+             self.ce_loss = WeightedCrossEntropyLoss()
         self.id = id
         self.C = int(num_classes)
         if self.C < 2:
@@ -2570,6 +2571,8 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         self.wneg = float(wneg)
         self.wviol = float(wviol)
 
+        self.lambdagl = float(lambdagl)
+
         self.call_preprocess = False
 
         #self._log("Ordinal Loss Config:", self.get_config())
@@ -2595,7 +2598,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             "wviol": self.wviol,
 
             "id": self.id,
-            "addglobal": self.addglobal,
+            "lambdagl": self.lambdagl,
             "lambdadir": self.lambdadir,
             "diralpha": self.diralpha
         }
@@ -2731,6 +2734,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         SCORE_k_batch = {}
         VIOL_k_batch = {}
         NEG_k_batch = {}
+        
         deltas_batch = {}
 
         # SCORE_k with margined deltas
@@ -2745,13 +2749,32 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             
             deltas_batch[k] = deltas.detach().cpu().numpy()
 
+            # Surrogates
             MINk = self._softmin(deltas)
             MEDk = self._soft_median(deltas)
             VIOLk = torch.sigmoid(-deltas / self.t).mean()
             NEGk = F.softplus(-deltas).mean()
+            
+            # === MULTI-CRITERIA INEQUALITY LOSS (ReLU) ===
+            # We want MED > 0, MIN > 0, and minimizing magnitude of violations
+            # Use ReLU to penalize ONLY when criteria are violated (< 0)
+            
+            # Criterion 1: Median Penalty (Quadratic)
+            loss_med = F.softplus(-MEDk)
+            
+            # Criterion 2: Minimum Penalty (Quadratic)
+            loss_min = F.softplus(-MINk)
+            
+            # Criterion 3: Magnitude Penalty (Mean of squared violations)
+            loss_neg = (F.softplus(-deltas)).mean()
+            
+            # Weighted Combination
+            Lk = (self.wmed * loss_med +
+                  self.wmin * loss_min + 
+                  self.wneg * loss_neg)
 
+            # SCOREk for logging (kept similar to before for continuity)
             SCOREk = (self.wmed * MEDk + self.wmin * MINk) - self.wneg * NEGk * (1.0 + self.wviol * VIOLk)
-            Lk = F.softplus(-SCOREk)
 
             w = float(wk_dict.get(k, 1.0))
             cluster_loss = cluster_loss + w * Lk
@@ -2843,9 +2866,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             
         # raw diffs = diffs_batch (already computed: mu[1:] - mu[:-1])
         # diffs_batch is a list in current code? No, let's see where it comes from.
-        # It's calculated inside the loop over k. We need it as a tensor.
-        # Actually diffs are computed as (mu[b] - mu[a]) in loop.
-        # But we want the mean of adjacent diffs.
+        # It's calculated inside the loop over k. We want the mean of adjacent diffs.
         # mu is [num_classes] shape.
         diffs_mu = mu[1:] - mu[:-1]
         raw_mean = diffs_mu.mean().item()
@@ -2887,10 +2908,10 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             mk = float(np.median(margins_k))  # médiane robuste
             
             # Normalization
-            #wk[k] = (1.0 / (mk + eps)) * self.wk.get(k, 1.0)
+            wk[k] = (1.0 / (mk + eps)) * self.wk.get(k, 1.0)
             
             # Simple weight
-            wk[k] = self.wk.get(k, 1.0)
+            #wk[k] = self.wk.get(k, 1.0)
         return wk
 
     def _get_cluster_wk(self, cluster_id):
@@ -3376,7 +3397,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         # (and normalized it). 
         # User request: "le cas où on en voit pas qu'un seul cluster, je veux que tu ajoutes la même loss mais calculé sur l'ensemble des logits"
         
-        if self.addglobal:
+        if self.lambdagl > 0:
             if len(unique_clusters) > 1:
                 # Global setup
                 # gains -> global_gains
@@ -3397,7 +3418,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
                 
                 if g_w > 0:
                     global_loss_val = g_loss / g_w
-                    final_loss = final_loss + global_loss_val
+                    final_loss = final_loss + self.lambdagl * global_loss_val
                     
                     # Option: log global stats?
                     # The user didn't explicitly ask for logging, but it helps debugging.
@@ -3624,7 +3645,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             try:
                 plt.figure(figsize=(10, 6))
                 plt.plot(epochs, series['loss_total'], label='Total Loss', linewidth=2)
-                plt.plot(epochs, series['loss_trans'], label='Transitional Loss', linestyle='--')
+                plt.plot(epochs, series['loss_trans'], label='Inequality Loss (Quadratic ReLU)', linestyle='--')
                 plt.plot(epochs, series['mu0_term'], label='Mu0 Term', linestyle=':')
                 if any(v != 0 for v in series['ce_loss']):
                     plt.plot(epochs, series['ce_loss'], label='CE Loss', color='purple', linestyle='-.')
@@ -3731,7 +3752,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
                             axes[i, 2].grid(True)
                             
                             axes[i, 3].plot(epochs, dstats['neg'], color='purple')
-                            axes[i, 3].set_title(f'k={k} Mean NEG (Softplus)')
+                            axes[i, 3].set_title(f'k={k} Mean NEG (Softplus magnitude)')
                             axes[i, 3].grid(True)
                     
                     if best_epoch is not None:
@@ -3765,7 +3786,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
                 plot_k_lines(axes[1], series['SCORE_k'], 'SCORE_k')
                 plot_k_lines(axes[2], series['VIOL_k'], 'VIOL_k')
                 axes[2].set_ylim(-0.1, 1.1)
-                plot_k_lines(axes[3], series['NEG_k'], 'NEG_k (Softplus penalty)')
+                plot_k_lines(axes[3], series['NEG_k'], 'NEG_k (Softplus magnitude)')
 
                 if best_epoch is not None:
                     for ax in axes:
@@ -3941,3 +3962,864 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         plt.tight_layout()
         plt.savefig(dir_output / 'hyperparams_effects.png')
         plt.close()
+
+class OMMSE(nn.Module):
+    """
+    Ordinal Margin MSE Loss (OrdinalMargeMSE)
+    
+    Version simplifiée qui calcule UNIQUEMENT la MSE entre les différences de mu 
+    et les gains cibles. Reprend le preprocessing de OrdinalMonotonicLossNoCoverageWithGains
+    pour calculer les gains adaptatifs, mais simplifie drastiquement le forward.
+    
+    Loss: MSE((mu[i+1] - mu[i]) / scale, gains[i])
+    
+    Permet de tester si le terme MSE seul suffit à résoudre les problèmes.
+    """
+    
+    def __init__(
+        self,
+        num_classes=5,
+        mushrinkalpha=1.0,
+        eps=1e-8,
+        quantileedges=(0.5, 0.8, 0.95),
+        minbinn=3,
+        gainsalpha=1.0,
+        gainsfloorfrac=0.1,
+        enforcegainmonotone=True,
+        id=None,
+        enablelogs=True,
+        addglobal=False,
+        lambda_mse=1.0
+    ):
+        super().__init__()
+        self.addglobal = bool(addglobal)
+        self.id = id
+        self.C = int(num_classes)
+        if self.C < 2:
+            raise ValueError("num_classes doit être >= 2.")
+        if len(quantileedges) != (self.C - 2):
+            raise ValueError("quantileedges (positifs) doit avoir longueur C-2=%d (reçu %d)"
+                             % (self.C - 2, len(quantileedges)))
+        
+        self.mushrinkalpha = float(mushrinkalpha)
+        self.eps = float(eps)
+        
+        self.quantileedges = tuple(float(x) for x in quantileedges)
+        self.minbinn = int(minbinn)
+        self.gainsalpha = float(gainsalpha)
+        self.gainsfloorfrac = float(gainsfloorfrac)
+        self.enforcegainmonotone = bool(enforcegainmonotone)
+        self.enablelogs = bool(enablelogs)
+        self.lambda_mse = float(lambda_mse)
+        
+        # Buffers pour gains et scales
+        self.gain_k = {}
+        self.register_buffer("global_gains", torch.zeros(self.C - 1, dtype=torch.float32))
+        self.register_buffer("global_scale", torch.tensor(1.0, dtype=torch.float32))
+        
+        self.call_preprocess = False
+    
+    def get_config(self):
+        return {
+            "numclasses": self.C,
+            "mushrinkalpha": self.mushrinkalpha,
+            "eps": self.eps,
+            "quantileedges": self.quantileedges,
+            "minbinn": self.minbinn,
+            "gainsalpha": self.gainsalpha,
+            "gainsfloorfrac": self.gainsfloorfrac,
+            "enforcegainmonotone": self.enforcegainmonotone,
+            "enablelogs": self.enablelogs,
+            "id": self.id,
+            "addglobal": self.addglobal,
+            "lambda_mse": self.lambda_mse
+        }
+    
+    def _log(self, *args):
+        if self.enablelogs:
+            print(*args)
+    
+    def _adaptive_positive_thresholds(self, y_pos, qe_pos):
+        """Copié de OrdinalMonotonicLossNoCoverageWithGains"""
+        q_max = 0.99
+        q_step = 0.05
+        tol = 0.0
+        
+        thresholds = []
+        used_q = []
+        last_t = None
+        forced_flat = False
+        
+        for q0 in qe_pos:
+            q_try = float(q0)
+            if q_try <= 0.0 or q_try >= 1.0:
+                raise ValueError("quantileedges doit être dans ]0,1[ (reçu %s)" % str(qe_pos))
+            
+            if forced_flat:
+                thresholds.append(float(last_t))
+                used_q.append(float(q_max))
+                continue
+            
+            t = float(np.quantile(y_pos, q_try))
+            
+            if last_t is not None and t <= last_t + tol:
+                q = q_try
+                t_new = t
+                while q < q_max - 1e-12:
+                    q = min(q_max, q + q_step)
+                    t_new = float(np.quantile(y_pos, q))
+                    if t_new > last_t + tol:
+                        break
+                
+                if t_new > last_t + tol:
+                    q_try = q
+                    t = t_new
+                else:
+                    forced_flat = True
+                    q_try = q_max
+                    t = float(last_t)
+            
+            thresholds.append(float(t))
+            used_q.append(float(q_try))
+            last_t = float(t)
+        
+        return (
+            np.array(thresholds, dtype=np.float32),
+            np.array(used_q, dtype=np.float32),
+            bool(forced_flat),
+        )
+    
+    def _compute_bins_and_ok_positive_quantiles(
+        self,
+        y_sub,
+        qe_pos,
+        minB,
+        require_positive_bins=True,
+        min_pos_per_bin=3,
+        tag=""
+    ):
+        """Copié de OrdinalMonotonicLossNoCoverageWithGains"""
+        y_sub = y_sub[np.isfinite(y_sub)]
+        if y_sub.size == 0:
+            return None, False, None, None, False, None
+        
+        y0 = y_sub[y_sub <= 0]
+        y_pos = y_sub[y_sub > 0]
+        if y_pos.size == 0:
+            return None, False, None, None, False, None
+        
+        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos)
+        
+        bins = []
+        bins.append(y0)
+        
+        q1 = qs_pos[0]
+        bins.append(y_pos[y_pos <= q1])
+        
+        for i in range(1, len(qs_pos)):
+            lo = qs_pos[i - 1]
+            hi = qs_pos[i]
+            bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
+        
+        q_last = qs_pos[-1]
+        bins.append(y_pos[y_pos > q_last])
+        
+        bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
+        counts = np.array([int(b.size) for b in bins], dtype=np.int32)
+        pos_counts = counts.copy()
+        pos_counts[0] = 0
+        
+        ok = True
+        
+        if not np.all(np.diff(qs_pos) > 0):
+            ok = False
+        
+        if ok and not np.all(counts[1:] >= int(minB)):
+            ok = False
+        
+        if ok and require_positive_bins:
+            if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
+                ok = False
+        
+        self._log(
+            f"[BINS {tag}] means={bin_means} counts={counts} ok={ok} "
+            f"qs_pos={qs_pos} used_q={used_q} forced_flat={forced_flat}"
+        )
+        
+        return bin_means, bool(ok), qs_pos, used_q, forced_flat, counts
+    
+    def _gains_from_bin_means(self, bin_means, y_ref, tag=""):
+        """Copié de OrdinalMonotonicLossNoCoverageWithGains"""
+        diffs = np.diff(bin_means)
+        diffs = np.maximum(diffs, 0.0)
+        
+        y_ref = y_ref[np.isfinite(y_ref)]
+        y_pos = y_ref[y_ref > 0]
+        
+        if y_pos.size >= 10:
+            spread = 1.0
+        else:
+            spread = 1.0
+        
+        floor = max(0.0, self.gainsfloorfrac)
+        
+        base = self.gainsalpha * diffs
+        gains = np.maximum(base, floor).astype(np.float32)
+        
+        if self.enforcegainmonotone:
+            gains = np.maximum.accumulate(gains).astype(np.float32)
+        
+        self._log(
+            f"[GAINS {tag}] diffs={diffs} base={base} floor={floor} final={gains}"
+        )
+        return gains, float(spread)
+    
+    def _preprocess(
+        self,
+        y_cont,
+        clusters_ids,
+        similar_cluster_ids=None,
+        quantileedges=None,
+        minbinn=None,
+        require_positive_bins=True,
+        min_pos_per_bin=3,
+        enforcegainmonotone=None,
+    ):
+        """Preprocessing: calculate bins and gains per cluster"""
+        self.call_preprocess = True
+        y = np.asarray(y_cont)
+        c = np.asarray(clusters_ids)
+        
+        if y.ndim != 1 or c.ndim != 1 or len(y) != len(c):
+            raise ValueError("y_cont et clusters_ids doivent être 1D et de même longueur.")
+        
+        if similar_cluster_ids is not None:
+            s = np.asarray(similar_cluster_ids)
+            if s.ndim != 1 or len(s) != len(c):
+                raise ValueError("similar_cluster_ids doit être 1D et de même longueur que clusters_ids.")
+        else:
+            s = None
+        
+        qe_pos = self.quantileedges if quantileedges is None else tuple(float(x) for x in quantileedges)
+        if len(qe_pos) != (self.C - 2):
+            raise ValueError("quantileedges (positifs) doit avoir longueur C-2=%d" % (self.C - 2))
+        
+        minB = self.minbinn if minbinn is None else int(minbinn)
+        if enforcegainmonotone is not None:
+            self.enforcegainmonotone = bool(enforcegainmonotone)
+        
+        idx_by_cluster = {}
+        unique_clusters = np.unique(c)
+        for cl in unique_clusters:
+            idx_by_cluster[cl] = np.where(c == cl)[0]
+        
+        idx_by_group = None
+        cluster_group = None
+        if s is not None:
+            idx_by_group = {}
+            for g in np.unique(s):
+                idx_by_group[g] = np.where(s == g)[0]
+            
+            cluster_group = {}
+            for cl in unique_clusters:
+                idx = idx_by_cluster[cl]
+                vals, cnts = np.unique(s[idx], return_counts=True)
+                cluster_group[cl] = vals[np.argmax(cnts)] if vals.size > 0 else None
+        
+        # GLOBAL
+        self._log("==== GLOBAL GAINS (bins->gains) ====")
+        bm_g, ok_g, qs_g, usedq_g, flat_g, cnt_g = self._compute_bins_and_ok_positive_quantiles(
+            y, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin, tag="GLOBAL"
+        )
+        if bm_g is not None and ok_g:
+            global_g, global_spread = self._gains_from_bin_means(bm_g, y, tag="GLOBAL")
+            self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
+            self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
+        else:
+            raise ValueError('Cannot calculate bin means')
+        
+        self.global_gains = torch.tensor(global_g, dtype=torch.float32, device=self.global_gains.device)
+        self._log("[GLOBAL GAINS] tensor:", self.global_gains)
+        
+        # PER CLUSTER
+        self.gain_k = {}
+        self.scale_k = {}
+        self._log("==== CLUSTER GAINS ====")
+        
+        for cl in unique_clusters:
+            idx = idx_by_cluster[cl]
+            y_cl = y[idx]
+            
+            self._log(f"\n--- cluster {cl} (n={len(idx)}) ---")
+            bm, ok, qs, usedq, flat, cnt = self._compute_bins_and_ok_positive_quantiles(
+                y_cl, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
+                tag="CL_%s" % str(cl)
+            )
+            
+            if bm is not None and ok:
+                g_cl, spread_cl = self._gains_from_bin_means(bm, y_cl, tag="CL_%s" % str(cl))
+            else:
+                pooled = False
+                if cluster_group is not None and idx_by_group is not None:
+                    g_id = cluster_group.get(cl, None)
+                    if g_id is not None and g_id in idx_by_group:
+                        idx_pool = idx_by_group[g_id]
+                        y_pool = y[idx_pool]
+                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)})")
+                        
+                        bm2, ok2, qs2, usedq2, flat2, cnt2 = self._compute_bins_and_ok_positive_quantiles(
+                            y_pool, qe_pos, minB,
+                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
+                            tag="POOL_G%s" % str(g_id)
+                        )
+                        if bm2 is not None and ok2:
+                            g_cl, spread_cl = self._gains_from_bin_means(bm2, y_pool, tag="POOL_G%s" % str(g_id))
+                            pooled = True
+                        else:
+                            self._log(f"[CL {cl}] pooling failed -> fallback global gains")
+                            g_cl = global_g
+                            spread_cl = global_spread
+                    else:
+                        self._log(f"[CL {cl}] no valid similar group -> fallback global gains")
+                        g_cl = global_g
+                        spread_cl = global_spread
+                else:
+                    self._log(f"[CL {cl}] no similar_cluster_ids -> fallback global gains")
+                    g_cl = global_g
+                    spread_cl = global_spread
+            
+            if self.enforcegainmonotone:
+                g_cl = np.maximum.accumulate(np.asarray(g_cl, dtype=np.float32)).astype(np.float32)
+            
+            self.gain_k[cl] = torch.tensor(g_cl, dtype=torch.float32, device=self.global_gains.device)
+            self.scale_k[cl] = torch.tensor(spread_cl, dtype=torch.float32, device=self.global_gains.device)
+            
+            self._log(f"[CLUSTER GAINS] {cl} -> {g_cl}")
+    
+    def _mu_soft(self, p, y, sw=None):
+        """Calcul des mu par classe"""
+        if not torch.is_floating_point(y):
+            y = y.to(dtype=p.dtype)
+        
+        if sw is not None:
+            sw = sw.to(device=p.device, dtype=p.dtype).clamp_min(self.eps)
+            p_eff = p * sw.unsqueeze(1)
+            counts = p_eff.sum(dim=0)
+            num = (p_eff * y.unsqueeze(1)).sum(dim=0)
+        else:
+            counts = p.sum(dim=0)
+            num = (p * y.unsqueeze(1)).sum(dim=0)
+        
+        if self.mushrinkalpha > 0:
+            mu0 = y.mean()
+            a = self.mushrinkalpha
+            mu = (num + a * mu0) / (counts + a).clamp_min(self.eps)
+        else:
+            mu = num / counts.clamp_min(self.eps)
+        
+        return mu
+    
+    def _get_cluster_gains(self, cluster_id, device, dtype):
+        if hasattr(self, "gain_k") and (cluster_id in self.gain_k):
+            g = self.gain_k[cluster_id]
+        else:
+            g = self.global_gains
+        return g.to(device=device, dtype=dtype)
+    
+    def _get_cluster_scale(self, cluster_id, device, dtype):
+        if hasattr(self, "scale_k") and (cluster_id in self.scale_k):
+            s = self.scale_k[cluster_id]
+        else:
+            s = self.global_scale
+        return s.to(device=device, dtype=dtype)
+    
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            self.epoch_stats = {}
+    
+    def forward(self, logits, y_cont, clusters_ids, sample_weight=None):
+        """
+        Forward simplifié: calcule UNIQUEMENT MSE((mu[i+1] - mu[i]) / scale, gains[i])
+        """
+        assert self.call_preprocess is True, 'You have to call preprocess before forward'
+        if logits.dim() != 2:
+            raise ValueError("logits doit etre (N,C). Recu: %s" % (tuple(logits.shape),))
+        if y_cont.dim() != 1 or clusters_ids.dim() != 1:
+            raise ValueError("y_cont et clusters_ids doivent etre des tenseurs 1D (N,).")
+        if logits.size(0) != y_cont.size(0) or logits.size(0) != clusters_ids.size(0):
+            raise ValueError("logits, y_cont, clusters_ids doivent avoir le meme N.")
+        
+        if not hasattr(self, 'epoch_stats'):
+            self.epoch_stats = {}
+        
+        probs = F.softmax(logits, dim=1)
+        y_cont = y_cont.to(device=logits.device, dtype=probs.dtype)
+        
+        sw = None
+        if sample_weight is not None:
+            sw = sample_weight.to(device=logits.device, dtype=probs.dtype)
+        
+        total_loss = logits.new_tensor(0.0)
+        total_w = logits.new_tensor(0.0)
+        
+        unique_clusters = torch.unique(clusters_ids)
+        
+        for d in unique_clusters:
+            idx = torch.nonzero(clusters_ids == d, as_tuple=False).squeeze(1)
+            if idx.numel() < 2:
+                continue
+            
+            p = probs[idx]
+            y = y_cont[idx]
+            sw_d = sw[idx] if sw is not None else None
+            
+            cl_id = d.item() if torch.is_tensor(d) else d
+            
+            if cl_id not in self.epoch_stats:
+                self.epoch_stats[cl_id] = {
+                    'loss_mse': [],
+                    'mu': [],
+                    'mu_diffs_scaled': [],
+                    'target_diffs': [],
+                    'scale': []
+                }
+            
+            # Calcul des mu
+            mu = self._mu_soft(p, y, sw=sw_d)
+            
+            # Récupération des gains et scale pour ce cluster
+            gains = self._get_cluster_gains(cl_id, p.device, p.dtype)
+            scale = self._get_cluster_scale(cl_id, p.device, p.dtype)
+            
+            # === TERME MSE UNIQUEMENT ===
+            mu_diffs = mu[1:] - mu[:-1]
+            mu_diffs_scaled = mu_diffs / (scale + self.eps)
+            
+            # MSE entre différences réelles et cibles (gains)
+            loss_mse = F.mse_loss(mu_diffs_scaled, gains)
+            
+            cluster_loss = self.lambda_mse * loss_mse
+            
+            total_loss = total_loss + cluster_loss
+            total_w = total_w + 1.0
+            
+            # Stats
+            est = self.epoch_stats[cl_id]
+            est['loss_mse'].append(loss_mse.detach().item())
+            est['mu'].append(mu.detach().cpu().numpy())
+            est['mu_diffs_scaled'].append(mu_diffs_scaled.detach().cpu().numpy())
+            est['target_diffs'].append(gains.detach().cpu().numpy())
+            est['scale'].append(scale.detach().cpu().numpy())
+        
+        if total_w.abs() < self.eps:
+            final_loss = logits.new_tensor(0.0)
+        else:
+            final_loss = total_loss / total_w
+        
+        # === GLOBAL LOSS (optionnel) ===
+        if self.addglobal and len(unique_clusters) > 1:
+            g_gains = self.global_gains.to(device=logits.device, dtype=probs.dtype)
+            g_scale = self.global_scale.to(device=logits.device, dtype=probs.dtype)
+            
+            mu_global = self._mu_soft(probs, y_cont, sw=sw)
+            mu_diffs_g = mu_global[1:] - mu_global[:-1]
+            mu_diffs_scaled_g = mu_diffs_g / (g_scale + self.eps)
+            
+            loss_mse_g = F.mse_loss(mu_diffs_scaled_g, g_gains)
+            global_loss = self.lambda_mse * loss_mse_g
+            
+            final_loss = final_loss + global_loss
+            
+            if "global" not in self.epoch_stats:
+                self.epoch_stats["global"] = {
+                    'loss_mse': [],
+                    'mu': [],
+                    'mu_diffs_scaled': [],
+                    'target_diffs': [],
+                    'scale': []
+                }
+            est_g = self.epoch_stats["global"]
+            est_g['loss_mse'].append(loss_mse_g.detach().item())
+            est_g['mu'].append(mu_global.detach().cpu().numpy())
+            est_g['mu_diffs_scaled'].append(mu_diffs_scaled_g.detach().cpu().numpy())
+            est_g['target_diffs'].append(g_gains.detach().cpu().numpy())
+            est_g['scale'].append(g_scale.detach().cpu().numpy())
+        
+        return final_loss
+    
+    def get_attribute(self):
+        """Agrégation des stats"""
+        aggregated = {}
+        
+        for cl_id, stats in self.epoch_stats.items():
+            agg_cl = {}
+            
+            # Scalaires
+            if 'loss_mse' in stats and stats['loss_mse']:
+                agg_cl['loss_mse'] = np.mean(stats['loss_mse'])
+            else:
+                agg_cl['loss_mse'] = 0.0
+            
+            # Vecteurs
+            for k in ['mu', 'mu_diffs_scaled', 'target_diffs', 'scale']:
+                if len(stats[k]) > 0:
+                    stack = np.stack(stats[k])
+                    agg_cl[k] = np.mean(stack, axis=0)
+                else:
+                    agg_cl[k] = None
+            
+            aggregated[cl_id] = agg_cl
+        
+        class DictWrapper:
+            def __init__(self, d):
+                self.d = d
+            def detach(self):
+                return self
+            def cpu(self):
+                return self
+            def numpy(self):
+                return self.d
+        
+        return [('ordinal_stats', DictWrapper(aggregated))]
+
+    def plot_params(self, params_history, log_dir, best_epoch=None):
+        """
+        Génère des courbes d'évolution des paramètres pour OMMSE (version simplifiée).
+        params_history: list of dicts [{'epoch': E, 'ordinal_stats': aggregated_stats}, ...]
+        """
+        import matplotlib.pyplot as plt
+        import pathlib
+
+        root_dir = pathlib.Path(log_dir) / 'ommse_params'
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        # Re-organize data: cluster_id -> { metric -> [values over epochs] }
+        cluster_series = {}
+        
+        # Determine if params_history is list or dict
+        if isinstance(params_history, dict):
+            iterator = sorted(params_history.items())
+        else:
+            iterator = []
+            for entry in params_history:
+                if 'epoch' in entry:
+                    iterator.append((entry['epoch'], entry))
+            iterator.sort(key=lambda x: x[0])
+        
+        for ep, entry in iterator:
+            if 'ordinal_stats' in entry:
+                stats_container = entry['ordinal_stats']
+                if hasattr(stats_container, 'd'):
+                    ep_data = stats_container.d
+                else:
+                    ep_data = stats_container
+            else:
+                continue
+
+            if not ep_data:
+                continue
+            
+            for cl_id, stats in ep_data.items():
+                if cl_id not in cluster_series:
+                    cluster_series[cl_id] = {
+                        'epochs': [],
+                        'loss_mse': [],
+                        'mu': [],
+                        'mu_diffs_scaled': [],
+                        'target_diffs': [],
+                        'scale': []
+                    }
+                
+                s = cluster_series[cl_id]
+                s['epochs'].append(ep)
+                s['loss_mse'].append(stats.get('loss_mse', 0.0))
+                s['mu'].append(stats.get('mu', None))
+                s['mu_diffs_scaled'].append(stats.get('mu_diffs_scaled', None))
+                s['target_diffs'].append(stats.get('target_diffs', None))
+                s['scale'].append(stats.get('scale', 1.0))
+
+        # Plot per cluster
+        for cl_id, series in cluster_series.items():
+            cl_dir = root_dir / str(cl_id)
+            cl_dir.mkdir(parents=True, exist_ok=True)
+            
+            epochs = series['epochs']
+            if not epochs:
+                continue
+
+            # 1) MSE Loss Evolution
+            try:
+                plt.figure(figsize=(10, 6))
+                plt.plot(epochs, series['loss_mse'], label='MSE Loss', linewidth=2, color='blue')
+                if best_epoch is not None:
+                    plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                plt.title(f'Cluster {cl_id} - MSE Loss Evolution')
+                plt.xlabel('Epoch')
+                plt.ylabel('MSE Loss')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.savefig(cl_dir / '1_mse_loss.png')
+                plt.close()
+            except Exception as e:
+                print(f"Error plotting MSE loss for cluster {cl_id}: {e}")
+                plt.close()
+
+            # 2) Mu Evolution
+            try:
+                valid_mu = [m for m in series['mu'] if m is not None]
+                if valid_mu:
+                    mu_stack = np.stack(valid_mu)
+                    if mu_stack.ndim == 1:
+                        mu_stack = mu_stack.reshape(-1, 1)
+                    
+                    if mu_stack.ndim >= 2 and mu_stack.shape[0] == len(epochs):
+                        plt.figure(figsize=(10, 6))
+                        C_mu = mu_stack.shape[1]
+                        for c in range(C_mu):
+                            plt.plot(epochs, mu_stack[:, c], label=f'mu({c})', marker='o' if c == 0 else None)
+                        if best_epoch is not None:
+                            plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                        plt.title(f'Cluster {cl_id} - Mu Evolution')
+                        plt.xlabel('Epoch')
+                        plt.ylabel('Mu Values')
+                        plt.legend()
+                        plt.grid(True, alpha=0.3)
+                        plt.savefig(cl_dir / '2_mu_evolution.png')
+                        plt.close()
+            except Exception as e:
+                print(f"Error plotting mu for cluster {cl_id}: {e}")
+                plt.close()
+
+            # 3) Mu Diffs vs Target (convergence)
+            try:
+                valid_diffs = [d for d in series['mu_diffs_scaled'] if d is not None]
+                valid_targets = [t for t in series['target_diffs'] if t is not None]
+                
+                if valid_diffs and valid_targets and len(valid_diffs) == len(epochs):
+                    diffs_stack = np.stack(valid_diffs)
+                    targets_stack = np.stack(valid_targets)
+                    
+                    if diffs_stack.ndim == 1:
+                        diffs_stack = diffs_stack.reshape(-1, 1)
+                    if targets_stack.ndim == 1:
+                        targets_stack = targets_stack.reshape(-1, 1)
+                    
+                    # Plot last epoch comparison
+                    plt.figure(figsize=(10, 6))
+                    last_diffs = diffs_stack[-1]
+                    last_targets = targets_stack[-1]
+                    classes = np.arange(len(last_diffs))
+                    
+                    plt.bar(classes - 0.2, last_diffs, width=0.4, label='Actual (mu[i+1]-mu[i])/scale', alpha=0.7)
+                    plt.bar(classes + 0.2, last_targets, width=0.4, label='Target (gains)', alpha=0.7)
+                    plt.xlabel('Transition (i -> i+1)')
+                    plt.ylabel('Value')
+                    plt.title(f'Cluster {cl_id} - Mu Diffs vs Targets (Final Epoch)')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3, axis='y')
+                    plt.savefig(cl_dir / '3_diffs_vs_targets.png')
+                    plt.close()
+                    
+                    # Plot MSE convergence per transition
+                    plt.figure(figsize=(12, 6))
+                    n_transitions = diffs_stack.shape[1]
+                    for i in range(n_transitions):
+                        mse_i = (diffs_stack[:, i] - targets_stack[0, i]) ** 2
+                        plt.plot(epochs, mse_i, label=f'Transition {i}->{i+1}', alpha=0.7)
+                    if best_epoch is not None:
+                        plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                    plt.title(f'Cluster {cl_id} - Squared Error per Transition')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('(mu_diff - target)^2')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    plt.yscale('log')
+                    plt.savefig(cl_dir / '4_convergence_per_transition.png')
+                    plt.close()
+                    
+            except Exception as e:
+                print(f"Error plotting diffs vs targets for cluster {cl_id}: {e}")
+                plt.close()
+
+            # 4) Scale Evolution
+            try:
+                plt.figure(figsize=(10, 6))
+                plt.plot(epochs, series['scale'], label='Scale', linewidth=2, color='green')
+                if best_epoch is not None:
+                    plt.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                plt.title(f'Cluster {cl_id} - Scale Evolution')
+                plt.xlabel('Epoch')
+                plt.ylabel('Scale')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.savefig(cl_dir / '5_scale.png')
+                plt.close()
+            except Exception as e:
+                print(f"Error plotting scale for cluster {cl_id}: {e}")
+                plt.close()
+
+        print(f"OMMSE plots saved to {root_dir}")
+        
+        # Generate mushrinkalpha effect visualization
+        try:
+            print("Generating mushrinkalpha effect visualization...")
+            self.plot_mushrinkalpha_effect(root_dir)
+        except Exception as e:
+            print(f"Error generating mushrinkalpha visualization: {e}")
+
+    
+    def plot_mushrinkalpha_effect(self, dir_output, sample_counts=None, mu_raw=None, mu0=None):
+        """
+        Visualise l'effet de mushrinkalpha sur le calcul des mu.
+        
+        Formula: mu = (num + alpha * mu0) / (counts + alpha)
+        
+        Args:
+            dir_output: Répertoire de sortie
+            sample_counts: Array de counts par classe (optionnel, sinon utilise [1, 10, 100, 1000])
+            mu_raw: Array de mu "raw" = num/counts sans shrinkage (optionnel)
+            mu0: Valeur de mu0 (moyenne globale, optionnel, défaut 1.0)
+        """
+        import matplotlib.pyplot as plt
+        from pathlib import Path
+        
+        dir_output = Path(dir_output)
+        dir_output.mkdir(parents=True, exist_ok=True)
+        
+        # Valeurs par défaut
+        if sample_counts is None:
+            sample_counts = np.array([1, 5, 10, 50, 100, 500, 1000])
+        else:
+            sample_counts = np.asarray(sample_counts)
+        
+        if mu_raw is None:
+            # Simuler des mu_raw variés
+            mu_raw = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])[:len(sample_counts)]
+        else:
+            mu_raw = np.asarray(mu_raw)
+        
+        if mu0 is None:
+            mu0 = 1.0
+        
+        # Tester différentes valeurs d'alpha
+        alphas = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+        
+        # === PLOT 1: Effet sur différentes classes (avec counts variés) ===
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Subplot 1: Mu en fonction de counts pour différents alphas
+        ax = axes[0, 0]
+        for alpha in alphas:
+            # Simuler: mu_raw fixe, compter effet du count
+            mu_shrunk = (mu_raw * sample_counts + alpha * mu0) / (sample_counts + alpha)
+            label = f'α={alpha}' + (' (current)' if alpha == self.mushrinkalpha else '')
+            style = '-' if alpha == self.mushrinkalpha else '--'
+            width = 2 if alpha == self.mushrinkalpha else 1
+            ax.semilogx(sample_counts, mu_shrunk, style, label=label, linewidth=width)
+        
+        ax.axhline(mu0, color='k', linestyle=':', alpha=0.5, label=f'mu0={mu0}')
+        ax.plot(sample_counts, mu_raw, 'ko', label='Raw mu (no shrinkage)', markersize=5)
+        ax.set_xlabel('Sample Count (log scale)')
+        ax.set_ylabel('Mu (after shrinkage)')
+        ax.set_title('Effect of mushrinkalpha on Mu vs Sample Count')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        
+        # Subplot 2: Shrinkage strength vs counts
+        ax = axes[0, 1]
+        for alpha in alphas:
+            # Shrinkage strength = alpha / (counts + alpha)
+            shrinkage_weight = alpha / (sample_counts + alpha)
+            label = f'α={alpha}' + (' (current)' if alpha == self.mushrinkalpha else '')
+            style = '-' if alpha == self.mushrinkalpha else '--'
+            width = 2 if alpha == self.mushrinkalpha else 1
+            ax.semilogx(sample_counts, shrinkage_weight, style, label=label, linewidth=width)
+        
+        ax.set_xlabel('Sample Count (log scale)')
+        ax.set_ylabel('Shrinkage Weight = α/(count+α)')
+        ax.set_title('Shrinkage Strength vs Sample Count')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim([0, 1])
+        
+        # Subplot 3: Distance to mu0 reduction
+        ax = axes[1, 0]
+        for alpha in alphas:
+            mu_shrunk = (mu_raw * sample_counts + alpha * mu0) / (sample_counts + alpha)
+            distance_reduction = np.abs(mu_raw - mu0) - np.abs(mu_shrunk - mu0)
+            label = f'α={alpha}' + (' (current)' if alpha == self.mushrinkalpha else '')
+            style = '-' if alpha == self.mushrinkalpha else '--'
+            width = 2 if alpha == self.mushrinkalpha else 1
+            ax.semilogx(sample_counts, distance_reduction, style, label=label, linewidth=width)
+        
+        ax.set_xlabel('Sample Count (log scale)')
+        ax.set_ylabel('Distance Reduction to mu0')
+        ax.set_title('How much closer to mu0 after shrinkage')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color='k', linestyle=':', alpha=0.3)
+        
+        # Subplot 4: Effective sample size
+        ax = axes[1, 1]
+        for alpha in alphas:
+            effective_n = sample_counts + alpha
+            label = f'α={alpha}' + (' (current)' if alpha == self.mushrinkalpha else '')
+            style = '-' if alpha == self.mushrinkalpha else '--'
+            width = 2 if alpha == self.mushrinkalpha else 1
+            ax.loglog(sample_counts, effective_n, style, label=label, linewidth=width)
+        
+        ax.loglog(sample_counts, sample_counts, 'k:', alpha=0.5, label='No shrinkage (n=n)')
+        ax.set_xlabel('Actual Sample Count (log scale)')
+        ax.set_ylabel('Effective Sample Size (count+α)')
+        ax.set_title('Effective Sample Size with Shrinkage')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(dir_output / 'mushrinkalpha_effect.png', dpi=150)
+        plt.close()
+        
+        # === PLOT 2: Comparative bar chart for specific scenario ===
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Simuler 5 classes avec différents counts
+        n_classes = 5
+        counts_scenario = np.array([1000, 500, 100, 10, 1])  # Classes de bien à mal représentées
+        mu_raw_scenario = np.array([0.0, 1.0, 2.0, 3.0, 4.0])  # Valeurs espacées
+        mu0_scenario = 2.0  # Moyenne globale
+        
+        # Comparer 3 alphas
+        alphas_compare = [0.0, 1.0, 10.0]
+        
+        x = np.arange(n_classes)
+        width = 0.25
+        
+        for i, alpha in enumerate(alphas_compare):
+            mu_shrunk = (mu_raw_scenario * counts_scenario + alpha * mu0_scenario) / (counts_scenario + alpha)
+            offset = (i - 1) * width
+            label = f'α={alpha}' + (' (current)' if alpha == self.mushrinkalpha else '')
+            ax.bar(x + offset, mu_shrunk, width, label=label, alpha=0.7)
+        
+        ax.plot(x, mu_raw_scenario, 'ko-', label='Raw mu (α=0)', markersize=8, linewidth=2, alpha=0.5)
+        ax.axhline(mu0_scenario, color='r', linestyle='--', alpha=0.5, label=f'mu0={mu0_scenario}')
+        
+        ax.set_xlabel('Class')
+        ax.set_ylabel('Mu Value')
+        ax.set_title(f'Mushrinkalpha Effect on Mu Values\n(Counts: {counts_scenario})')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'Class {i}\n(n={counts_scenario[i]})' for i in range(n_classes)])
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(dir_output / 'mushrinkalpha_comparison.png', dpi=150)
+        plt.close()
+        
+        print(f"Mushrinkalpha visualization saved to {dir_output}")
+        print(f"  - mushrinkalpha_effect.png: 4 subplots showing different aspects")
+        print(f"  - mushrinkalpha_comparison.png: Bar chart comparison for specific scenario")
+        print(f"\nCurrent mushrinkalpha: {self.mushrinkalpha}")
+        print(f"  - α=0: No shrinkage (mu = num/counts)")
+        print(f"  - α>0: Shrinks towards mu0, stronger for low counts")
+        print(f"  - High α: Strong regularization, all mu closer to mu0")

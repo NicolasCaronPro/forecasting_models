@@ -2624,11 +2624,9 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
             
     # Filter based on min_k
     if coverage < min_k:
-        print(f"DEBUG: compute_score_for_k: coverage {coverage} < min_k {min_k} for k={k}")
         return np.nan, coverage
 
     if len(deltas) == 0:
-        print(f"DEBUG: compute_score_for_k: len(deltas) is 0 for k={k}")
         return np.nan, coverage
 
     deltas = np.array(deltas)
@@ -2646,13 +2644,12 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         (w_avg * avg_delta_std + w_min * min_delta_std) / 2
         - w_neg * neg_mass_std * (1 + w_viol * viol_rate)
     )
-
+    
     # 2026-02-13: Clamp score to avoid numerical explosion
     if np.abs(score) > 1e6:
-        print(f"DEBUG: Score for k={k} exploded ({score}). Clamped to +/- 1e6.")
         score = np.clip(score, -1e6, 1e6)
 
-    print(k, avg_delta_std, min_delta_std, neg_mass_std, viol_rate, np.unique(deltas_std))
+
 
     # Coverage weighting (disabled as per comparison_analysis logic which doesn't seem to force it here)
     return score, coverage
@@ -2678,15 +2675,13 @@ def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0
     
     # 2026-02-13: Clamp sigma to avoid division by zero or very small numbers
     if sigma < 1e-6 or np.isnan(sigma):
-        print(f"DEBUG: Sigma {sigma} is too small or NaN. Clamped to 1.0.")
         sigma = 1.0 # arbitrary fallback
     
-    print(f"DEBUG: lvl_counts={lvl_counts}, sigma={sigma}, Y_max={df['Y'].max()}")
+
     
     mu, fit = fit_spline_mu(df, df_spline=df_spline)
     
     if all(np.isnan(list(mu.values()))):
-        print("DEBUG: fit_spline_mu returned all NaNs")
         return np.nan, np.nan, {}, {}
     
     score_adj_k = {}
