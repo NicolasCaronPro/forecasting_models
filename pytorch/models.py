@@ -11,6 +11,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from forecasting_models.pytorch.gnns import *
+from forecasting_models.pytorch.utils import corn_class_probs
 
 class SpatialContext(nn.Module):
     """
@@ -263,6 +264,8 @@ class NetMLP(torch.nn.Module):
         logits = self.layer2(x)
         if self.task_type == 'classification':
             output = self.soft(logits)
+        elif self.task_type == 'corn':
+            output = corn_class_probs(logits)
         else:
             output = logits
 
@@ -394,12 +397,18 @@ class GRU(torch.nn.Module):
             x = self.act_func1(self.linear1(x))
             hidden = self.act_func2(self.linear2(x))
             logits = self.output_layer(hidden)
-            output = self.output_activation(logits)
+            if self.task_type == 'corn':
+                output = corn_class_probs(logits)
+            else:
+                output = self.output_activation(logits)
         except:
             x = self.act_func(self.linear1(x))
             hidden = self.act_func(self.linear2(x))
             logits = self.output_layer(hidden)
-            output = self.output_activation(logits)
+            if self.task_type == 'corn':
+                output = corn_class_probs(logits)
+            else:
+                output = self.output_activation(logits)
             
         return output, logits, hidden
 
@@ -522,7 +531,10 @@ class LSTM(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
-        output = self.output_activation(logits)
+        if self.task_type == 'corn':
+            output = corn_class_probs(logits)
+        else:
+            output = self.output_activation(logits)
         return output, logits, hidden
         
 class DilatedCNN(torch.nn.Module):
@@ -629,7 +641,10 @@ class DilatedCNN(torch.nn.Module):
         hidden = self.act_func(self.linear2(x))
         #x = self.dropout(x)
         logits = self.output_layer(hidden)
-        output = self.output_activation(logits)
+        if self.task_type == 'corn':
+            output = corn_class_probs(logits)
+        else:
+            output = self.output_activation(logits)
         return output, logits, hidden
 
 class GraphCastGRU(torch.nn.Module):
@@ -784,7 +799,10 @@ class GraphCastGRU(torch.nn.Module):
         x = self.act_func(self.linear1(x))
         hidden = self.act_func(self.linear2(x))
         logits = self.output_layer(hidden)
-        output = self.output_activation(logits)
+        if self.task_type == 'corn':
+            output = corn_class_probs(logits)
+        else:
+            output = self.output_activation(logits)
         return output, logits, hidden
 
 class GraphCastGRUWithAttention(torch.nn.Module):

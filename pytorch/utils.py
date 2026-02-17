@@ -137,7 +137,7 @@ class OutputLayerGAT(torch.nn.Module):
             x = self.softmax(x)
         return x
 
-######################################## TIME2VEC ######################################
+######################################## TIME2VEC ######################################
 
 class Time2Vec(torch.nn.Module):
     def __init__(self, kernel_size=1):
@@ -158,3 +158,61 @@ class Time2Vec(torch.nn.Module):
         v_periodic = torch.sin(x * self.wa + self.ba)  # Shape: (batch_size, time_steps, kernel_size)
         # Concatenate linear and periodic components
         return torch.cat([v_linear, v_periodic], dim=-1)  # Shape: (batch_size, time_steps, kernel_size + 1)
+
+import torch
+import torch.nn.functional as F
+
+def corn_predict(logits: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    """
+    Prédiction de classe pour CORN.
+
+    Parameters
+    ----------
+    logits : torch.Tensor
+        Tensor (N, K-1) des logits conditionnels.
+    threshold : float
+        Seuil pour décider si un seuil est dépassé (par défaut 0.5).
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor (N,) contenant les classes prédites dans [0, K-1].
+    """
+
+    # Probabilités conditionnelles f_k(x)
+    cond_probs = torch.sigmoid(logits)  # (N, K-1)
+
+    # Reconstruction des probabilités non-conditionnelles
+    # P(y > k) = produit_{j<=k} f_j(x)
+    cumulative_probs = torch.cumprod(cond_probs, dim=1)
+
+    # Nombre de seuils dépassés
+    passed = (cumulative_probs > threshold).sum(dim=1)
+
+    return passed
+
+def corn_class_probs(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Retourne P(y = k) pour k in [0..K-1]
+    logits: (N, K-1)
+    """
+
+    cond_probs = torch.sigmoid(logits)          # f_k
+    cum_probs = torch.cumprod(cond_probs, dim=1)  # P(y > k)
+
+    N, K_minus_1 = cum_probs.shape
+    K = K_minus_1 + 1
+
+    probs = torch.zeros((N, K), device=logits.device)
+
+    # P(y=0)
+    probs[:, 0] = 1 - cum_probs[:, 0]
+
+    # P(y=k)
+    for k in range(1, K-1):
+        probs[:, k] = cum_probs[:, k-1] - cum_probs[:, k]
+
+    # P(y=K-1)
+    probs[:, K-1] = cum_probs[:, -1]
+
+    return probs
