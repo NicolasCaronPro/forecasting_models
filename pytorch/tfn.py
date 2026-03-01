@@ -260,6 +260,7 @@ class TemporalFusionTransformerClassifier(nn.Module):
         self.d_static = int(d_static)
         self.static_idx = static_idx
         self.temporal_idx = temporal_idx
+        self.is_tfn = True
 
         if temporal_idx is not None:
             in_channels = len(temporal_idx)
@@ -386,8 +387,8 @@ class TemporalFusionTransformerClassifier(nn.Module):
         # 2) Seq2seq LSTM
         enc_out, (h_n, c_n) = self.encoder(v)       # [B,T,d_model]
 
-        # decoder length = horizon (paper multi-horizon). For single horizon, this is 1.
-        pred_len = max(1, self.horizon)
+        # decoder length: predict H=0 up to H=horizon -> horizon + 1 steps
+        pred_len = self.horizon + 1
 
         # Paper uses known future inputs to the decoder. If you don't provide them here,
         # a common aligned fallback is to repeat last observed embedding.
@@ -415,13 +416,16 @@ class TemporalFusionTransformerClassifier(nn.Module):
         # 5) Position-wise feedforward GRN (paper)
         out = self.pos_ff(attn_out)         # [B,pred_len,d_model]
 
-        # For 1 horizon, take last prediction step
-        h = out[:, -1, :]                   # [B,d_model]
-
-        # 6) Head path (GRU-like)
+        # 6) Head path (TFN outputs full trajectory [B, pred_len, d_model])
+        h = out 
+        
         if isinstance(self.norm, nn.BatchNorm1d):
+            # BatchNorm1d expects [B, C, L]
+            h = h.transpose(1, 2)
             h = self.norm(h)
+            h = h.transpose(1, 2)
         else:
+            # LayerNorm expects [..., normalized_shape]
             h = self.norm(h)
             
         h = self.dropout(h)
@@ -435,7 +439,7 @@ class TemporalFusionTransformerClassifier(nn.Module):
             extras: Dict[str, torch.Tensor] = {
                 "vsn_weights": vsn_w,           # [B,T,F]
                 "attn_weights": attn_weights,   # [B,H,pred_len,T]
-                "hidden": h,                    # [B,d_model]
+                "hidden": h,                    # [B,pred_len,d_model]
             }
             return output, y, extras
 

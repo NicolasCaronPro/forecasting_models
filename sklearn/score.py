@@ -2573,7 +2573,7 @@ def fit_spline_mu(df, df_spline=5):
     except Exception as e:
         # Fallback if too few data points or other issues
         print(f"Warning: Spline fit failed: {e}")
-        return {lvl: np.nan for lvl in LEVELS}, None
+        return {lvl: np.nan for lvl in LEVELS}, np.full(50, np.nan), None
 
     template = d[["zone", "date"]].copy()
     mu = {}
@@ -2587,18 +2587,28 @@ def fit_spline_mu(df, df_spline=5):
         tmp["score"] = s
         pred = fit.predict(tmp)
         
-        # Clamp predictions to avoid extreme extrapolation
-        # Use 2.0 * Y_max as upper bound
-        pred_clamped = np.clip(pred, 0, Y_max * 2.0)
-        
         # Check if clamping was active and warn if significant
         if np.any(pred > Y_max * 100):
-             print(f"Warning: Spline prediction for score {s} was extremely high ({pred.max()}). Clamped to {Y_max*2.0}.")
+             mu[s] = 0
+        else:
+             pred_clamped = np.clip(pred, 0, Y_max * 2.0)
+             mu[s] = pred_clamped.mean()
+             
+    # Dense evaluation for plotting
+    mu_dense = []
+    dense_x = np.linspace(0, 4, 50)
+    for s in dense_x:
+        tmp = template.copy()
+        tmp["score"] = s
+        pred = fit.predict(tmp)
+        if np.any(pred > Y_max * 100):
+            mu_dense.append(0.0)
+        else:
+            pred_clamped = np.clip(pred, 0, Y_max * 2.0)
+            mu_dense.append(pred_clamped.mean())
         
-        mu[s] = pred_clamped.mean()
-        
-    return mu, fit
-
+    return mu, np.array(mu_dense), fit
+    
 def compute_score_for_k(mu, sigma, k, lvl_counts,
                         min_n=1, min_k=1,
                         w_avg=1.0, w_min=1.0, w_neg=1.0, w_viol=1.0,  # FIXED WEIGHTS
@@ -2617,17 +2627,17 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         n_a = lvl_counts.get(a, 0)
         n_b = lvl_counts.get(b, 0)
         
-        if (n_a >= min_n) and (n_b >= min_n):
+        if n_a >= min_n and n_b >= min_n:
             delta = mu[b] - (mu[a] + min_gain)
             deltas.append(delta)
             coverage += min(n_a, n_b)
             
     # Filter based on min_k
     if coverage < min_k:
-        return np.nan, coverage
+        return 0.0, coverage
 
     if len(deltas) == 0:
-        return np.nan, coverage
+        return 0.0, coverage
 
     deltas = np.array(deltas)
     # Standardize by sigma
@@ -2645,17 +2655,18 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         - w_neg * neg_mass_std * (1 + w_viol * viol_rate)
     )
     
+    if np.isnan(score):
+        return 0.0, coverage
+    
     # 2026-02-13: Clamp score to avoid numerical explosion
     if np.abs(score) > 1e6:
         score = np.clip(score, -1e6, 1e6)
-
-
 
     # Coverage weighting (disabled as per comparison_analysis logic which doesn't seem to force it here)
     return score, coverage
 
 # Redefine evaluation_scoring to capture new defaults
-def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0, min_gain=[0.0, 0.0, 0.0, 0.0]):
+def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0, min_gain=[0.0, 0.0, 0.0, 0.0], n0=100):
     """
     Main function to evaluate monotonic comparison analysis.
     Returns score_high, score_low, coverage_k.
@@ -2677,12 +2688,10 @@ def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0
     if sigma < 1e-6 or np.isnan(sigma):
         sigma = 1.0 # arbitrary fallback
     
-
-    
-    mu, fit = fit_spline_mu(df, df_spline=df_spline)
+    mu, mu_dense, fit = fit_spline_mu(df, df_spline=df_spline)
     
     if all(np.isnan(list(mu.values()))):
-        return np.nan, np.nan, {}, {}
+        return np.nan, np.nan, {}, {}, np.nan, mu, mu_dense
     
     score_adj_k = {}
     coverage_k = {}
@@ -2706,8 +2715,14 @@ def evaluation_scoring(ypred, ytrue, dates, zones, df_spline=5, min_n=1, min_k=0
         score_low = 0.0
     if np.isnan(score_high):
         score_high = 0.0
+        
+    if np.sum(ytrue == 0) > n0:
+        c_min = float(np.min(np.round(ypred)))
+        score_min_class = -c_min * 2 + 1
+    else:
+        score_min_class = 0.0
     
-    return score_high, score_low, coverage_k, score_adj_k
+    return score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense
 
 def evaluate_metrics(y_true, y_pred, dates=None, zones=None, y_pred_probas=None):
     """
@@ -2752,10 +2767,11 @@ def evaluate_metrics(y_true, y_pred, dates=None, zones=None, y_pred_probas=None)
 
     try:
         if dates is not None and zones is not None:
-            score_high, score_low, coverage_k, score_adj_k = evaluation_scoring(y_pred, y_true, dates, zones)
+            score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense = evaluation_scoring(y_pred, y_true, dates, zones)
             results['score_high'] = score_high
             results['score_low'] = score_low
             results['score'] = score_high + score_low
+            results['score_min_class'] = score_min_class
             
             # Add coverage metrics
             for k, count in coverage_k.items():
@@ -2764,15 +2780,27 @@ def evaluate_metrics(y_true, y_pred, dates=None, zones=None, y_pred_probas=None)
             # Add score k metrics
             for k, val in score_adj_k.items():
                 results[f'score_k{k}'] = val
+                
+            # Add mu values
+            for k, val in mu.items():
+                results[f'mu_{int(k)}'] = val
+                
+            # Add dense mu values
+            for idx, val in enumerate(mu_dense):
+                results[f'mu_dense_{idx}'] = val
         else:
             results['score_high'] = np.nan
             results['score_low'] = np.nan
             results['score'] = np.nan
+            results['score_min_class'] = np.nan
+            for k in range(5):
+                results[f'mu_{k}'] = np.nan
     except Exception as e:
         print(f"Warning: monotonic scoring failed in evaluate_metrics: {e}")
         results['score_high'] = np.nan
         results['score_low'] = np.nan
         results['score'] = np.nan
+        results['score_min_class'] = np.nan
 
     # Calculer l'IoU et F1 pour chaque département
     IoU_scores = []

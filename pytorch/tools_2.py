@@ -326,7 +326,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'hidden_channels': 256,
             'gru_size': 128,
             'out_channels' : out_channels,
-            'end_channels': 64,
+            'end_channels': 128,
             'n_sequences': k_days + 1,
             'num_layers': 2,
             'device': device,
@@ -336,7 +336,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'dropout': dropout,
             'horizon': horizon,
             'spatialContext' : True,
-            'd_channels' : 64
+            'd_channels' : 128
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)

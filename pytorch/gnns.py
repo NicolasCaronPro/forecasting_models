@@ -1,5 +1,8 @@
 from forecasting_models.pytorch.utils import *
-from forecasting_models.pytorch.graphcast.graph_cast_net import *
+try:
+    from forecasting_models.pytorch.graphcast.graph_cast_net import *
+except ImportError:
+    pass
 from dgl.nn.pytorch.conv import GraphConv, GATConv
 from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU

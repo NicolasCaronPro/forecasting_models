@@ -7,8 +7,19 @@ from forecasting_models.pytorch.tools_2 import *
 from forecasting_models.pytorch.loss_utils import *
 from forecasting_models.pytorch.classification_loss import WeightedCrossEntropyLoss
 from typing import List
+from forecasting_models.pytorch.distribution_loss import PredictdEGPDLossTrunc
 
 ###################################### Ordinality ##########################################
+
+class DictWrapper:
+    def __init__(self, d):
+        self.d = d
+    def detach(self):
+        return self
+    def cpu(self):
+        return self
+    def numpy(self):
+        return self.d
 
 class BCELoss(torch.nn.Module):
     """Binomial Cross Entropy loss for ordinal classification.
@@ -486,7 +497,7 @@ class MCEAndWKLoss(torch.nn.modules.loss._WeightedLoss):
 
         return res
     
-    def get_learnable_parameters(self):
+    def get_learnable_parameterss(self):
         if not self.learned:
             return {}
         return {"C" : self.C}
@@ -600,7 +611,7 @@ class DiceAndWKLoss(torch.nn.modules.loss._WeightedLoss):
 
         return res
     
-    def get_learnable_parameters(self):
+    def get_learnable_parameterss(self):
         if not self.learned:
             return {}
         return {"C" : self.C}
@@ -714,7 +725,7 @@ class ForegroundDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
 
         return res
     
-    def get_learnable_parameters(self):
+    def get_learnable_parameterss(self):
         if not self.learned:
             return {}
 
@@ -933,7 +944,7 @@ class OrdinalDiceLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
 
         return res
     
-    def get_learnable_parameters(self):
+    def get_learnable_parameterss(self):
         if not self.learned:
             return {}
 
@@ -1578,7 +1589,7 @@ class FocalLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         
         return res
 
-    def get_learnable_parameters(self):
+    def get_learnable_parameterss(self):
         if not self.learned:
             return {}
         return {"C" : self.C}
@@ -2502,10 +2513,11 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         wk=None,
         # positive quantile targets (length C-2). For C=5 -> 3 thresholds.
         quantileedges=(0.5, 0.8, 0.95),
-        minbinn=3,
+        minbinn=1,
         gainsalpha=1.0,
+        gainsalpha0=1.0,
         gainsfloorfrac=0.1,
-        enforcegainmonotone=True,
+        enforcegainmonotone=False,
         id=None,
         enablelogs=True,
         lambdamu0 = 0.0,
@@ -2519,7 +2531,8 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         lambdace=0.0,
         class_weights=None,
         lambdagl=0.0,
-        cetype='crossentropy'  # 'crossentropy' or 'focal'
+        cetype='crossentropy',  # 'crossentropy' or 'focal'
+        alpha=0.25
     ):
         super().__init__()
         self.lambdadir = float(lambdadir)
@@ -2529,18 +2542,16 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
 
         # CE Loss Setup - choose between focal and cross-entropy
         if self.cetype == 'focal':
-            if class_weights is not None:
-                if not torch.is_tensor(class_weights):
-                    class_weights = torch.tensor(class_weights, dtype=torch.float32)
-                self.register_buffer('class_weights', class_weights)
-                self.ce_loss = FocalLoss(gamma=2.0, alpha=self.class_weights, reduction='mean')
-            else:
-                self.ce_loss = FocalLoss(gamma=2.0, alpha=1.0, reduction='mean')
+            self.ce_loss = FocalLoss(gamma=2.0, alpha=alpha, reduction='mean')
         elif self.cetype == 'crossentropy':
             self.ce_loss = WeightedCrossEntropyLoss(num_classes=num_classes)
+        elif self.cetype == "bce":
+            self.ce_loss = BCELoss(num_classes=num_classes)
+        elif self.cetype == 'wk':
+            self.ce_loss = WKLoss(num_classes=num_classes)
         else:
-            raise ValueError(f"cetype must be 'focal' or 'crossentropy', got '{cetype}'")
-
+            raise ValueError(f"cetype must be 'focal', 'crossentropy', 'bce', 'wk' or 'pdegpd', got '{cetype}'")
+                        
         self.id = id
         self.C = int(num_classes)
         if self.C < 2:
@@ -2557,6 +2568,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         self.quantileedges = tuple(float(x) for x in quantileedges)
         self.minbinn = int(minbinn)
         self.gainsalpha = float(gainsalpha)
+        self.gainsalpha0 = float(gainsalpha0)
         self.gainsfloorfrac = float(gainsfloorfrac)
         self.enforcegainmonotone = bool(enforcegainmonotone)
 
@@ -2593,6 +2605,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             "quantileedges": self.quantileedges,
             "minbinn": self.minbinn,
             "gainsalpha": self.gainsalpha,
+            "gainsalpha0": self.gainsalpha0,
             "gainsfloorfrac": self.gainsfloorfrac,
             "enforcegainmonotone": self.enforcegainmonotone,
             "enablelogs": self.enablelogs,
@@ -2619,58 +2632,70 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
     # ------------------------------------------------------------
     # Adaptive thresholds on y_pos
     # ------------------------------------------------------------
-    def _adaptive_positive_thresholds(self, y_pos, qe_pos):
+    def _adaptive_positive_thresholds(self, y_pos, qe_pos, min_pos=3):
         """
-        qe_pos: list/tuple of target quantiles (len = C-2).
-        For each target, compute threshold. If threshold does not strictly increase
-        vs previous threshold, push quantile upward by q_step until it does (cap q_max).
+        Adapted from QuantileRiskZerosHandle algorithm.
+        
+        qe_pos: list/tuple of target quantiles (len = C-2) - used to determine n_thresholds.
+
+        Algorithm:
+        - Start at q_start (first value in qe_pos, or 0.5)
+        - Increment by q_step (0.05) until we have C-2 distinct thresholds
+        - Cap at q_max = dynamic (based on sample size to ensure min_pos samples in last bin)
+        - Ensure each threshold is strictly different from the previous
 
         Returns:
           thresholds: np.float32 (C-2,)
           used_q: np.float32 (C-2,)
-          forced_flat: bool (True if we had to freeze remaining thresholds)
+          forced_flat: bool (True if we couldn't find enough distinct thresholds)
         """
-        q_max = 0.99
+        n_thresholds = len(qe_pos)  # Should be C-2
+        q_start = float(qe_pos[0]) if qe_pos else 0.5
+        
+        # Dynamic q_max calculation
+        n_pos = len(y_pos)
+        if n_pos > 0:
+            # We want roughly min_pos samples in the tail (> q_max)
+            # q_max should be approx 1 - (min_pos / n_pos)
+            # We use a slight margin (min_pos - 0.5)
+            q_max_limit = 1.0 - (max(1.0, float(min_pos) - 0.5) / (n_pos + 1e-9))
+            q_max = min(0.999, q_max_limit)
+            q_max = max(0.9, q_max) # Don't go below 0.9
+        else:
+            q_max = 0.999
+            
         q_step = 0.05
-        tol = 0.0
 
         thresholds = []
         used_q = []
-        last_t = None
-        forced_flat = False
+        q = q_start
 
-        for q0 in qe_pos:
-            q_try = float(q0)
-            if q_try <= 0.0 or q_try >= 1.0:
-                raise ValueError("quantileedges doit être dans ]0,1[ (reçu %s)" % str(qe_pos))
+        # First threshold
+        if q < 1.0:
+            first_val = float(np.quantile(y_pos, q))
+            thresholds.append(first_val)
+            used_q.append(q)
 
-            if forced_flat:
-                thresholds.append(float(last_t))
-                used_q.append(float(q_max))
-                continue
+        # Subsequent thresholds - increment until we have enough distinct values
+        while len(thresholds) < n_thresholds and q < 1.0:
+            q = min(q + q_step, q_max)
+            val = float(np.quantile(y_pos, q))
 
-            t = float(np.quantile(y_pos, q_try))
+            # Only add if strictly different from previous
+            if val != thresholds[-1]:
+                thresholds.append(val)
+                used_q.append(q)
 
-            if last_t is not None and t <= last_t + tol:
-                q = q_try
-                t_new = t
-                while q < q_max - 1e-12:
-                    q = min(q_max, q + q_step)
-                    t_new = float(np.quantile(y_pos, q))
-                    if t_new > last_t + tol:
-                        break
+            if q >= q_max:
+                break
 
-                if t_new > last_t + tol:
-                    q_try = q
-                    t = t_new
-                else:
-                    forced_flat = True
-                    q_try = q_max
-                    t = float(last_t)
+        # Check if we found enough distinct thresholds
+        forced_flat = len(thresholds) < n_thresholds
 
-            thresholds.append(float(t))
-            used_q.append(float(q_try))
-            last_t = float(t)
+        # If we couldn't find enough thresholds, pad with the last value
+        while len(thresholds) < n_thresholds:
+            thresholds.append(thresholds[-1] if thresholds else 0.0)
+            used_q.append(q_max)
 
         return (
             np.array(thresholds, dtype=np.float32),
@@ -2926,55 +2951,46 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
     # -------------------------------- ----------------------------
     # Build bins: 0 + (C-1) positive bins
     # ------------------------------------------------------------
-    def _compute_bins_and_ok_positive_quantiles(
+    def _compute_bins_given_thresholds(
         self,
         y_sub,
-        qe_pos,
+        qs_pos,
         minB,
         require_positive_bins=True,
-        min_pos_per_bin=3,
-        tag=""
+        min_pos_per_bin=1
     ):
         """
-        Returns (bin_means, ok, qs_pos, used_q, forced_flat, counts)
-
-        - bin 0: y <= 0
-        - bins 1..C-1: defined on y_pos with thresholds qs_pos (len C-2)
-          bin1: (0, q1]
-          ...
-          bin(C-1): (q_last, +inf)
+        Calculates bin means and counts for a given set of thresholds.
         """
         y_sub = y_sub[np.isfinite(y_sub)]
         if y_sub.size == 0:
-            return None, False, None, None, False, None
-
+            return None, False, None
+            
         y0 = y_sub[y_sub <= 0]
         y_pos = y_sub[y_sub > 0]
-        if y_pos.size == 0:
-            return None, False, None, None, False, None
-
-        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos)
-
-        # bins
-        bins = []
-        # bin0
-        bins.append(y0)
-
-        # positive bins
-        # bin1: y_pos <= q1
-        q1 = qs_pos[0]
-        bins.append(y_pos[y_pos <= q1])
-
-        # middle: (q_{i-1}, q_i]
-        for i in range(1, len(qs_pos)):
-            lo = qs_pos[i - 1]
-            hi = qs_pos[i]
-            bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
-
-        # last: > q_last
-        q_last = qs_pos[-1]
-        bins.append(y_pos[y_pos > q_last])
         
+        bins = []
+        bins.append(y0)
+        
+        if y_pos.size > 0:
+            # bin1: y_pos <= q1
+            q1 = qs_pos[0]
+            bins.append(y_pos[y_pos <= q1])
+
+            # middle: (q_{i-1}, q_i]
+            for i in range(1, len(qs_pos)):
+                lo = qs_pos[i - 1]
+                hi = qs_pos[i]
+                bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
+
+            # last: > q_last
+            q_last = qs_pos[-1]
+            bins.append(y_pos[y_pos > q_last])
+        else:
+            # If no positive values, all positive bins are empty
+            for _ in range(len(qs_pos) + 1):
+                bins.append(np.array([], dtype=y_sub.dtype))
+
         # means & counts
         bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
         counts = np.array([int(b.size) for b in bins], dtype=np.int32)
@@ -2995,6 +3011,45 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         if ok and require_positive_bins:
             if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
                 ok = False
+                
+        return bin_means, bool(ok), counts
+
+    def _compute_bins_and_ok_positive_quantiles(
+        self,
+        y_sub,
+        qe_pos,
+        minB,
+        require_positive_bins=True,
+        min_pos_per_bin=1,
+        tag=""
+    ):
+        """
+        Returns (bin_means, ok, qs_pos, used_q, forced_flat, counts)
+
+        - bin 0: y <= 0
+        - bins 1..C-1: defined on y_pos with thresholds qs_pos (len C-2)
+          bin1: (0, q1]
+          ...
+          bin(C-1): (q_last, +inf)
+        """
+        y_sub_fin = y_sub[np.isfinite(y_sub)]
+        if y_sub_fin.size == 0:
+            return None, False, None, None, False, None
+
+        y_pos = y_sub_fin[y_sub_fin > 0]
+        if y_pos.size == 0:
+            return None, False, None, None, False, None
+
+        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos, min_pos=min_pos_per_bin)
+
+        bin_means, ok, counts = self._compute_bins_given_thresholds(
+            y_sub_fin, qs_pos, minB, 
+            require_positive_bins=require_positive_bins, 
+            min_pos_per_bin=min_pos_per_bin
+        )
+
+        if bin_means is None:
+            return None, False, qs_pos, used_q, forced_flat, None
 
         self._log(
             f"[BINS {tag}] means={bin_means} counts={counts} ok={ok} "
@@ -3036,6 +3091,9 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         if self.enforcegainmonotone:
             gains = np.maximum.accumulate(gains).astype(np.float32)
 
+        if gains.size > 0:
+            gains[0] *= self.gainsalpha0
+
         self._log(
             f"[GAINS {tag}] diffs={diffs} base={base} q50_pos={q50} q95_pos={q95} "
             f"spread={spread} floor={floor} final={gains}"
@@ -3053,7 +3111,7 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
         quantileedges=None,
         minbinn=None,
         require_positive_bins=True,
-        min_pos_per_bin=3,
+        min_pos_per_bin=None,
         enforcegainmonotone=None,
     ):
 
@@ -3076,6 +3134,9 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             raise ValueError("quantileedges (positifs) doit avoir longueur C-2=%d" % (self.C - 2))
 
         minB = self.minbinn if minbinn is None else int(minbinn)
+        if min_pos_per_bin is None:
+            min_pos_per_bin = minB
+
         if enforcegainmonotone is not None:
             self.enforcegainmonotone = bool(enforcegainmonotone)
 
@@ -3108,12 +3169,17 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
             self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
         else:
-            raise ValueError('Can t calcule bin means')
-            # robust fallback
+            # robust fallback when bins cannot be calculated
+            self._log("[GLOBAL] Cannot calculate bins, using fallback scale-based gains")
             yfin = y[np.isfinite(y)]
             scale = float(np.std(yfin)) if yfin.size > 1 else 1.0
             global_g = np.full(self.C - 1, 0.05 * scale, dtype=np.float32)
+            global_spread = float(scale)
             self._log("[GLOBAL] fallback scale-based gains:", global_g)
+            # Create dummy thresholds for consistency
+            qs_g = np.linspace(0.5, 0.95, self.C - 2, dtype=np.float32)
+            self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
+            self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
 
         self.global_gains = torch.tensor(global_g, dtype=torch.float32, device=self.global_gains.device)
         self._log("[GLOBAL GAINS] tensor:", self.global_gains)
@@ -3129,12 +3195,14 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             y_cl = y[idx]
 
             self._log(f"\n--- cluster {cl} (n={len(idx)}) ---")
-            bm, ok, qs, usedq, flat, cnt = self._compute_bins_and_ok_positive_quantiles(
-                y_cl, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                tag="CL_%s" % str(cl)
-            )
             
-            if bm is not None and ok:
+            # FORCE GLOBAL DISCRETIZATION: use global thresholds qs_g
+            bm, ok, cnt = self._compute_bins_given_thresholds(
+                y_cl, qs_g, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
+            )
+            qs, usedq, flat = qs_g, usedq_g, flat_g
+
+            if ok:
                 g_cl, spread_cl = self._gains_from_bin_means(bm, y_cl, tag="CL_%s" % str(cl))
             else:
                 pooled = False
@@ -3143,42 +3211,38 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
                     if g_id is not None and g_id in idx_by_group:
                         idx_pool = idx_by_group[g_id]
                         y_pool = y[idx_pool]
-                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)})")
+                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)}) (global discr)")
 
-                        bm2, ok2, qs2, usedq2, flat2, cnt2 = self._compute_bins_and_ok_positive_quantiles(
-                            y_pool, qe_pos, minB,
-                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                            tag="POOL_G%s" % str(g_id)
+                        bm2, ok2, cnt2 = self._compute_bins_given_thresholds(
+                            y_pool, qs_g, minB,
+                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
                         )
-                        if bm2 is not None and ok2:
+                        if ok2:
                             g_cl, spread_cl = self._gains_from_bin_means(bm2, y_pool, tag="POOL_G%s" % str(g_id))
                             pooled = True
                         else:
                             self._log(f"[CL {cl}] pooling failed -> fallback global gains")
                             g_cl = global_g
+                            spread_cl = global_spread
                     else:
                         self._log(f"[CL {cl}] no valid similar group -> fallback global gains")
                         g_cl = global_g
+                        spread_cl = global_spread
                 else:
                     self._log(f"[CL {cl}] no similar_cluster_ids -> fallback global gains")
                     g_cl = global_g
+                    spread_cl = global_spread
 
                 if pooled:
-                    self._log(f"[CL {cl}] used pooled gains")
+                    self._log(f"[CL {cl}] used pooled gains (global discr)")
                 else:
-                    self._log(f"[CL {cl}] used global gains")
+                    self._log(f"[CL {cl}] used global gains (global discr)")
 
             if self.enforcegainmonotone:
                 g_cl = np.maximum.accumulate(np.asarray(g_cl, dtype=np.float32)).astype(np.float32)
-
+            
             self.gain_k[cl] = torch.tensor(g_cl, dtype=torch.float32, device=self.global_gains.device)
             self.scale_k[cl] = torch.tensor(spread_cl, dtype=torch.float32, device=self.global_gains.device)
-            
-            # Store per-cluster thresholds for CE discretization
-            # If pooling/fallback used, we might not have specific qs.
-            # If ok is True, we have qs.
-            # If pooled (ok2 is True), we have qs2.
-            # Else fallback global -> global_thresholds.
             
             if ok:
                  res_qs = qs
@@ -3510,16 +3574,6 @@ class OrdinalMonotonicLossNoCoverageWithGains(nn.Module):
             agg_cl['mu0_mean'] = np.mean(mu0_vals) if mu0_vals else 0.0
             
             aggregated[cl_id] = agg_cl
-
-        class DictWrapper:
-            def __init__(self, d):
-                self.d = d
-            def detach(self):
-                return self
-            def cpu(self):
-                return self
-            def numpy(self):
-                return self.d
 
         return [('ordinal_stats', DictWrapper(aggregated))]
         
@@ -3983,10 +4037,11 @@ class OMMSE(nn.Module):
         mushrinkalpha=1.0,
         eps=1e-8,
         quantileedges=(0.5, 0.8, 0.95),
-        minbinn=3,
+        minbinn=1,
         gainsalpha=1.0,
+        gainsalpha0=1.0,
         gainsfloorfrac=0.1,
-        enforcegainmonotone=True,
+        enforcegainmonotone=False,
         id=None,
         enablelogs=True,
         addglobal=False,
@@ -4008,6 +4063,7 @@ class OMMSE(nn.Module):
         self.quantileedges = tuple(float(x) for x in quantileedges)
         self.minbinn = int(minbinn)
         self.gainsalpha = float(gainsalpha)
+        self.gainsalpha0 = float(gainsalpha0)
         self.gainsfloorfrac = float(gainsfloorfrac)
         self.enforcegainmonotone = bool(enforcegainmonotone)
         self.enablelogs = bool(enablelogs)
@@ -4017,6 +4073,7 @@ class OMMSE(nn.Module):
         self.gain_k = {}
         self.register_buffer("global_gains", torch.zeros(self.C - 1, dtype=torch.float32))
         self.register_buffer("global_scale", torch.tensor(1.0, dtype=torch.float32))
+        self.register_buffer("global_thresholds", torch.zeros(self.C - 2, dtype=torch.float32))
         
         self.call_preprocess = False
     
@@ -4028,6 +4085,7 @@ class OMMSE(nn.Module):
             "quantileedges": self.quantileedges,
             "minbinn": self.minbinn,
             "gainsalpha": self.gainsalpha,
+            "gainsalpha0": self.gainsalpha0,
             "gainsfloorfrac": self.gainsfloorfrac,
             "enforcegainmonotone": self.enforcegainmonotone,
             "enablelogs": self.enablelogs,
@@ -4040,108 +4098,154 @@ class OMMSE(nn.Module):
         if self.enablelogs:
             print(*args)
     
-    def _adaptive_positive_thresholds(self, y_pos, qe_pos):
-        """Copié de OrdinalMonotonicLossNoCoverageWithGains"""
-        q_max = 0.99
-        q_step = 0.05
-        tol = 0.0
+    def _adaptive_positive_thresholds(self, y_pos, qe_pos, min_pos=3):
+        """
+        Adapted from QuantileRiskZerosHandle algorithm.
         
+        qe_pos: list/tuple of target quantiles (len = C-2) - used to determine n_thresholds.
+        
+        Algorithm:
+        - Start at q_start (first value in qe_pos, or 0.5)
+        - Increment by q_step (0.05) until we have C-2 distinct thresholds
+        - Cap at q_max = dynamic (based on sample size to ensure min_pos samples in last bin)
+        - Ensure each threshold is strictly different from the previous
+
+        Returns:
+          thresholds: np.float32 (C-2,)
+          used_q: np.float32 (C-2,)
+          forced_flat: bool (True if we couldn't find enough distinct thresholds)
+        """
+        n_thresholds = len(qe_pos)  # Should be C-2
+        q_start = float(qe_pos[0]) if qe_pos else 0.5
+        
+        # Dynamic q_max calculation
+        n_pos = len(y_pos)
+        if n_pos > 0:
+            # We want roughly min_pos samples in the tail (> q_max)
+            # q_max should be approx 1 - (min_pos / n_pos)
+            # We use a slight margin (min_pos - 0.5)
+            q_max_limit = 1.0 - (max(1.0, float(min_pos) - 0.5) / (n_pos + 1e-9))
+            q_max = min(0.999, q_max_limit)
+            q_max = max(0.9, q_max) # Don't go below 0.9
+        else:
+            q_max = 0.999
+            
+        q_step = 0.05
+
         thresholds = []
         used_q = []
-        last_t = None
-        forced_flat = False
-        
-        for q0 in qe_pos:
-            q_try = float(q0)
-            if q_try <= 0.0 or q_try >= 1.0:
-                raise ValueError("quantileedges doit être dans ]0,1[ (reçu %s)" % str(qe_pos))
-            
-            if forced_flat:
-                thresholds.append(float(last_t))
-                used_q.append(float(q_max))
-                continue
-            
-            t = float(np.quantile(y_pos, q_try))
-            
-            if last_t is not None and t <= last_t + tol:
-                q = q_try
-                t_new = t
-                while q < q_max - 1e-12:
-                    q = min(q_max, q + q_step)
-                    t_new = float(np.quantile(y_pos, q))
-                    if t_new > last_t + tol:
-                        break
-                
-                if t_new > last_t + tol:
-                    q_try = q
-                    t = t_new
-                else:
-                    forced_flat = True
-                    q_try = q_max
-                    t = float(last_t)
-            
-            thresholds.append(float(t))
-            used_q.append(float(q_try))
-            last_t = float(t)
-        
+        q = q_start
+
+        # First threshold
+        if q < 1.0:
+            first_val = float(np.quantile(y_pos, q))
+            thresholds.append(first_val)
+            used_q.append(q)
+
+        # Subsequent thresholds - increment until we have enough distinct values
+        while len(thresholds) < n_thresholds and q < 1.0:
+            q = min(q + q_step, q_max)
+            val = float(np.quantile(y_pos, q))
+
+            # Only add if strictly different from previous
+            if val != thresholds[-1]:
+                thresholds.append(val)
+                used_q.append(q)
+
+            if q >= q_max:
+                break
+
+        # Check if we found enough distinct thresholds
+        forced_flat = len(thresholds) < n_thresholds
+
+        # If we couldn't find enough thresholds, pad with the last value
+        while len(thresholds) < n_thresholds:
+            thresholds.append(thresholds[-1] if thresholds else 0.0)
+            used_q.append(q_max)
+
         return (
             np.array(thresholds, dtype=np.float32),
             np.array(used_q, dtype=np.float32),
             bool(forced_flat),
         )
     
+    def _compute_bins_given_thresholds(
+        self,
+        y_sub,
+        qs_pos,
+        minB,
+        require_positive_bins=True,
+        min_pos_per_bin=1
+    ):
+        """Calculates bin means and counts for a given set of thresholds."""
+        y_sub = y_sub[np.isfinite(y_sub)]
+        if y_sub.size == 0:
+            return None, False, None
+            
+        y0 = y_sub[y_sub <= 0]
+        y_pos = y_sub[y_sub > 0]
+        
+        bins = []
+        bins.append(y0)
+        
+        if y_pos.size > 0:
+            q1 = qs_pos[0]
+            bins.append(y_pos[y_pos <= q1])
+            for i in range(1, len(qs_pos)):
+                lo = qs_pos[i - 1]
+                hi = qs_pos[i]
+                bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
+            q_last = qs_pos[-1]
+            bins.append(y_pos[y_pos > q_last])
+        else:
+            for _ in range(len(qs_pos) + 1):
+                bins.append(np.array([], dtype=y_sub.dtype))
+
+        bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
+        counts = np.array([int(b.size) for b in bins], dtype=np.int32)
+        pos_counts = counts.copy()
+        pos_counts[0] = 0
+
+        ok = True
+        if not np.all(np.diff(qs_pos) > 0):
+            ok = False
+        if ok and not np.all(counts[1:] >= int(minB)):
+            ok = False
+        if ok and require_positive_bins:
+            if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
+                ok = False
+                
+        return bin_means, bool(ok), counts
+
     def _compute_bins_and_ok_positive_quantiles(
         self,
         y_sub,
         qe_pos,
         minB,
         require_positive_bins=True,
-        min_pos_per_bin=3,
+        min_pos_per_bin=1,
         tag=""
     ):
-        """Copié de OrdinalMonotonicLossNoCoverageWithGains"""
-        y_sub = y_sub[np.isfinite(y_sub)]
-        if y_sub.size == 0:
+        """Returns (bin_means, ok, qs_pos, used_q, forced_flat, counts)"""
+        y_sub_fin = y_sub[np.isfinite(y_sub)]
+        if y_sub_fin.size == 0:
             return None, False, None, None, False, None
-        
-        y0 = y_sub[y_sub <= 0]
-        y_pos = y_sub[y_sub > 0]
+
+        y_pos = y_sub_fin[y_sub_fin > 0]
         if y_pos.size == 0:
             return None, False, None, None, False, None
-        
-        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos)
-        
-        bins = []
-        bins.append(y0)
-        
-        q1 = qs_pos[0]
-        bins.append(y_pos[y_pos <= q1])
-        
-        for i in range(1, len(qs_pos)):
-            lo = qs_pos[i - 1]
-            hi = qs_pos[i]
-            bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
-        
-        q_last = qs_pos[-1]
-        bins.append(y_pos[y_pos > q_last])
-        
-        bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
-        counts = np.array([int(b.size) for b in bins], dtype=np.int32)
-        pos_counts = counts.copy()
-        pos_counts[0] = 0
-        
-        ok = True
-        
-        if not np.all(np.diff(qs_pos) > 0):
-            ok = False
-        
-        if ok and not np.all(counts[1:] >= int(minB)):
-            ok = False
-        
-        if ok and require_positive_bins:
-            if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
-                ok = False
-        
+
+        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos, min_pos=min_pos_per_bin)
+
+        bin_means, ok, counts = self._compute_bins_given_thresholds(
+            y_sub_fin, qs_pos, minB, 
+            require_positive_bins=require_positive_bins, 
+            min_pos_per_bin=min_pos_per_bin
+        )
+
+        if bin_means is None:
+            return None, False, qs_pos, used_q, forced_flat, None
+
         self._log(
             f"[BINS {tag}] means={bin_means} counts={counts} ok={ok} "
             f"qs_pos={qs_pos} used_q={used_q} forced_flat={forced_flat}"
@@ -4166,9 +4270,10 @@ class OMMSE(nn.Module):
         
         base = self.gainsalpha * diffs
         gains = np.maximum(base, floor).astype(np.float32)
-        
         if self.enforcegainmonotone:
             gains = np.maximum.accumulate(gains).astype(np.float32)
+            
+        if gains.size > 0: gains[0] *= self.gainsalpha0
         
         self._log(
             f"[GAINS {tag}] diffs={diffs} base={base} floor={floor} final={gains}"
@@ -4183,7 +4288,7 @@ class OMMSE(nn.Module):
         quantileedges=None,
         minbinn=None,
         require_positive_bins=True,
-        min_pos_per_bin=3,
+        min_pos_per_bin=None,
         enforcegainmonotone=None,
     ):
         """Preprocessing: calculate bins and gains per cluster"""
@@ -4206,6 +4311,9 @@ class OMMSE(nn.Module):
             raise ValueError("quantileedges (positifs) doit avoir longueur C-2=%d" % (self.C - 2))
         
         minB = self.minbinn if minbinn is None else int(minbinn)
+        if min_pos_per_bin is None:
+            min_pos_per_bin = minB
+
         if enforcegainmonotone is not None:
             self.enforcegainmonotone = bool(enforcegainmonotone)
         
@@ -4237,14 +4345,27 @@ class OMMSE(nn.Module):
             self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
             self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
         else:
-            raise ValueError('Cannot calculate bin means')
-        
+            # robust fallback when bins cannot be calculated
+            self._log("[GLOBAL] Cannot calculate bins, using fallback scale-based gains")
+            yfin = y[np.isfinite(y)]
+            scale = float(np.std(yfin)) if yfin.size > 1 else 1.0
+            global_g = np.full(self.C - 1, 0.05 * scale, dtype=np.float32)
+            global_spread = float(scale)
+            self._log("[GLOBAL] fallback scale-based gains:", global_g)
+            # Create dummy thresholds for consistency
+            qs_g = np.linspace(0.5, 0.95, self.C - 2, dtype=np.float32)
+            self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
+            self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
+            usedq_g = np.full(self.C - 2, 0.5, dtype=np.float32) # Dummy
+            flat_g = True
+
         self.global_gains = torch.tensor(global_g, dtype=torch.float32, device=self.global_gains.device)
         self._log("[GLOBAL GAINS] tensor:", self.global_gains)
         
         # PER CLUSTER
         self.gain_k = {}
         self.scale_k = {}
+        self.thresholds_k = {}
         self._log("==== CLUSTER GAINS ====")
         
         for cl in unique_clusters:
@@ -4252,12 +4373,14 @@ class OMMSE(nn.Module):
             y_cl = y[idx]
             
             self._log(f"\n--- cluster {cl} (n={len(idx)}) ---")
-            bm, ok, qs, usedq, flat, cnt = self._compute_bins_and_ok_positive_quantiles(
-                y_cl, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                tag="CL_%s" % str(cl)
-            )
             
-            if bm is not None and ok:
+            # FORCE GLOBAL DISCRETIZATION: use global thresholds qs_g
+            bm, ok, cnt = self._compute_bins_given_thresholds(
+                y_cl, qs_g, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
+            )
+            qs, usedq, flat = qs_g, usedq_g, flat_g
+
+            if ok:
                 g_cl, spread_cl = self._gains_from_bin_means(bm, y_cl, tag="CL_%s" % str(cl))
             else:
                 pooled = False
@@ -4266,14 +4389,13 @@ class OMMSE(nn.Module):
                     if g_id is not None and g_id in idx_by_group:
                         idx_pool = idx_by_group[g_id]
                         y_pool = y[idx_pool]
-                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)})")
-                        
-                        bm2, ok2, qs2, usedq2, flat2, cnt2 = self._compute_bins_and_ok_positive_quantiles(
-                            y_pool, qe_pos, minB,
-                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                            tag="POOL_G%s" % str(g_id)
+                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)}) (global discr)")
+
+                        bm2, ok2, cnt2 = self._compute_bins_given_thresholds(
+                            y_pool, qs_g, minB,
+                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
                         )
-                        if bm2 is not None and ok2:
+                        if ok2:
                             g_cl, spread_cl = self._gains_from_bin_means(bm2, y_pool, tag="POOL_G%s" % str(g_id))
                             pooled = True
                         else:
@@ -4288,12 +4410,18 @@ class OMMSE(nn.Module):
                     self._log(f"[CL {cl}] no similar_cluster_ids -> fallback global gains")
                     g_cl = global_g
                     spread_cl = global_spread
+
+                if pooled:
+                    self._log(f"[CL {cl}] used pooled gains (global discr)")
+                else:
+                    self._log(f"[CL {cl}] used global gains (global discr)")
             
             if self.enforcegainmonotone:
                 g_cl = np.maximum.accumulate(np.asarray(g_cl, dtype=np.float32)).astype(np.float32)
             
             self.gain_k[cl] = torch.tensor(g_cl, dtype=torch.float32, device=self.global_gains.device)
             self.scale_k[cl] = torch.tensor(spread_cl, dtype=torch.float32, device=self.global_gains.device)
+            self.thresholds_k[cl] = torch.tensor(qs, dtype=torch.float32, device=self.global_gains.device)
             
             self._log(f"[CLUSTER GAINS] {cl} -> {g_cl}")
     
@@ -4301,7 +4429,6 @@ class OMMSE(nn.Module):
         """Calcul des mu par classe"""
         if not torch.is_floating_point(y):
             y = y.to(dtype=p.dtype)
-        
         if sw is not None:
             sw = sw.to(device=p.device, dtype=p.dtype).clamp_min(self.eps)
             p_eff = p * sw.unsqueeze(1)
@@ -4471,16 +4598,6 @@ class OMMSE(nn.Module):
                     agg_cl[k] = None
             
             aggregated[cl_id] = agg_cl
-        
-        class DictWrapper:
-            def __init__(self, d):
-                self.d = d
-            def detach(self):
-                return self
-            def cpu(self):
-                return self
-            def numpy(self):
-                return self.d
         
         return [('ordinal_stats', DictWrapper(aggregated))]
 
@@ -5069,10 +5186,11 @@ class CORNWithGains(nn.Module):
         eps=1e-8,
         wk=None,
         quantileedges=(0.5, 0.8, 0.95),
-        minbinn=3,
+        minbinn=1,
         gainsalpha=1.0,
+        gainsalpha0=1.0,
         gainsfloorfrac=0.1,
-        enforcegainmonotone=True,
+        enforcegainmonotone=False,
         id=None,
         enablelogs=True,
         lambdamu0 = 0.0,
@@ -5085,7 +5203,7 @@ class CORNWithGains(nn.Module):
         diralpha=1.05,
         lambdace=0.0,
         lambdagl=0.0,
-        cetype='focal',
+        cetype='cornfl',
         alpha=0.25,
         gamma=2
     ):
@@ -5096,8 +5214,8 @@ class CORNWithGains(nn.Module):
         self.cetype = str(cetype).lower()
 
         # CE Loss Setup - choose between CORN focal and CORN cross-entropy
-        if self.cetype == 'focal':
-            self.ce_loss = CORNFocalLoss(num_classes=num_classes, alpha=alpha, gamma=gammma)
+        if self.cetype == 'cornfl':
+            self.ce_loss = CORNFocalLoss(num_classes=num_classes, alpha=alpha, gamma=gamma)
         elif self.cetype == 'corn':
             self.ce_loss = CORNLoss(num_classes=num_classes)
         else:
@@ -5119,6 +5237,7 @@ class CORNWithGains(nn.Module):
         self.quantileedges = tuple(float(x) for x in quantileedges)
         self.minbinn = int(minbinn)
         self.gainsalpha = float(gainsalpha)
+        self.gainsalpha0 = float(gainsalpha0)
         self.gainsfloorfrac = float(gainsfloorfrac)
         self.enforcegainmonotone = bool(enforcegainmonotone)
 
@@ -5155,6 +5274,7 @@ class CORNWithGains(nn.Module):
             "quantileedges": self.quantileedges,
             "minbinn": self.minbinn,
             "gainsalpha": self.gainsalpha,
+            "gainsalpha0": self.gainsalpha0,
             "gainsfloorfrac": self.gainsfloorfrac,
             "enforcegainmonotone": self.enforcegainmonotone,
             "enablelogs": self.enablelogs,
@@ -5181,58 +5301,70 @@ class CORNWithGains(nn.Module):
     # ------------------------------------------------------------
     # Adaptive thresholds on y_pos
     # ------------------------------------------------------------
-    def _adaptive_positive_thresholds(self, y_pos, qe_pos):
+    def _adaptive_positive_thresholds(self, y_pos, qe_pos, min_pos=3):
         """
-        qe_pos: list/tuple of target quantiles (len = C-2).
-        For each target, compute threshold. If threshold does not strictly increase
-        vs previous threshold, push quantile upward by q_step until it does (cap q_max).
+        Adapted from QuantileRiskZerosHandle algorithm.
+        
+        qe_pos: list/tuple of target quantiles (len = C-2) - used to determine n_thresholds.
+        
+        Algorithm:
+        - Start at q_start (first value in qe_pos, or 0.5)
+        - Increment by q_step (0.05) until we have C-2 distinct thresholds
+        - Cap at q_max = dynamic (based on sample size to ensure min_pos samples in last bin)
+        - Ensure each threshold is strictly different from the previous
 
         Returns:
           thresholds: np.float32 (C-2,)
           used_q: np.float32 (C-2,)
-          forced_flat: bool (True if we had to freeze remaining thresholds)
+          forced_flat: bool (True if we couldn't find enough distinct thresholds)
         """
-        q_max = 0.99
+        n_thresholds = len(qe_pos)  # Should be C-2
+        q_start = float(qe_pos[0]) if qe_pos else 0.5
+        
+        # Dynamic q_max calculation
+        n_pos = len(y_pos)
+        if n_pos > 0:
+            # We want roughly min_pos samples in the tail (> q_max)
+            # q_max should be approx 1 - (min_pos / n_pos)
+            # We use a slight margin (min_pos - 0.5)
+            q_max_limit = 1.0 - (max(1.0, float(min_pos) - 0.5) / (n_pos + 1e-9))
+            q_max = min(0.999, q_max_limit)
+            q_max = max(0.9, q_max) # Don't go below 0.9
+        else:
+            q_max = 0.999
+            
         q_step = 0.05
-        tol = 0.0
 
         thresholds = []
         used_q = []
-        last_t = None
-        forced_flat = False
+        q = q_start
 
-        for q0 in qe_pos:
-            q_try = float(q0)
-            if q_try <= 0.0 or q_try >= 1.0:
-                raise ValueError("quantileedges doit être dans ]0,1[ (reçu %s)" % str(qe_pos))
+        # First threshold
+        if q < 1.0:
+            first_val = float(np.quantile(y_pos, q))
+            thresholds.append(first_val)
+            used_q.append(q)
 
-            if forced_flat:
-                thresholds.append(float(last_t))
-                used_q.append(float(q_max))
-                continue
+        # Subsequent thresholds - increment until we have enough distinct values
+        while len(thresholds) < n_thresholds and q < 1.0:
+            q = min(q + q_step, q_max)
+            val = float(np.quantile(y_pos, q))
 
-            t = float(np.quantile(y_pos, q_try))
+            # Only add if strictly different from previous
+            if val != thresholds[-1]:
+                thresholds.append(val)
+                used_q.append(q)
 
-            if last_t is not None and t <= last_t + tol:
-                q = q_try
-                t_new = t
-                while q < q_max - 1e-12:
-                    q = min(q_max, q + q_step)
-                    t_new = float(np.quantile(y_pos, q))
-                    if t_new > last_t + tol:
-                        break
+            if q >= q_max:
+                break
 
-                if t_new > last_t + tol:
-                    q_try = q
-                    t = t_new
-                else:
-                    forced_flat = True
-                    q_try = q_max
-                    t = float(last_t)
+        # Check if we found enough distinct thresholds
+        forced_flat = len(thresholds) < n_thresholds
 
-            thresholds.append(float(t))
-            used_q.append(float(q_try))
-            last_t = float(t)
+        # If we couldn't find enough thresholds, pad with the last value
+        while len(thresholds) < n_thresholds:
+            thresholds.append(thresholds[-1] if thresholds else 0.0)
+            used_q.append(q_max)
 
         return (
             np.array(thresholds, dtype=np.float32),
@@ -5488,81 +5620,88 @@ class CORNWithGains(nn.Module):
     # -------------------------------- ----------------------------
     # Build bins: 0 + (C-1) positive bins
     # ------------------------------------------------------------
+    def _compute_bins_given_thresholds(
+        self,
+        y_sub,
+        qs_pos,
+        minB,
+        require_positive_bins=True,
+        min_pos_per_bin=1
+    ):
+        """Calculates bin means and counts for a given set of thresholds."""
+        y_sub = y_sub[np.isfinite(y_sub)]
+        if y_sub.size == 0:
+            return None, False, None
+            
+        y0 = y_sub[y_sub <= 0]
+        y_pos = y_sub[y_sub > 0]
+        
+        bins = []
+        bins.append(y0)
+        
+        if y_pos.size > 0:
+            q1 = qs_pos[0]
+            bins.append(y_pos[y_pos <= q1])
+            for i in range(1, len(qs_pos)):
+                lo = qs_pos[i - 1]
+                hi = qs_pos[i]
+                bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
+            q_last = qs_pos[-1]
+            bins.append(y_pos[y_pos > q_last])
+        else:
+            for _ in range(len(qs_pos) + 1):
+                bins.append(np.array([], dtype=y_sub.dtype))
+
+        bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
+        counts = np.array([int(b.size) for b in bins], dtype=np.int32)
+        pos_counts = counts.copy()
+        pos_counts[0] = 0
+
+        ok = True
+        if not np.all(np.diff(qs_pos) > 0):
+            ok = False
+        if ok and not np.all(counts[1:] >= int(minB)):
+            ok = False
+        if ok and require_positive_bins:
+            if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
+                ok = False
+                
+        return bin_means, bool(ok), counts
+
     def _compute_bins_and_ok_positive_quantiles(
         self,
         y_sub,
         qe_pos,
         minB,
         require_positive_bins=True,
-        min_pos_per_bin=3,
+        min_pos_per_bin=1,
         tag=""
     ):
-        """
-        Returns (bin_means, ok, qs_pos, used_q, forced_flat, counts)
-
-        - bin 0: y <= 0
-        - bins 1..C-1: defined on y_pos with thresholds qs_pos (len C-2)
-          bin1: (0, q1]
-          ...
-          bin(C-1): (q_last, +inf)
-        """
-        y_sub = y_sub[np.isfinite(y_sub)]
-        if y_sub.size == 0:
+        """Returns (bin_means, ok, qs_pos, used_q, forced_flat, counts)"""
+        y_sub_fin = y_sub[np.isfinite(y_sub)]
+        if y_sub_fin.size == 0:
             return None, False, None, None, False, None
 
-        y0 = y_sub[y_sub <= 0]
-        y_pos = y_sub[y_sub > 0]
+        y_pos = y_sub_fin[y_sub_fin > 0]
         if y_pos.size == 0:
             return None, False, None, None, False, None
 
-        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos)
+        qs_pos, used_q, forced_flat = self._adaptive_positive_thresholds(y_pos, qe_pos, min_pos=min_pos_per_bin)
 
-        # bins
-        bins = []
-        # bin0
-        bins.append(y0)
+        bin_means, ok, counts = self._compute_bins_given_thresholds(
+            y_sub_fin, qs_pos, minB, 
+            require_positive_bins=require_positive_bins, 
+            min_pos_per_bin=min_pos_per_bin
+        )
 
-        # positive bins
-        # bin1: y_pos <= q1
-        q1 = qs_pos[0]
-        bins.append(y_pos[y_pos <= q1])
-
-        # middle: (q_{i-1}, q_i]
-        for i in range(1, len(qs_pos)):
-            lo = qs_pos[i - 1]
-            hi = qs_pos[i]
-            bins.append(y_pos[(y_pos > lo) & (y_pos <= hi)])
-
-        # last: > q_last
-        q_last = qs_pos[-1]
-        bins.append(y_pos[y_pos > q_last])
-        
-        # means & counts
-        bin_means = np.array([float(np.mean(b)) if b.size > 0 else np.nan for b in bins], dtype=np.float32)
-        counts = np.array([int(b.size) for b in bins], dtype=np.int32)
-        pos_counts = counts.copy()
-        pos_counts[0] = 0
-
-        # validity
-        ok = True
-
-        # thresholds must be strictly increasing (otherwise bins degenerate)
-        if not np.all(np.diff(qs_pos) > 0):
-            ok = False
-
-        # positive bins must have enough samples
-        if ok and not np.all(counts[1:] >= int(minB)):
-            ok = False
-
-        if ok and require_positive_bins:
-            if not np.all(pos_counts[1:] >= int(min_pos_per_bin)):
-                ok = False
+        if bin_means is None:
+            return None, False, qs_pos, used_q, forced_flat, None
 
         self._log(
             f"[BINS {tag}] means={bin_means} counts={counts} ok={ok} "
             f"qs_pos={qs_pos} used_q={used_q} forced_flat={forced_flat}"
         )
-
+        
         return bin_means, bool(ok), qs_pos, used_q, forced_flat, counts
 
     # ------------------------------------------------------------
@@ -5578,25 +5717,26 @@ class CORNWithGains(nn.Module):
         if y_pos.size >= 10:
             q50 = float(np.quantile(y_pos, 0.5))
             q95 = float(np.quantile(y_pos, 0.95))
-            #spread = q95 - q50
-            spread = 1.0 # No normalization
+            spread = q95 - q50
+            #spread = 1.0 # No normalization
         else:
             q50 = float(np.quantile(y_pos, 0.5)) if y_pos.size > 0 else 0.0
             q95 = float(np.quantile(y_pos, 0.95)) if y_pos.size > 0 else 0.0
-            #spread = float(np.std(y_pos)) if y_pos.size > 1 else 0.0
-            spread = 1.0 # No normalization
+            spread = float(np.std(y_pos)) if y_pos.size > 1 else 0.0
+            #spread = 1.0 # No normalization
 
-        #spread = max(spread, 1e-6)
+        spread = max(spread, 1e-6)
         floor = max(0.0, self.gainsfloorfrac)
         
         # Normailzation
-        #base = self.gainsalpha * (diffs / spread)
+        base = self.gainsalpha * (diffs / spread)
         
-        base = self.gainsalpha * diffs
+        #base = self.gainsalpha * diffs
         gains = np.maximum(base, floor).astype(np.float32)
-
         if self.enforcegainmonotone:
             gains = np.maximum.accumulate(gains).astype(np.float32)
+
+        if gains.size > 0: gains[0] *= self.gainsalpha0
 
         self._log(
             f"[GAINS {tag}] diffs={diffs} base={base} q50_pos={q50} q95_pos={q95} "
@@ -5615,7 +5755,7 @@ class CORNWithGains(nn.Module):
         quantileedges=None,
         minbinn=None,
         require_positive_bins=True,
-        min_pos_per_bin=3,
+        min_pos_per_bin=None,
         enforcegainmonotone=None,
     ):
 
@@ -5638,6 +5778,9 @@ class CORNWithGains(nn.Module):
             raise ValueError("quantileedges (positifs) doit avoir longueur C-2=%d" % (self.C - 2))
 
         minB = self.minbinn if minbinn is None else int(minbinn)
+        if min_pos_per_bin is None:
+            min_pos_per_bin = minB
+
         if enforcegainmonotone is not None:
             self.enforcegainmonotone = bool(enforcegainmonotone)
 
@@ -5670,12 +5813,17 @@ class CORNWithGains(nn.Module):
             self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
             self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
         else:
-            raise ValueError('Can t calcule bin means')
-            # robust fallback
+            # robust fallback when bins cannot be calculated
+            self._log("[GLOBAL] Cannot calculate bins, using fallback scale-based gains")
             yfin = y[np.isfinite(y)]
             scale = float(np.std(yfin)) if yfin.size > 1 else 1.0
             global_g = np.full(self.C - 1, 0.05 * scale, dtype=np.float32)
+            global_spread = float(scale)
             self._log("[GLOBAL] fallback scale-based gains:", global_g)
+            # Create dummy thresholds for consistency
+            qs_g = np.linspace(0.5, 0.95, self.C - 2, dtype=np.float32)
+            self.global_scale = torch.tensor(global_spread, dtype=torch.float32, device=self.global_gains.device)
+            self.register_buffer('global_thresholds', torch.tensor(qs_g, dtype=torch.float32))
 
         self.global_gains = torch.tensor(global_g, dtype=torch.float32, device=self.global_gains.device)
         self._log("[GLOBAL GAINS] tensor:", self.global_gains)
@@ -5691,12 +5839,14 @@ class CORNWithGains(nn.Module):
             y_cl = y[idx]
 
             self._log(f"\n--- cluster {cl} (n={len(idx)}) ---")
-            bm, ok, qs, usedq, flat, cnt = self._compute_bins_and_ok_positive_quantiles(
-                y_cl, qe_pos, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                tag="CL_%s" % str(cl)
-            )
             
-            if bm is not None and ok:
+            # FORCE GLOBAL DISCRETIZATION: use global thresholds qs_g
+            bm, ok, cnt = self._compute_bins_given_thresholds(
+                y_cl, qs_g, minB, require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
+            )
+            qs, usedq, flat = qs_g, usedq_g, flat_g
+
+            if ok:
                 g_cl, spread_cl = self._gains_from_bin_means(bm, y_cl, tag="CL_%s" % str(cl))
             else:
                 pooled = False
@@ -5705,30 +5855,32 @@ class CORNWithGains(nn.Module):
                     if g_id is not None and g_id in idx_by_group:
                         idx_pool = idx_by_group[g_id]
                         y_pool = y[idx_pool]
-                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)})")
+                        self._log(f"[CL {cl}] pool by similar group {g_id} (n_pool={len(idx_pool)}) (global discr)")
 
-                        bm2, ok2, qs2, usedq2, flat2, cnt2 = self._compute_bins_and_ok_positive_quantiles(
-                            y_pool, qe_pos, minB,
-                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin,
-                            tag="POOL_G%s" % str(g_id)
+                        bm2, ok2, cnt2 = self._compute_bins_given_thresholds(
+                            y_pool, qs_g, minB,
+                            require_positive_bins=require_positive_bins, min_pos_per_bin=min_pos_per_bin
                         )
-                        if bm2 is not None and ok2:
+                        if ok2:
                             g_cl, spread_cl = self._gains_from_bin_means(bm2, y_pool, tag="POOL_G%s" % str(g_id))
                             pooled = True
                         else:
                             self._log(f"[CL {cl}] pooling failed -> fallback global gains")
                             g_cl = global_g
+                            spread_cl = global_spread
                     else:
                         self._log(f"[CL {cl}] no valid similar group -> fallback global gains")
                         g_cl = global_g
+                        spread_cl = global_spread
                 else:
                     self._log(f"[CL {cl}] no similar_cluster_ids -> fallback global gains")
                     g_cl = global_g
+                    spread_cl = global_spread
 
                 if pooled:
-                    self._log(f"[CL {cl}] used pooled gains")
+                    self._log(f"[CL {cl}] used pooled gains (global discr)")
                 else:
-                    self._log(f"[CL {cl}] used global gains")
+                    self._log(f"[CL {cl}] used global gains (global discr)")
 
             if self.enforcegainmonotone:
                 g_cl = np.maximum.accumulate(np.asarray(g_cl, dtype=np.float32)).astype(np.float32)
@@ -6019,6 +6171,29 @@ class CORNWithGains(nn.Module):
                         if k in src_stats and len(src_stats[k]) > 0:
                             est_g[k].append(src_stats[k][-1])
         
+        if torch.isnan(final_loss):
+            print(f">>> [DEBUG CORNWithGains] NaN Detected in final_loss!")
+            print(f"    total_loss: {total_loss.item()} | total_w: {total_w.item()} | eps: {self.eps}")
+            print(f"    logits shape: {logits.shape}, y_cont shape: {y_cont.shape}")
+            print(f"    logits has NaN: {torch.isnan(logits).any().item()} | y_cont has NaN: {torch.isnan(y_cont).any().item()}")
+            
+            # Print unique predictions just in case logits exploded
+            with torch.no_grad():
+                preds = torch.sum(probs > 0.5, dim=1)
+                unique_preds, counts = torch.unique(preds, return_counts=True)
+                print(f"    Unique predictions: {unique_preds.tolist()} (Counts: {counts.tolist()})")
+                
+            if hasattr(self, 'epoch_stats'):
+                for cl_id, s_d in self.epoch_stats.items():
+                    if len(s_d.get('loss_total', [])) > 0:
+                        last_loss = s_d['loss_total'][-1]
+                        print(f"    Cluster {cl_id} last loss_total: {last_loss}")
+                        if math.isnan(last_loss) or math.isinf(last_loss):
+                            print(f"      -> BREAKDOWN for {cl_id}:")
+                            for k in ['ce_loss', 'mu0_term', 'dirichlet_reg', 'entropy_pi']:
+                                if len(s_d.get(k, [])) > 0:
+                                    print(f"         {k}: {s_d[k][-1]}")
+                        
         return final_loss
 
     def get_attribute(self):
@@ -6072,16 +6247,6 @@ class CORNWithGains(nn.Module):
             agg_cl['mu0_mean'] = np.mean(mu0_vals) if mu0_vals else 0.0
             
             aggregated[cl_id] = agg_cl
-
-        class DictWrapper:
-            def __init__(self, d):
-                self.d = d
-            def detach(self):
-                return self
-            def cpu(self):
-                return self
-            def numpy(self):
-                return self.d
 
         return [('ordinal_stats', DictWrapper(aggregated))]
         
@@ -6524,3 +6689,969 @@ class CORNWithGains(nn.Module):
         plt.tight_layout()
         plt.savefig(dir_output / 'hyperparams_effects.png')
         plt.close()
+
+class CumulativeLinkLoss(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.C = num_classes
+        
+        # raw thresholds parameters (C-1)
+        # raw thresholds parameters (C-1)
+        self.alpha = nn.Parameter(torch.linspace(-1, 1, num_classes - 1))
+        self.thresholds = self._compute_thresholds().detach()
+
+    def _compute_thresholds(self):
+        # enforce monotonicity
+        theta = []
+        current = self.alpha[0]
+        theta.append(current)
+        for i in range(1, len(self.alpha)):
+            current = current + F.softplus(self.alpha[i])
+            theta.append(current)
+        return torch.stack(theta)
+
+    def forward(self, scores, y, sample_weight=None):
+        """
+        scores: (N,)
+        y: (N,) in [0..C-1]
+        sample_weight: (N,) or None
+        """
+        scores = scores.view(-1)
+        y = y.view(-1).long()
+        theta = self._compute_thresholds()  # (C-1,)
+
+        # CDFs: P(Y <= k | s) for k=0..C-2  (shape: N x (C-1))
+        Fk = torch.sigmoid(theta[None, :] - scores[:, None])
+
+        # Convert to class probabilities p(Y=k)
+        p = scores.new_zeros((scores.size(0), self.C))
+        p[:, 0] = Fk[:, 0]
+        if self.C > 2:
+            p[:, 1:-1] = Fk[:, 1:] - Fk[:, :-1]
+        p[:, -1] = 1.0 - Fk[:, -1]
+
+        # pick true-class probs
+        idx = torch.arange(scores.size(0), device=scores.device)
+        pt = p[idx, y].clamp_min(1e-9)
+        
+        nll = -torch.log(pt)
+        
+        if sample_weight is not None:
+            sw = sample_weight.view(-1).to(device=scores.device, dtype=scores.dtype).clamp_min(1e-12)
+            return (nll * sw).sum() / sw.sum()
+        else:
+            return nll.mean()
+
+    def get_learnable_parameters(self):
+        return {"alpha": self.alpha}
+        
+    def score_to_class(self, scores: torch.Tensor) -> torch.Tensor:
+        """
+        scores: (N,) float
+        returns: (N,) long in [0..C-1] using self.thresholds
+        """
+        # bucketize returns index in [0..C-1]
+        # right=True => thresholds[i-1] < x <= thresholds[i]
+        return torch.bucketize(scores, self.thresholds, right=True)
+
+    def get_attribute(self):
+        return [("ordinal_params", {"thresholds": self._compute_thresholds().detach().cpu().numpy()})]
+
+    def update_params(self, epoch):
+        self.thresholds = self._compute_thresholds().detach()
+
+    def plot_params(self, params_history, log_dir, best_epoch=None):
+        import matplotlib.pyplot as plt
+        import pathlib
+        import numpy as np
+
+        root_dir = pathlib.Path(log_dir) / 'ordinal_params'
+        root_dir.mkdir(parents=True, exist_ok=True)
+        
+        # history is list of dicts: [{'epoch': E, 'ordinal_params': {...}}, ...]
+        epochs = []
+        thresholds_list = []
+        
+        # Handle history format
+        iterator = []
+        if isinstance(params_history, dict):
+             iterator = sorted(params_history.items())
+             # map to list of (epoch, dict)
+        else:
+             # list of dicts
+             for entry in params_history:
+                 if 'epoch' in entry:
+                     iterator.append((entry['epoch'], entry))
+             iterator.sort(key=lambda x: x[0])
+             
+        for ep, entry in iterator:
+            if 'ordinal_params' in entry:
+                p = entry['ordinal_params']
+                if 'thresholds' in p:
+                    epochs.append(ep)
+                    thresholds_list.append(p['thresholds'])
+                    
+        if not epochs:
+            return
+
+        thresholds_arr = np.array(thresholds_list) # (N_epochs, C-1)
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for i in range(thresholds_arr.shape[1]):
+            ax.plot(epochs, thresholds_arr[:, i], label=f'theta_{i}')
+            
+        ax.set_title(f'{self.__class__.__name__} Thresholds Evolution')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Threshold Value')
+        ax.grid(True, alpha=0.3)
+        if best_epoch is not None:
+            ax.axvline(best_epoch, color='r', linestyle='--', label='Best Epoch')
+            
+        plt.tight_layout()
+        plt.savefig(root_dir / 'thresholds_evolution.png')
+        plt.close()
+
+class LargeMarginOrdinalLoss(nn.Module):
+    def __init__(self, num_classes, margin=1.0):
+        super().__init__()
+        self.C = num_classes
+        self.margin = margin
+        
+        self.alpha = nn.Parameter(torch.linspace(-1, 1, num_classes - 1))
+        self.thresholds = self._compute_thresholds().detach()
+
+    def _compute_thresholds(self):
+        theta = []
+        current = self.alpha[0]
+        theta.append(current)
+        for i in range(1, len(self.alpha)):
+            current = current + F.softplus(self.alpha[i])
+            theta.append(current)
+        return torch.stack(theta)
+
+    def forward(self, scores, y, sample_weight):
+        theta = self._compute_thresholds()
+        loss = 0.0
+
+        for k in range(self.C):
+            mask = (y == k)
+            if mask.sum() == 0:
+                continue
+
+            s = scores[mask]
+
+            if k > 0:
+                lower = theta[k-1] + self.margin
+                loss += F.relu(lower - s).mean()
+
+            if k < self.C - 1:
+                upper = theta[k] - self.margin
+                loss += F.relu(s - upper).mean()
+
+                loss += F.relu(s - upper).mean()
+
+        return loss
+
+    def get_learnable_parameters(self):
+        return {"alpha": self.alpha}
+
+    def score_to_class(self, scores: torch.Tensor) -> torch.Tensor:
+        """
+        scores: (N,) float
+        returns: (N,) long in [0..C-1] using self.thresholds
+        """
+        # bucketize returns index in [0..C-1]
+        # right=True => thresholds[i-1] < x <= thresholds[i]
+        return torch.bucketize(scores, self.thresholds, right=True)
+
+    def get_attribute(self):
+        return [("ordinal_params", {"thresholds": self._compute_thresholds().detach().cpu().numpy()})]
+
+    def update_params(self, epoch):
+        self.thresholds = self._compute_thresholds().detach()
+
+    def plot_params(self, params_history, log_dir, best_epoch=None):
+        import matplotlib.pyplot as plt
+        import pathlib
+        import numpy as np
+
+        root_dir = pathlib.Path(log_dir) / 'ordinal_params'
+        root_dir.mkdir(parents=True, exist_ok=True)
+        
+        epochs = []
+        thresholds_list = []
+        
+        iterator = []
+        if isinstance(params_history, dict):
+             iterator = sorted(params_history.items())
+        else:
+             for entry in params_history:
+                 if 'epoch' in entry:
+                     iterator.append((entry['epoch'], entry))
+             iterator.sort(key=lambda x: x[0])
+             
+        for ep, entry in iterator:
+            if 'ordinal_params' in entry:
+                p = entry['ordinal_params']
+                if 'thresholds' in p:
+                    epochs.append(ep)
+                    thresholds_list.append(p['thresholds'])
+                    
+        if not epochs:
+            return
+
+        thresholds_arr = np.array(thresholds_list)
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for i in range(thresholds_arr.shape[1]):
+            ax.plot(epochs, thresholds_arr[:, i], label=f'theta_{i}')
+            
+        ax.set_title(f'{self.__class__.__name__} Thresholds Evolution')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Threshold Value')
+        ax.grid(True, alpha=0.3)
+        if best_epoch is not None:
+            ax.axvline(best_epoch, color='r', linestyle='--', label='Best Epoch')
+            
+        plt.tight_layout()
+        plt.savefig(root_dir / 'thresholds_evolution.png')
+        plt.close()
+
+import torch
+import torch.nn as nn
+from typing import Optional
+import torch.nn.functional as F
+
+
+class PairwiseMarginRankingLoss(nn.Module):
+    """
+    Pairwise Large-Margin Ranking for ordinal bins.
+
+    - forward() utilise directement y_bin
+    - score_to_class() utilise des seuils internes appris
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        margin: float = 0.0,
+        num_pairs: Optional[int] = 8192,
+    ):
+        super().__init__()
+
+        self.C = int(num_classes)
+        self.margin = float(margin)
+        self.num_pairs = num_pairs
+
+        # Seuils dans l'espace SCORE (pas y)
+        if self.C > 1:
+            init = torch.linspace(-1.0, 1.0, self.C - 1)
+        else:
+            init = torch.tensor([])
+
+        self.register_buffer("thresholds", init)
+
+    # --------------------------------------------------
+    # Ranking loss
+    # --------------------------------------------------
+
+    def forward(self, scores: torch.Tensor, y_bin: torch.Tensor, sample_weight):
+
+        if scores.dim() != 1 or y_bin.dim() != 1:
+            raise ValueError("scores and y_bin must be 1D tensors")
+
+        N = scores.numel()
+        if N <= 1:
+            return scores.new_tensor(0.0)
+
+        # -------- sampled pairs --------
+        if self.num_pairs is not None:
+
+            i = torch.randint(0, N, (self.num_pairs,), device=scores.device)
+            j = torch.randint(0, N, (self.num_pairs,), device=scores.device)
+
+            mask_neq = i != j
+            i, j = i[mask_neq], j[mask_neq]
+
+            yi, yj = y_bin[i], y_bin[j]
+            si, sj = scores[i], scores[j]
+            
+            mask = yi > yj
+            if not mask.any():
+                return scores.new_tensor(0.0)
+
+            diff = si[mask] - sj[mask]
+            return F.relu(self.margin - diff).mean()
+
+        # -------- exact all pairs --------
+        ds = scores[:, None] - scores[None, :]
+        mask = y_bin[:, None] > y_bin[None, :]
+        if not mask.any():
+            return scores.new_tensor(0.0)
+
+        return F.relu(self.margin - ds[mask]).mean()
+
+    @torch.no_grad()
+    def update_after_batch(self, scores_val: torch.Tensor, y_bin_val: torch.Tensor):
+        """
+        Calibre self.thresholds (dans l'espace score) pour convertir score -> classe
+        en matchant la distribution de y_bin_val.
+
+        scores_val: (N,) float
+        y_bin_val: (N,) long in [0..C-1]
+        """
+        if scores_val.dim() != 1 or y_bin_val.dim() != 1:
+            raise ValueError("scores_val et y_bin_val doivent être 1D")
+        if scores_val.numel() != y_bin_val.numel():
+            raise ValueError("scores_val et y_bin_val doivent avoir la même taille")
+
+        C = self.C
+        if C <= 1:
+            return
+
+        # proportions cumulées P(y <= k) pour k=0..C-2
+        qs = []
+        for k in range(C - 1):
+            qk = (y_bin_val <= k).float().mean().clamp(1e-4, 1 - 1e-4)
+            qs.append(qk)
+        qs = torch.stack(qs).to(device=scores_val.device, dtype=scores_val.dtype)
+
+        # thresholds_score[k] = quantile(scores, qs[k])
+        t = torch.quantile(scores_val, qs)
+
+        # met à jour self.thresholds (si Parameter ou buffer)
+        if isinstance(self.thresholds, torch.nn.Parameter):
+            self.thresholds.data.copy_(t)
+        else: 
+            self.thresholds.copy_(t)
+
+    # --------------------------------------------------
+    # Score -> Class
+    # --------------------------------------------------
+
+    def score_to_class(self, scores: torch.Tensor) -> torch.Tensor:
+        """
+        Convertit score latent en classe ordinal.
+
+        Utilise self.thresholds (dans l'espace score).
+        """
+        if scores.dim() != 1:
+            raise ValueError("scores must be 1D")
+
+        if self.thresholds.numel() == 0:
+            return torch.zeros_like(scores, dtype=torch.long)
+
+        # Garantit monotonie
+        thresholds_sorted = torch.sort(self.thresholds)[0]
+
+        return torch.bucketize(scores, thresholds_sorted, right=True)
+        
+class CLMBinnedTransitionLoss(nn.Module):
+    def __init__(self, num_classes: int, beta=3.6167258754794345, t=0.38808363994393985, eps=1e-8,
+                 wmed=2.1181338709061728, wmin=0.3090944162785197, wneg=0.010696671944419034, wk=None,
+                 learngains=False, gainsfloor=0.5, wkdecay="exp", wkpower=1.0, wklambda=0.3495008616795649,
+                 wkmin=0.0026366397418353914, gamma=3.858781740471833, taugate=0.10621789513165877, gatetemp=0.07804890070629288,
+                 wfocal=1.5494283305697185, wmu0=0.4200314727662068,
+                 fgamma=3.7215798979568424, falpha=0.8563103452989596):
+                 
+        super().__init__()
+        self.C = int(num_classes)
+        self.beta = float(beta)
+        self.t = float(t)
+        self.eps = float(eps)
+        self.wmed = float(wmed)
+        self.wmin = float(wmin)
+        self.wneg = float(wneg)
+        self.wfocal      = float(wfocal)        # weight on focal loss term
+        self.wmu0        = float(wmu0)
+        self.fgamma = float(fgamma)    # focusing exponent γ (0 = BCE)
+        self.falpha = float(falpha)    # class-balance weight α ∈ (0,1)
+        self.gamma = float(gamma)
+        self.taugate = float(taugate)   # seuil du soft gate sur les probs
+        self.gatetemp = float(gatetemp) # température (largeur) du soft gate
+
+        # --- wk schedule (k bigger => smaller weight) ---
+        self.wkdecay = wkdecay   # "power" or "exp"
+        self.wkpower = wkpower       # p in 1/k^p
+        self.wklambda = wklambda     # lambda for exp
+        self.wkmin = wkmin        # floor to avoid ~0 weights
+
+        # P_k: transitions (a -> a+k) comme chez toi
+        self.P = {k: [(a, a+k) for a in range(0, self.C-k)] for k in range(1, self.C)}
+        if wk is None:
+            self.wk = self._build_wk_monotone()
+        else:
+            # If user supplies wk, keep it, but you can optionally enforce monotone decay
+            self.wk = wk
+
+        # --- Cutpoints learnables (C-1 seuils) ---
+        self.alpha = nn.Parameter(torch.zeros(self.C - 1))
+        # --- Optionnel: gains/marges learnables (C-1), positifs ---
+        self.learn_gains = bool(learngains)
+        self.gains_floor = float(gainsfloor)
+        if self.learn_gains:
+            self.g_raw = nn.Parameter(torch.zeros(self.C - 1))  # -> softplus pour positiver
+            
+        self.register_buffer("delta_scale_ema", torch.ones(self.C))
+        self.scale_momentum = 0.99   # à tuner
+        self.scale_min = 1e-3
+        self.scale_max = 1e3
+    
+    def _build_wk_monotone(self):
+        """
+        Build wk dict so that wk[k] decreases when k increases.
+        """
+        wk = {}
+        decay = getattr(self, "wkdecay", "power")
+        for k in range(1, self.C):
+            if decay == "exp":
+                w = float(torch.exp(torch.tensor(-self.wklambda * (k - 1))).item())
+            elif decay == "None" or decay is None:
+                w = 1.0
+            else:
+                # power decay by default
+                w = 1.0 / (float(k) ** float(self.wkpower))
+            wk[k] = max(w, float(self.wkmin))
+        return wk
+
+    def _compute_thresholds(self):
+        # theta monotone via softplus (positif)  :contentReference[oaicite:8]{index=8}
+        theta = []
+        cur = self.alpha[0]
+        theta.append(cur)
+        for i in range(1, len(self.alpha)):
+            cur = cur + F.softplus(self.alpha[i])
+            theta.append(cur)
+        return torch.stack(theta)  # (C-1,)
+
+    def _compute_gains(self):
+        if hasattr(self, "g_raw"):
+            gains = []
+            floor = float(getattr(self, "gainsfloor", 0.0))
+            cur = F.softplus(self.g_raw[0]) + floor
+            gains.append(cur)
+            for i in range(1, len(self.g_raw)):
+                cur = cur + F.softplus(self.g_raw[i])
+                gains.append(cur)
+            return torch.stack(gains)  # (C-1,)
+        return None
+
+    def _class_probs_from_score(self, s):
+        # s: (N,)
+        theta = self._compute_thresholds()  # (C-1,)
+        # F_k(s)=sigmoid(theta_k - s)  :contentReference[oaicite:9]{index=9}
+        Fk = torch.sigmoid(theta[None, :] - s[:, None])  # (N, C-1)
+
+        p = s.new_zeros((s.size(0), self.C))
+        p[:, 0] = Fk[:, 0]
+        if self.C > 2:
+            p[:, 1:-1] = Fk[:, 1:] - Fk[:, :-1]
+        p[:, -1] = 1.0 - Fk[:, -1]
+        return p  # (N, C)
+
+    def _softmin(self, x):
+        return -(1.0 / self.beta) * torch.logsumexp(-self.beta * x, dim=0)
+
+    def _soft_median(self, deltas):
+        alpha = 20.0
+        c = deltas.mean()
+        w = torch.softmax(-alpha * (deltas - c).abs(), dim=0)
+        return (w * deltas).sum()
+
+    def _mu_soft(self, p, y_cont, sw=None):
+        """
+        p: (N, C)
+        y_cont: (N,)
+        """
+        y = y_cont.to(dtype=p.dtype)
+
+        # --- soft gating by threshold ---
+        gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
+        p = p * gate
+
+        gamma = getattr(self, "gamma", 1.0)
+        if gamma != 1.0:
+            p = p.clamp_min(self.eps).pow(gamma)
+            p = p / p.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        mus = []
+
+        for k in range(p.size(1)):
+
+            pk = p[:, k]
+
+            if sw is not None:
+                swk = sw.to(device=p.device, dtype=p.dtype).clamp_min(self.eps)
+                weights = pk * swk
+            else:
+                weights = pk
+
+            # éviter bins quasi vides
+            if weights.sum() < self.eps:
+                mus.append(y.mean())
+                continue
+
+            # normalisation des poids
+            weights = weights / weights.sum()
+
+            # estimation robuste pondérée
+            # on applique soft_median sur les valeurs pondérées
+            deltas = y  # vecteur 1D
+            alpha = 20.0
+            c = (weights * deltas).sum()
+            w = torch.softmax(-alpha * (deltas - c).abs(), dim=0)
+            mu_k = (w * deltas).sum()
+
+            mus.append(mu_k)
+
+        return torch.stack(mus)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            self.epoch_stats = {}
+
+    def forward(self, score, y_cont, sample_weight=None):
+        """
+        :contentReference[oaicite:11]{index=11}ore s du modèle
+        y_cont: (N,) cible continue (y*)
+        """
+        s = score.view(-1)
+        y = y_cont.view(-1).to(device=s.device)
+
+        sw = sample_weight.view(-1).to(device=s.device) if sample_weight is not None else None
+
+        # 1) bins optimisés => probs ordinales p_k(s)
+        probs = self._class_probs_from_score(s)
+
+        # 2) mu par bin, calculé avec y_cont
+        mu = self._mu_soft(probs, y, sw=sw)
+
+        # 3) gains (marges) : fixes ou learnables
+        if self.learn_gains:
+            gains = F.softplus(self.g_raw) + self.gains_floor  # positifs :contentReference[oaicite:12]{index=12}
+        else:
+            # marge simple: constante (à régler)
+            gains = s.new_full((self.C - 1,), 1.0)
+
+        # 4) transition loss = ta logique (deltas + softmin/median + softplus)
+        loss = s.new_tensor(0.0)
+        wsum = s.new_tensor(0.0)
+
+        for k, pairs in self.P.items():
+            raw = torch.stack([mu[b] - mu[a] for (a, b) in pairs], dim=0)
+
+            # marge cumulée entre a..b-1 (comme chez toi) :contentReference[oaicite:13]{index=13}
+            margins = torch.stack([gains[a:b].sum() for (a, b) in pairs], dim=0)
+
+            deltas = raw - margins
+
+            batch_scale = deltas.detach().abs().mean().clamp_min(self.eps)
+
+            with torch.no_grad():
+                self.delta_scale_ema[k].mul_(self.scale_momentum).add_(
+                    batch_scale * (1.0 - self.scale_momentum)
+                )
+            scale = self.delta_scale_ema[k].clamp(self.scale_min, self.scale_max)
+                
+            deltas = deltas / scale
+
+            MEDk = self._soft_median(deltas)
+            MINk = self._softmin(deltas)
+
+            loss_med = F.softplus(-MEDk)
+            loss_min = F.softplus(-MINk)
+            loss_neg = F.relu(-deltas).mean()
+
+            Lk = self.wmed * loss_med + self.wmin * loss_min + self.wneg * loss_neg
+
+            if not hasattr(self, 'epoch_stats'):
+                self.epoch_stats = {}
+            if 'deltas' not in self.epoch_stats:
+                self.epoch_stats['deltas'] = {}
+            if k not in self.epoch_stats['deltas']:
+                self.epoch_stats['deltas'][k] = {'median': [], 'min': [], 'viol': [], 'neg': []}
+                
+            self.epoch_stats['deltas'][k]['median'].append(MEDk.item())
+            self.epoch_stats['deltas'][k]['min'].append(MINk.item())
+            self.epoch_stats['deltas'][k]['viol'].append((deltas < 0).float().mean().item())
+            self.epoch_stats['deltas'][k]['neg'].append(loss_neg.item())
+
+            w = float(self.wk.get(k, 1.0))
+            loss = loss + w * Lk
+            wsum = wsum + w
+
+        # Track mu after the loop (mu is global C vector)
+        if not hasattr(self, 'epoch_stats'):
+            self.epoch_stats = {}
+        if 'mu' not in self.epoch_stats:
+            self.epoch_stats['mu'] = []
+        self.epoch_stats['mu'].append(mu.detach().cpu().numpy())
+
+        # 5) Focal Loss: is-fire term (replaces BCE)
+        #    target : (y_cont > 0)  → 1 if any fire
+        #    pred   : 1 - probs[:,0] → P(not class-0) = P(fire)
+        transition_loss = loss / wsum.clamp_min(self.eps)
+
+        target_bin = (y > 0).to(dtype=s.dtype)           # (N,) ∈ {0,1}
+        prob_fire  = (1.0 - probs[:, 0]).clamp(self.eps, 1.0 - self.eps)  # (N,)
+
+        # p_t and alpha_t per sample
+        p_t     = torch.where(target_bin > 0.5, prob_fire, 1.0 - prob_fire)  # (N,)
+        alpha_t = torch.where(target_bin > 0.5,
+                              torch.full_like(p_t, self.falpha),
+                              torch.full_like(p_t, 1.0 - self.falpha))  # (N,)
+        focal_weight = alpha_t * (1.0 - p_t).pow(self.fgamma)           # (N,)
+        focal_ce     = -torch.log(p_t)                                        # (N,)
+
+        if sw is not None:
+            sw_norm     = sw / sw.sum().clamp_min(self.eps) * sw.numel()
+            focal_loss  = (focal_weight * focal_ce * sw_norm).mean()
+        else:
+            focal_loss  = (focal_weight * focal_ce).mean()
+
+        if 'focal' not in self.epoch_stats:
+            self.epoch_stats['focal'] = []
+        self.epoch_stats['focal'].append(focal_loss.item())
+
+        if 'transition' not in self.epoch_stats:
+            self.epoch_stats['transition'] = []
+        self.epoch_stats['transition'].append(transition_loss.item())
+
+        mu0_val = mu[0]
+        mu0_term = F.softplus(mu0_val)
+
+        if 'mu0_term' not in self.epoch_stats:
+            self.epoch_stats['mu0_term'] = []
+        self.epoch_stats['mu0_term'].append(mu0_term.item())
+
+        return transition_loss + self.wfocal * focal_loss + self.wmu0 * mu0_term
+        
+    def get_learnable_parameters(self):
+        # Always expose alpha (cutpoints params)
+        params = {"alpha": self.alpha}
+
+        # If gains are learnable, expose their raw parameters too
+        # (Assumes you store raw gains in self.g_raw, then gains = softplus(g_raw) (+ floor))
+        if getattr(self, "learn_gains", False):
+            if hasattr(self, "g_raw"):
+                params["g_raw"] = self.g_raw
+            elif hasattr(self, "gain_raw"):
+                # fallback naming if you used a different attribute name
+                params["gain_raw"] = self.gain_raw
+        return params
+
+    def score_to_class(self, scores: torch.Tensor) -> torch.Tensor:
+        """
+        scores: (N,) float
+        returns: (N,) long in [0..C-1] using self.thresholds
+        torch.bucketize(..., right=True) => thresholds[i-1] < x <= thresholds[i]. :contentReference[oaicite:1]{index=1}
+        """
+        if not hasattr(self, "thresholds") or self.thresholds is None:
+            self.thresholds = self._compute_thresholds().detach()
+
+        thr = self.thresholds.to(device=scores.device)
+        return torch.bucketize(scores, thr, right=True)
+
+    def get_attribute(self):
+        import numpy as np
+        # Always log thresholds; if learn_gains, log gains too.
+        payload = {
+            "thresholds": self._compute_thresholds().detach().cpu().numpy()
+        }
+
+        if getattr(self, "learn_gains", False):
+            # Compute "current" positive gains for logging
+            g = self._compute_gains().detach().cpu().numpy() if hasattr(self, "_compute_gains") else None
+            if g is None:
+                # fallback: if you keep a tensor self.gains already
+                g = self.gains.detach().cpu().numpy() if hasattr(self, "gains") and self.gains is not None else None
+            
+            if g is None and hasattr(self, "g_raw"):
+                floor = float(getattr(self, "gains_floor", 0.0))
+                g = (F.softplus(self.g_raw) + floor).detach().cpu().numpy()
+
+            if g is not None:
+                payload["gains"] = g
+
+        if hasattr(self, 'epoch_stats') and 'deltas' in self.epoch_stats:
+            agg_deltas = {}
+            for k, dstats in self.epoch_stats['deltas'].items():
+                agg_deltas[k] = {
+                    'median': np.mean(dstats['median']) if dstats['median'] else 0.0,
+                    'min': np.mean(dstats['min']) if dstats['min'] else 0.0,
+                    'viol': np.mean(dstats['viol']) if dstats['viol'] else 0.0,
+                    'neg': np.mean(dstats['neg']) if dstats['neg'] else 0.0
+                }
+            payload['deltas'] = agg_deltas
+
+        if hasattr(self, 'epoch_stats') and 'mu' in self.epoch_stats and len(self.epoch_stats['mu']) > 0:
+            mu_stack = np.stack(self.epoch_stats['mu'])  # (N_batches, C)
+            payload['mu'] = np.mean(mu_stack, axis=0)  # (C,)
+
+        # Loss components: transition and bce (mean over batches for this epoch)
+        if hasattr(self, 'epoch_stats'):
+            for _lkey in ('transition', 'focal'):
+                vals = self.epoch_stats.get(_lkey, [])
+                if vals:
+                    payload[_lkey] = [float(np.mean(vals))]  # list so plot_params can use np.mean(vals)
+                    
+        payload['delta_scale_ema'] = self.delta_scale_ema.detach().cpu().numpy()
+
+        return [("ordinal_params", DictWrapper(payload))]
+
+    def update_params(self, epoch):
+        # Cache thresholds for stable usage during an epoch
+        self.thresholds = self._compute_thresholds().detach()
+
+        # Cache gains too if learnable
+        if getattr(self, "learn_gains", False):
+            if hasattr(self, "_compute_gains"):
+                self.gains = self._compute_gains().detach()
+            else:
+                if hasattr(self, "g_raw"):
+                    floor = float(getattr(self, "gains_floor", 0.0))
+                    self.gains = (F.softplus(self.g_raw) + floor).detach()
+
+        # Reset per-epoch accumulators so get_attribute() exports only the current epoch
+        if not hasattr(self, 'epoch_stats'):
+            self.epoch_stats = {}
+        self.epoch_stats['transition'] = []
+        self.epoch_stats['focal']      = []
+
+    def plot_params(self, params_history, log_dir, best_epoch=None):
+        import matplotlib.pyplot as plt
+        import pathlib
+        import numpy as np
+
+        root_dir = pathlib.Path(log_dir) / 'ordinal_params'
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        epochs = []
+        thresholds_list = []
+        gains_list = []
+        deltas_list = []
+        mu_list = []
+        delta_scale_ema_list = []
+
+        iterator = []
+        if isinstance(params_history, dict):
+            iterator = sorted(params_history.items())
+        else:
+            for entry in params_history:
+                if isinstance(entry, dict) and ('epoch' in entry):
+                    iterator.append((entry['epoch'], entry))
+            iterator.sort(key=lambda x: x[0])
+
+        for ep, entry in iterator:
+            if 'ordinal_params' not in entry:
+                continue
+                
+            stats_container = entry['ordinal_params']
+            if hasattr(stats_container, 'd'):
+                p = stats_container.d
+            else:
+                p = stats_container
+                
+            if not isinstance(p, dict):
+                continue
+
+            # All lists are synchronized on the same set of epochs
+            if 'thresholds' not in p:
+                continue  # skip epoch if no threshold (shouldn't happen)
+                
+            epochs.append(ep)
+            thresholds_list.append(p['thresholds'])
+
+            # gains optional
+            gains_list.append(p.get('gains', None))
+                
+            # deltas optional
+            deltas_list.append(p.get('deltas', None))
+
+            # mu optional
+            mu_list.append(p.get('mu', None))
+            
+            # delta_scale_ema optional
+            delta_scale_ema_list.append(p.get('delta_scale_ema', None))
+
+        if not epochs:
+            print(f'Error with epochs {epochs}')
+            return
+
+        thresholds_arr = np.array(thresholds_list)  # (N_epochs, C-1)
+
+        # --- Plot thresholds ---
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for i in range(thresholds_arr.shape[1]):
+            ax.plot(epochs, thresholds_arr[:, i], label=f'theta_{i}')
+        ax.set_title(f'{self.__class__.__name__} Thresholds Evolution')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Threshold Value')
+        ax.grid(True, alpha=0.3)
+        if best_epoch is not None:
+            ax.axvline(best_epoch, color='r', linestyle='--', label='Best Epoch')
+        ax.legend()
+        plt.tight_layout()
+        print('Saving thresholds_evolution')
+        plt.savefig(root_dir / 'thresholds_evolution.png')  # savefig :contentReference[oaicite:3]{index=3}
+        plt.close()
+
+        # --- Plot gains (only if present and aligned) ---
+        try:
+            valid_gains = [(ep, g) for ep, g in zip(epochs, gains_list) if g is not None]
+            if valid_gains:
+                g_epochs, g_vals = zip(*valid_gains)
+                gains_arr = np.array(g_vals)
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for i in range(gains_arr.shape[1]):
+                    ax.plot(list(g_epochs), gains_arr[:, i], label=f'gain_{i}')
+                ax.set_title(f'{self.__class__.__name__} Gains Evolution')
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Gain Value')
+                ax.grid(True, alpha=0.3)
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color='r', linestyle='--', label='Best Epoch')
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(root_dir / 'gains_evolution.png')
+                plt.close()
+        except Exception as e:
+            print(f"Error plotting gains in CLMBinnedTransitionLoss: {e}")
+            plt.close('all')
+
+        # --- Plot deltas stats ---
+        try:
+            valid_deltas = [(ep, d) for ep, d in zip(epochs, deltas_list) if d is not None]
+            if valid_deltas:
+                d_epochs, d_vals = zip(*valid_deltas)
+                d_epochs = list(d_epochs)
+                ks = sorted(d_vals[0].keys())
+                if ks:
+                    fig, axes = plt.subplots(len(ks), 4, figsize=(20, 3*len(ks)), sharex=True)
+                    if len(ks) == 1: axes = axes[None, :] 
+                    
+                    for i, k in enumerate(ks):
+                        d_med = [d[k]['median'] for d in d_vals if k in d]
+                        d_min = [d[k]['min'] for d in d_vals if k in d]
+                        d_viol = [d[k]['viol'] for d in d_vals if k in d]
+                        d_neg = [d[k]['neg'] for d in d_vals if k in d]
+                        
+                        axes[i, 0].plot(d_epochs, d_med, color='blue')
+                        axes[i, 0].set_title(f'k={k} Median Delta')
+                        axes[i, 0].grid(True)
+                        
+                        axes[i, 1].plot(d_epochs, d_min, color='red')
+                        axes[i, 1].set_title(f'k={k} Min Delta')
+                        axes[i, 1].grid(True)
+                        
+                        axes[i, 2].plot(d_epochs, d_viol, color='orange')
+                        axes[i, 2].set_title(f'k={k} Violation Rate (<0)')
+                        axes[i, 2].set_ylim(-0.1, 1.1)
+                        axes[i, 2].grid(True)
+                        
+                        axes[i, 3].plot(d_epochs, d_neg, color='purple')
+                        axes[i, 3].set_title(f'k={k} Mean NEG (Softplus magnitude)')
+                        axes[i, 3].grid(True)
+                    
+                    if best_epoch is not None:
+                        for ax_row in axes:
+                            for ax in ax_row:
+                                ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5)
+
+                    plt.tight_layout()
+                    print('Saving deltas_stats')
+                    plt.savefig(root_dir / 'deltas_stats.png')
+                    plt.close()
+        except Exception as e:
+            print(f"Error plotting deltas in CLMBinnedTransitionLoss: {e}")
+            plt.close('all')
+
+        # --- Plot delta scale ema ---
+        try:
+            valid_scales = [(ep, s) for ep, s in zip(epochs, delta_scale_ema_list) if s is not None]
+            if valid_scales:
+                s_epochs, s_vals = zip(*valid_scales)
+                scales_arr = np.array(s_vals)  # (N_epochs, C)
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for i in range(1, scales_arr.shape[1]):
+                    ax.plot(list(s_epochs), scales_arr[:, i], label=f'scale_k={i}')
+                ax.set_title(f'{self.__class__.__name__} Delta Scale EMA Evolution')
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Scale Value')
+                ax.set_yscale('log')
+                ax.grid(True, alpha=0.3)
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color='r', linestyle='--', label='Best Epoch')
+                ax.legend()
+                plt.tight_layout()
+                print('Saving delta_scale_ema_evolution')
+                plt.savefig(root_dir / 'delta_scale_ema_evolution.png')
+                plt.close()
+        except Exception as e:
+            print(f"Error plotting delta scale ema in CLMBinnedTransitionLoss: {e}")
+            plt.close('all')
+
+        # --- Plot Mu(s) per class (same figure, different colors) ---
+        try:
+            valid_mu = [(ep, m) for ep, m in zip(epochs, mu_list) if m is not None]
+            if valid_mu:
+                m_epochs, m_vals = zip(*valid_mu)
+                mu_arr = np.stack(m_vals)  # (E, C)
+                C = mu_arr.shape[1]
+                colors = plt.cm.tab10.colors
+                fig, ax = plt.subplots(figsize=(10, 6))
+                for c in range(C):
+                    ax.plot(list(m_epochs), mu_arr[:, c], label=f'mu(class {c})', color=colors[c % len(colors)])
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                ax.set_title(f'{self.__class__.__name__} - Mu evolution per class')
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Mean signal')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                print('Saving mu_s')
+                plt.savefig(root_dir / 'mu_s.png')
+                plt.close()
+        except Exception as e:
+            print(f"Error plotting mu in CLMBinnedTransitionLoss: {e}")
+            plt.close('all')
+
+        # --- Plot loss components (transition_loss vs bce_loss) ---
+        try:
+            tr_list, bce_list, ep_list = [], [], []
+            for ep, entry in iterator:
+                if 'ordinal_params' not in entry:
+                    continue
+                stats_container = entry['ordinal_params']
+                p = stats_container.d if hasattr(stats_container, 'd') else stats_container
+                if not isinstance(p, dict):
+                    continue
+                tr_vals  = p.get('transition', [])
+                bce_vals = p.get('focal', [])
+                if tr_vals and bce_vals:
+                    ep_list.append(ep)
+                    tr_list.append(float(np.mean(tr_vals)))
+                    bce_list.append(float(np.mean(bce_vals)))
+
+            if ep_list:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(ep_list, tr_list,  label='transition loss',  color='steelblue')
+                ax.plot(ep_list, bce_list, label=f'Focal loss  (γ={self.fgamma}, α={self.falpha}, ×wfocal={self.wfocal})', color='tomato', linestyle='--')
+                total = [t + self.wfocal * b for t, b in zip(tr_list, bce_list)]
+                ax.plot(ep_list, total, label='total  (tr + wfocal·focal)', color='black', linewidth=1.5, linestyle=':')
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color='r', linestyle='--', alpha=0.5, label='Best Epoch')
+                ax.set_title(f'{self.__class__.__name__} – Loss components')
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Loss (epoch mean)')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                print('Saving loss_components')
+                plt.savefig(root_dir / 'loss_components.png')
+                plt.close()
+        except Exception as e:
+            print(f"Error plotting loss components in CLMBinnedTransitionLoss: {e}")
+            plt.close('all')

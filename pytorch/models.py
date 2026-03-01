@@ -182,6 +182,13 @@ class SpatialContextSet(nn.Module):
         k = k.permute(0, 2, 1, 3)              # [B, H, K, Dh]
         v = v.permute(0, 2, 1, 3)              # [B, H, K, Dh]
 
+        # 1. First, pass values through the per-variable MLP *without* weighting yet
+        v_tokens = v.permute(0, 2, 1, 3).reshape(B, K, self.d_model) # [B, K, d_model]
+        v_tokens = self.var_mlp(v_tokens)      # [B, K, d_model] - Normalization happens INSIDE here
+
+        # 2. Reshape back to [B, H, K, Dh] to apply attention
+        v_tokens_head = v_tokens.view(B, K, self.n_heads, self.d_head).permute(0, 2, 1, 3)
+
         # Logits
         logits = (q * k).sum(-1) * self.scale  # [B, H, K]
 
@@ -195,34 +202,29 @@ class SpatialContextSet(nn.Module):
 
         w_drop = self.dropout(w)
 
-        # Keep per-variable tokens BEFORE pooling:
-        # z_tokens_head: [B, H, K, Dh]
-        z_tokens_head = w_drop.unsqueeze(-1) * v
+        # 3. APPLY ATTENTION WEIGHTS *AFTER* NORMALIZATION/MLP
+        z_tokens_head = w_drop.unsqueeze(-1) * v_tokens_head  # [B, H, K, Dh]
+        
+        # Pool across K
+        z_heads = z_tokens_head.sum(dim=2)              # [B, H, Dh]
+        z = z_heads.reshape(B, self.d_model)            # [B, d_model]
 
-        # Merge heads -> [B, K, d_model]
-        z_tokens = z_tokens_head.permute(0, 2, 1, 3).contiguous().view(B, K, self.d_model)
-
-        # Per-variable nonlinearity then pool across K
-        z_tokens = self.var_mlp(z_tokens)      # [B, K, d_model]
-        c = z_tokens.mean(dim=1)               # [B, d_model]  (or .sum / max / attn-pool)
-
-        c = self.out_proj(c)
+        # Output projection and residual
+        c = self.out_proj(z)
         c = self.dropout(c)
-
-        # Optional residual update on h_dyn representation (often helps stability)
-        c = h0 + self.res_scale * c            # [B, d_model]
-
-        # For interpretability (use w, not w_drop)
-        w_mean = w.mean(dim=1)                 # [B, K]
+        c = h0 + self.res_scale * c                     # [B, d_model]
+        
+        # Interpretable attention weights
+        w_mean = w.mean(dim=1)                          # [B, K]
 
         if self.return_tokens:
-            return c, w_mean, z_tokens
+            return c, w_mean, z_tokens_head
         return c, w_mean    
 
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
         super(MLPLayer, self).__init__()
-        self.mlp = nn.Linear(in_feats, hidden_dim, weight_initializer='glorot', bias=True, bias_initializer='zeros').to(device)
+        self.mlp = nn.Linear(in_feats, hidden_dim, bias=True).to(device)
         #self.mlp = torch.nn.Linear(in_feats, hidden_dim).to(device)
     def forward(self, x):
         return self.mlp(x)
@@ -230,6 +232,7 @@ class MLPLayer(torch.nn.Module):
 class NetMLP(torch.nn.Module):
     def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0, **kwargs):
         super(NetMLP, self).__init__()
+        self.horizon = horizon
         self.layer1 = MLPLayer(in_dim * n_sequences + end_channels, hidden_dim[0], device) if horizon > 0 else MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
         self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
         self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
@@ -323,6 +326,8 @@ class GRU(torch.nn.Module):
         # Output linear layer
         self.linear1 = torch.nn.Linear(d_channels if self.spatialContext else gru_size + len(self.spatial_idx), hidden_channels).to(device)
         self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
+        
+        # Output linear layer
         self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
         
         # Custom Init to prevent "Inverted" start:
@@ -742,6 +747,7 @@ class GraphCastGRU(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.end_channels = end_channels
+        self.task_type = task_type
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
@@ -903,6 +909,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.end_channels = end_channels
+        self.task_type = task_type
         self.decoder = None
         self._decoder_input = None
         self.horizon = horizon
