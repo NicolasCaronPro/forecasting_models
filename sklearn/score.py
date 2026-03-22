@@ -9,6 +9,11 @@ from sklearn.metrics import log_loss, precision_score, recall_score, f1_score, b
 import seaborn as sns
 import statsmodels.formula.api as smf
 from patsy import bs
+from scipy import sparse
+from scipy.sparse.linalg import lsqr
+from sklearn.preprocessing import OneHotEncoder, SplineTransformer
+
+
 #from forecasting_models.sklearn.dico_departements import *
 
 def calculate_ks(data, score_col, event_col, thresholds, dir_output):
@@ -2499,11 +2504,8 @@ PASSAGES = {
     4: [(0, 4)],
 }
 
-def fit_spline_mu(df, df_spline=5):
-    """
-    Fits a spline model Y ~ bs(score) + C(zone) + C(date)
-    and returns the predicted mean for each level in LEVELS.
-    """
+"""def fit_spline_mu(df, df_spline=5):
+    
     d = df.dropna(subset=["score", "Y", "zone", "date"]).copy()
     d["score"] = d["score"].clip(0, 4)
     
@@ -2530,8 +2532,132 @@ def fit_spline_mu(df, df_spline=5):
         tmp["score"] = float(s)
         mu[s] = float(fit.predict(tmp).mean())
         
-    return mu, fit
-    
+    return mu, fit"""
+
+def fit_spline_mu(
+    df: pd.DataFrame,
+    df_spline: int = 10,          # conservé pour compatibilité, non utilisé
+    lambda_curv: float = 100.0,   # pénalisation de courbure
+    max_iter: int = 1000,
+    tol: float = 1e-8,
+    robust: bool = True,
+    huber_c: float = 5.5,
+):
+    """
+    Remplace le fit spline lourd par un effet discret pénalisé sur les 5 classes :
+        Y = alpha[level] + FE_zone + FE_date + eps
+    avec pénalité de courbure discrète sur alpha :
+        lambda * sum_s (alpha[s+1] - 2 alpha[s] + alpha[s-1])^2
+
+    Hypothèses :
+    - df contient les colonnes: score, Y, zone, date
+    - score est continu ou discret, mais sera projeté sur les niveaux 0..4 via int(score.clip(0,4))
+    - retourne (mu, mu_dense, fit) comme l'ancienne API
+    """
+
+    work = df[["score", "Y", "zone", "date"]].copy()
+    work["_lvl"] = work["score"].clip(0, 4).astype(int)
+
+    y = work["Y"].to_numpy(dtype=np.float64)
+    lvl = work["_lvl"].to_numpy(dtype=np.int64)
+
+    zone_codes, zone_uniques = pd.factorize(work["zone"], sort=False)
+    date_codes, date_uniques = pd.factorize(work["date"], sort=False)
+
+    n = len(work)
+    C = 5
+    nz = len(zone_uniques)
+    nd = len(date_uniques)
+
+    # Pénalité de seconde différence sur alpha[0..4]
+    # D2 alpha = [a2 - 2a1 + a0, a3 - 2a2 + a1, a4 - 2a3 + a2]
+    D2 = np.array([
+        [1., -2., 1.,  0.,  0.],
+        [0.,  1., -2., 1.,  0.],
+        [0.,  0.,  1., -2., 1.],
+    ], dtype=np.float64)
+    P = D2.T @ D2  # (5,5)
+
+    alpha = np.zeros(C, dtype=np.float64)
+    fe_zone = np.zeros(nz, dtype=np.float64)
+    fe_date = np.zeros(nd, dtype=np.float64)
+    weights = np.ones(n, dtype=np.float64)
+
+    # utilitaires
+    def weighted_group_mean(values, groups, n_groups, w):
+        num = np.bincount(groups, weights=w * values, minlength=n_groups).astype(np.float64)
+        den = np.bincount(groups, weights=w, minlength=n_groups).astype(np.float64)
+        out = np.zeros(n_groups, dtype=np.float64)
+        mask = den > 0
+        out[mask] = num[mask] / den[mask]
+        return out
+
+    def weighted_center(arr, counts):
+        s = counts.sum()
+        if s <= 0:
+            return arr
+        return arr - (arr * counts).sum() / s
+
+    prev_obj = np.inf
+
+    for _ in range(max_iter):
+        # --- update FE zone
+        r_zone = y - alpha[lvl] - fe_date[date_codes]
+        fe_zone = weighted_group_mean(r_zone, zone_codes, nz, weights)
+        zone_counts = np.bincount(zone_codes, weights=weights, minlength=nz).astype(np.float64)
+        fe_zone = weighted_center(fe_zone, zone_counts)
+
+        # --- update FE date
+        r_date = y - alpha[lvl] - fe_zone[zone_codes]
+        fe_date = weighted_group_mean(r_date, date_codes, nd, weights)
+        date_counts = np.bincount(date_codes, weights=weights, minlength=nd).astype(np.float64)
+        fe_date = weighted_center(fe_date, date_counts)
+
+        # --- update alpha (résolution linéaire 5x5)
+        r_alpha = y - fe_zone[zone_codes] - fe_date[date_codes]
+        cls_w = np.bincount(lvl, weights=weights, minlength=C).astype(np.float64)
+        cls_sum = np.bincount(lvl, weights=weights * r_alpha, minlength=C).astype(np.float64)
+
+        A = np.diag(cls_w) + lambda_curv * P + 1e-10 * np.eye(C)
+        b = cls_sum
+        alpha = np.linalg.solve(A, b)
+
+        # --- robustification optionnelle (IRLS Huber)
+        resid = y - alpha[lvl] - fe_zone[zone_codes] - fe_date[date_codes]
+        if robust:
+            mad = np.median(np.abs(resid - np.median(resid))) + 1e-12
+            scale = 1.4826 * mad + 1e-12
+            u = np.abs(resid) / scale
+            weights = np.where(u <= huber_c, 1.0, huber_c / u)
+        else:
+            weights.fill(1.0)
+
+        # --- critère de convergence
+        obj = np.sum(weights * resid**2) + lambda_curv * float(alpha @ P @ alpha)
+        if np.isfinite(prev_obj):
+            rel = abs(prev_obj - obj) / max(abs(prev_obj), 1.0)
+            if rel < tol:
+                break
+        prev_obj = obj
+
+    # mu aux 5 classes
+    mu = {k: float(alpha[k]) for k in range(C)}
+
+    # "dense" pour compatibilité aval
+    x_dense = np.linspace(0.0, 4.0, 101)
+    mu_dense = np.interp(x_dense, np.arange(C, dtype=np.float64), alpha)
+
+    fit = {
+        "alpha": alpha.copy(),
+        "fe_zone": dict(zip(zone_uniques.tolist(), fe_zone.tolist())),
+        "fe_date": dict(zip(date_uniques.tolist(), fe_date.tolist())),
+        "lambda_curv": float(lambda_curv),
+        "robust": bool(robust),
+        "objective": float(prev_obj),
+    }
+
+    return mu_dense, fit
+
 # -----------------------------
 # Spline FE: mu(0..4) + passages (avec 4)
 # -----------------------------
@@ -2548,7 +2674,7 @@ PASSAGES = {
 # 1. Use Median instead of Mean for average delta
 # 2. Use Weights: w_min=0.5, w_viol=0.5 (defaults in comparison_analysis)
 
-def fit_spline_mu(df, df_spline=5):
+def fit_spline_mu_classic(df, df_spline=5):
     """
     Fits a spline model Y ~ bs(score) + C(zone) + C(date)
     and returns the predicted mean for each level in LEVELS.
@@ -2608,6 +2734,195 @@ def fit_spline_mu(df, df_spline=5):
             mu_dense.append(pred_clamped.mean())
         
     return mu, np.array(mu_dense), fit
+
+def fit_spline_mu(
+    df: pd.DataFrame,
+    df_spline: int = 6,
+    spline_degree: int = 3,
+    lambda_curv: float = 10.0,
+    dense_points: int = 101,
+):
+    """
+    Fit léger en mémoire :
+        Y = intercept + f(score) + FE_zone + FE_date + eps
+
+    avec :
+    - f(score) : B-spline de faible rang
+    - FE_zone, FE_date : one-hot sparse
+    - pénalisation de courbure sur les coeffs spline
+    - résolution sparse via LSQR
+
+    Paramètres
+    ----------
+    df : DataFrame avec colonnes ['score', 'Y', 'zone', 'date']
+    df_spline : nombre de knots internes/total pour la spline (faible rang recommandé: 5-8)
+    spline_degree : degré de la spline
+    lambda_curv : pénalité sur la dérivée seconde discrète des coeffs spline
+    dense_points : nb de points pour mu_dense
+
+    Retourne
+    --------
+    mu : dict {0: ..., 1: ..., 2: ..., 3: ..., 4: ...}
+    mu_dense : np.ndarray
+    fit : dict utile pour debug / prédiction
+    """
+    req = {"score", "Y", "zone", "date"}
+    missing = req - set(df.columns)
+    if missing:
+        raise ValueError(f"Colonnes manquantes: {sorted(missing)}")
+
+    work = df[["score", "Y", "zone", "date"]].copy()
+    work = work.dropna(subset=["score", "Y", "zone", "date"]).reset_index(drop=True)
+
+    x = work["score"].to_numpy(dtype=np.float64).reshape(-1, 1)
+    y = work["Y"].to_numpy(dtype=np.float64)
+    n = len(work)
+
+    if n == 0:
+        mu = {k: np.nan for k in range(5)}
+        return mu, np.full(dense_points, np.nan), {"error": "empty dataframe"}
+
+    # ------------------------------------------------------------------
+    # 1) Spline basis (faible rang)
+    # ------------------------------------------------------------------
+    # Score borné sur [0, 4] pour rester cohérent avec le scoring ordinal
+    x_clip = np.clip(x, 0.0, 4.0)
+
+    try:
+        spline = SplineTransformer(
+            n_knots=df_spline,
+            degree=spline_degree,
+            include_bias=False,
+            knots="uniform",
+            extrapolation="constant",
+            sparse_output=True,
+        )
+    except TypeError:
+        # Compatibilité versions sklearn plus anciennes
+        spline = SplineTransformer(
+            n_knots=df_spline,
+            degree=spline_degree,
+            include_bias=False,
+            knots="uniform",
+            extrapolation="constant",
+        )
+
+    B = spline.fit_transform(x_clip)
+    if not sparse.issparse(B):
+        B = sparse.csr_matrix(B)
+    else:
+        B = B.tocsr()
+
+    n_basis = B.shape[1]
+
+    # ------------------------------------------------------------------
+    # 2) Effets fixes sparse zone/date
+    # ------------------------------------------------------------------
+    def make_ohe():
+        try:
+            return OneHotEncoder(drop="first", handle_unknown="ignore", sparse_output=True)
+        except TypeError:
+            return OneHotEncoder(drop="first", handle_unknown="ignore", sparse=True)
+
+    enc_zone = make_ohe()
+    enc_date = make_ohe()
+
+    Z = enc_zone.fit_transform(work[["zone"]])
+    D = enc_date.fit_transform(work[["date"]])
+
+    if not sparse.issparse(Z):
+        Z = sparse.csr_matrix(Z)
+    else:
+        Z = Z.tocsr()
+
+    if not sparse.issparse(D):
+        D = sparse.csr_matrix(D)
+    else:
+        D = D.tocsr()
+
+    # Intercept sparse
+    I = sparse.csr_matrix(np.ones((n, 1), dtype=np.float64))
+
+    # Design matrix sparse
+    X = sparse.hstack([I, B, Z, D], format="csr")
+
+    # ------------------------------------------------------------------
+    # 3) Pénalité de courbure sur les coeffs spline
+    #    pénalise les secondes différences des coeffs de spline
+    # ------------------------------------------------------------------
+    if n_basis >= 3 and lambda_curv > 0:
+        D2 = np.diff(np.eye(n_basis), n=2, axis=0)  # (n_basis-2, n_basis)
+        n_pen = D2.shape[0]
+
+        # matrice de pénalité alignée avec X = [intercept | spline | zone | date]
+        P_left = sparse.csr_matrix((n_pen, 1))                 # intercept non pénalisé
+        P_mid = sparse.csr_matrix(D2) * np.sqrt(lambda_curv)   # spline pénalisée
+        P_zone = sparse.csr_matrix((n_pen, Z.shape[1]))        # FE non pénalisés
+        P_date = sparse.csr_matrix((n_pen, D.shape[1]))        # FE non pénalisés
+
+        P = sparse.hstack([P_left, P_mid, P_zone, P_date], format="csr")
+
+        X_aug = sparse.vstack([X, P], format="csr")
+        y_aug = np.concatenate([y, np.zeros(n_pen, dtype=np.float64)])
+    else:
+        X_aug = X
+        y_aug = y
+
+    # ------------------------------------------------------------------
+    # 4) Résolution sparse
+    # ------------------------------------------------------------------
+    sol = lsqr(X_aug, y_aug, atol=1e-8, btol=1e-8, iter_lim=2000)
+    beta = sol[0]
+
+    intercept = float(beta[0])
+    beta_spline = beta[1:1 + n_basis]
+    beta_zone = beta[1 + n_basis:1 + n_basis + Z.shape[1]]
+    beta_date = beta[1 + n_basis + Z.shape[1]:]
+
+    # ------------------------------------------------------------------
+    # 5) Construire mu(k) et mu_dense
+    #    Ici on fixe les FE à leur catégorie de référence (0 après drop='first').
+    #    Pour les deltas mu[b]-mu[a], cette constante de référence s'annule.
+    # ------------------------------------------------------------------
+    x_levels = np.arange(5, dtype=np.float64).reshape(-1, 1)
+    x_levels_clip = np.clip(x_levels, 0.0, 4.0)
+
+    B_levels = spline.transform(x_levels_clip)
+    if sparse.issparse(B_levels):
+        B_levels = B_levels.toarray()
+
+    mu_levels = intercept + B_levels @ beta_spline
+    mu = {int(k): float(v) for k, v in zip(range(5), mu_levels)}
+
+    x_dense = np.linspace(0.0, 4.0, dense_points, dtype=np.float64).reshape(-1, 1)
+    B_dense = spline.transform(x_dense)
+    if sparse.issparse(B_dense):
+        B_dense = B_dense.toarray()
+    mu_dense = intercept + B_dense @ beta_spline
+
+    # ------------------------------------------------------------------
+    # 6) Quelques infos utiles
+    # ------------------------------------------------------------------
+    fit = {
+        "intercept": intercept,
+        "beta_spline": beta_spline.copy(),
+        "beta_zone": beta_zone.copy(),
+        "beta_date": beta_date.copy(),
+        "spline_transformer": spline,
+        "zone_encoder": enc_zone,
+        "date_encoder": enc_date,
+        "n_obs": int(n),
+        "n_basis": int(n_basis),
+        "n_zone_fe": int(Z.shape[1]),
+        "n_date_fe": int(D.shape[1]),
+        "lambda_curv": float(lambda_curv),
+        "lsqr_istop": int(sol[1]),
+        "lsqr_iters": int(sol[2]),
+        "lsqr_r1norm": float(sol[3]),
+        "lsqr_r2norm": float(sol[4]),
+    }
+
+    return mu, mu_dense, fit
     
 def compute_score_for_k(mu, sigma, k, lvl_counts,
                         min_n=1, min_k=1,
@@ -2630,7 +2945,7 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         if n_a >= min_n and n_b >= min_n:
             delta = mu[b] - (mu[a] + min_gain)
             deltas.append(delta)
-            coverage += min(n_a, n_b)
+            coverage += 1.0
             
     # Filter based on min_k
     if coverage < min_k:
@@ -3022,3 +3337,394 @@ def round_floats(obj: Any, ndigits: int = 2, round_keys: bool = False) -> Any:
 
     # autre type (int, str, bool, None, etc.) -> inchangé
     return obj
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scoring class
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Scoring:
+    """
+    Classe regroupant les fonctions de scoring :
+      - fit_spline_mu
+      - compute_score_for_k
+      - evaluation_scoring
+      - evaluate_metrics
+
+    Les hyper-paramètres sont fixés à la construction et utilisés par défaut
+    dans chaque méthode (mais peuvent être surchargés par appel).
+
+    Normalisation de référence
+    --------------------------
+    Quand evaluation_scoring(reference=True) est appelé sur un jeu de données
+    de référence (ex. entraînement), la classe mémorise la moyenne absolue du
+    delta brut pour chaque transition (a→b) : pair_mean_deltas[(a,b)].
+
+    Lors des appels suivants avec reference=False, chaque delta est divisé par
+    la moyenne de référence correspondante (au lieu de sigma), permettant une
+    comparaison inter-runs sur la même échelle.
+    """
+
+    def __init__(
+        self,
+        df_spline: int = 5,
+        min_n: int = 1,
+        min_k: int = 0,
+        min_gain=None,          # float ou list[float] de longueur 4
+        n0: int = 100,
+        w_avg: float = 1.0,
+        w_min: float = 1.0,
+        w_neg: float = 1.0,
+        w_viol: float = 1.0
+    ):
+        self.df_spline = df_spline
+        self.min_n     = min_n
+        self.min_k     = min_k
+        self.min_gain  = min_gain if min_gain is not None else [0.0, 0.0, 0.0, 0.0]
+        self.n0        = n0
+        self.w_avg     = w_avg
+        self.w_min     = w_min
+        self.w_neg     = w_neg
+        self.w_viol    = w_viol
+
+        # Stocke la moyenne absolue du delta brut par pair (a, b) depuis le run de référence
+        self.pair_mean_deltas: dict = {}
+
+    # ------------------------------------------------------------------
+    def fit_spline_mu(self, df, df_spline=None):
+        """
+        Ajuste un spline Y ~ bs(score) + C(zone) + C(date).
+        Retourne (mu, mu_dense, fit).
+        """
+        return fit_spline_mu(df, df_spline=df_spline if df_spline is not None else self.df_spline)
+
+    def set_sigma(self, sigma):
+        self.sigma = sigma
+
+    # ------------------------------------------------------------------
+    def _compute_score_for_k_with_ref(self, mu, k, lvl_counts,
+                                      min_n, min_k, min_gain,
+                                      w_avg, w_min, w_neg, w_viol,
+                                      pair_mean_deltas):
+        """
+        Version interne de compute_score_for_k qui supporte la normalisation
+        par pair_mean_deltas.
+        Sans pair_mean_deltas : les deltas sont utilisés bruts (pas de division par sigma).
+
+        Retourne (score, coverage, raw_deltas_by_pair)
+          - raw_deltas_by_pair : dict {(a,b): delta_brut} pour toutes les paires valides
+        """
+        pairs = PASSAGES.get(k, [])
+        deltas = []
+        pairs_used = []
+        coverage = 0
+        missing_penalized = []  # pairs with missing class but known in reference → penalty -1
+
+        for (a, b) in pairs:
+            n_a = lvl_counts.get(a, 0)
+            n_b = lvl_counts.get(b, 0)
+            if n_a >= min_n and n_b >= min_n:
+                delta = mu[b] - (mu[a] + min_gain)
+                deltas.append(delta)
+                pairs_used.append((a, b))
+                coverage += min(n_a, n_b)
+
+
+        raw_deltas_by_pair = {pair: d for pair, d in zip(pairs_used, deltas)}
+        
+        if coverage < min_k or len(deltas) == 0:
+            return 0.0, coverage, raw_deltas_by_pair
+
+        deltas = np.array(deltas)
+
+        # ── Normalisation ──────────────────────────────────────────────
+        if pair_mean_deltas:
+            # Normalise par la valeur de référence de chaque paire
+            norm = np.array([
+                abs(pair_mean_deltas.get(pair, 1.0)) or 1.0
+                for pair in pairs_used
+            ])
+            deltas_norm = deltas / norm
+            #deltas_norm = deltas
+        else:
+            # Y a été normalisé par sigma avant le spline → deltas déjà en unités σ
+            deltas_norm = deltas
+
+        # Injecte les pénalités/neutralités pour les paires sans classe suffisante
+        # (-1.0 si paire connue en référence, 0.0 sinon)
+        if missing_penalized:
+            deltas_norm = np.concatenate([deltas_norm, np.array(missing_penalized)])
+        # ──────────────────────────────────────────────────────────────
+
+        avg_delta_std = np.median(deltas_norm)
+        min_delta_std = np.min(deltas_norm)
+        neg_mass_std  = np.mean(np.clip(-deltas_norm, 0.0, None))
+        viol_rate     = np.mean(deltas_norm < 0.0)
+
+        score = (
+            (w_avg * avg_delta_std + w_min * min_delta_std) / 2
+            - w_neg * neg_mass_std * (1 + w_viol * viol_rate)
+        )
+
+        if np.isnan(score):
+            return 0.0, coverage, raw_deltas_by_pair
+        if np.abs(score) > 1e6:
+            score = np.clip(score, -1e6, 1e6)
+
+        return float(score), coverage, raw_deltas_by_pair
+
+    # ------------------------------------------------------------------
+    def compute_score_for_k(self, mu, k, lvl_counts,
+                            min_n=None, min_k=None, min_gain=None,
+                            w_avg=None, w_min=None, w_neg=None, w_viol=None):
+        """
+        Calcule le score pour un passage k (avec normalisation de référence si disponible).
+        Retourne (score, coverage).
+        """
+        score, coverage, _ = self._compute_score_for_k_with_ref(
+            mu, k, lvl_counts,
+            min_n    = min_n    if min_n    is not None else self.min_n,
+            min_k    = min_k    if min_k    is not None else self.min_k,
+            min_gain = min_gain if min_gain is not None else (
+                self.min_gain[k - 1] if isinstance(self.min_gain, (list, tuple)) else self.min_gain
+            ),
+            w_avg  = w_avg  if w_avg  is not None else self.w_avg,
+            w_min  = w_min  if w_min  is not None else self.w_min,
+            w_neg  = w_neg  if w_neg  is not None else self.w_neg,
+            w_viol = w_viol if w_viol is not None else self.w_viol,
+            pair_mean_deltas = self.pair_mean_deltas,
+        )
+        return score, coverage
+
+    # ------------------------------------------------------------------
+    def evaluation_scoring(self, ypred, ytrue, dates, zones,
+                           df_spline=None, min_n=None, min_k=None,
+                           min_gain=None, n0=None,
+                           reference: bool = False):
+        """
+        Lance le scoring monotone complet.
+        
+        NOTE SUR L'INTERPRÉTATION DU SCORE :
+        L'objectif est d'obtenir le score le plus élevé possible, l'idéal étant de se 
+        rapprocher de 1.0. Plus le score est proche de 1.0, meilleure est la prédiction monotone.
+        Attention : il est extrêmement difficile d'atteindre 1.0. Le score pénalise très fortement 
+        les marges négatives et les violations de monotonie inter-classes.
+        
+        Paramètres
+        ----------
+        reference : bool (défaut False)
+            - True  : mémorise dans self.pair_mean_deltas la moyenne absolue
+            - False : si self.pair_mean_deltas est renseigné, normalise les
+                      deltas par les moyennes de référence stockées.
+                      Sans référence : deltas bruts (pas de division par sigma).
+
+        Retourne (score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense).
+        """
+        _df_spline = df_spline if df_spline is not None else self.df_spline
+        _min_n     = min_n     if min_n     is not None else self.min_n
+        _min_k     = min_k     if min_k     is not None else self.min_k
+        _min_gain  = min_gain  if min_gain  is not None else self.min_gain
+        _n0        = n0        if n0        is not None else self.n0
+
+        # ── Spline sur Y normalisé par sigma ────────────────────────────
+        df = pd.DataFrame({"score": ypred, "Y": ytrue, "date": dates, "zone": zones})
+        df["_lvl"] = df["score"].clip(0, 4).astype(int)
+        lvl_counts = df["_lvl"].value_counts().to_dict()
+
+        df["Y"] = df["Y"] / self.sigma
+        mu, mu_dense, fit = self.fit_spline_mu(df, df_spline=_df_spline)
+
+        if all(np.isnan(list(mu.values()))):
+            return np.nan, np.nan, {}, {}, np.nan, mu, mu_dense
+
+        # ── Calcul des scores (avec ou sans normalisation de référence) ─
+
+        # ── Passe 1 (reference=True) : collecter les deltas bruts directement ──
+        if reference:
+            raw_pass: dict = {}
+            for k in [1, 2, 3, 4]:
+                min_g = _min_gain if isinstance(_min_gain, (int, float)) else _min_gain[k - 1]
+                for (a, b) in PASSAGES.get(k, []):
+                    n_a, n_b = lvl_counts.get(a, 0), lvl_counts.get(b, 0)
+                    if n_a >= _min_n and n_b >= _min_n:
+                        #print(f'(a, b)=({a}, {b}), (mu[a], mu[b])= {mu[a]}, {mu[b]}')
+                        delta = mu[b] - (mu[a] + min_g)
+                        raw_pass[(a, b)] = delta
+
+            # Stocker |delta| uniquement pour les paires avec delta POSITIF dans la référence.
+            # Les paires anti-monotones (delta < 0) de la référence sont exclues :
+            # elles n'ont pas de sens comme étalon de normalisation.
+            self.pair_mean_deltas = {
+                pair: delta   # delta > 0, donc abs inutile
+                for pair, delta in raw_pass.items()
+                if not np.isnan(delta) and delta > 1e-9
+            }
+            
+        # ── Passe de scoring : normalise par pair_mean_deltas ────────────────
+        # En reference=True  : pair_mean_deltas vient d'être peuplé → normed = ±1 par paire
+        # En reference=False : on utilise les valeurs stockées depuis define_reference_model
+        pair_mean_deltas_for_scoring = self.pair_mean_deltas
+
+        score_adj_k = {}
+        coverage_k  = {}
+
+        for k in [1, 2, 3, 4]:
+            min_g = _min_gain if isinstance(_min_gain, (int, float)) else _min_gain[k - 1]
+
+            score, cov, _ = self._compute_score_for_k_with_ref(
+                mu, k, lvl_counts,
+                min_n    = _min_n,
+                min_k    = _min_k,
+                min_gain = min_g,
+                w_avg    = self.w_avg,
+                w_min    = self.w_min,
+                w_neg    = self.w_neg,
+                w_viol   = self.w_viol,
+                pair_mean_deltas = pair_mean_deltas_for_scoring,
+            )
+            score_adj_k[k] = score
+            coverage_k[k]  = cov
+
+        # ── Agrégation ────────────────────────────────────────────────
+        score_low  = score_adj_k[1] + score_adj_k[2]
+        score_high = score_adj_k[3] + score_adj_k[4]
+
+        score_low  = 0.0 if np.isnan(score_low)  else score_low
+        score_high = 0.0 if np.isnan(score_high) else score_high
+
+        if np.sum(ytrue == 0) > _n0:
+            c_min = float(np.min(np.round(ypred)))
+            score_min_class = -c_min * 2 + 1
+        else:
+            score_min_class = 0.0
+
+        return score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense
+
+    def _plot(self, ypred, ytrue, dates, zones, title="Scoring Fit", dir_output=None):
+        """
+        Affiche le fit du scoring monotone : mu(score).
+        Retourne la figure.
+        """
+        score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense = \
+            self.evaluation_scoring(ypred, ytrue, dates, zones)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Dense spline Curve
+        if mu_dense is not None and len(mu_dense) > 0:
+            x_dense = np.linspace(0.0, 4.0, len(mu_dense))
+            ax.plot(x_dense, mu_dense, label='Spline Fit $\mu(score)$', color='blue', linewidth=2, alpha=0.8)
+
+        # Discrete points
+        if mu and len(mu) > 0:
+            levels = sorted(mu.keys())
+            mu_vals = [mu[l] for l in levels]
+            ax.scatter(levels, mu_vals, color='red', s=80, label='Discrete Class Means ($\mu_k$)', zorder=5)
+
+            # Annotate mu values
+            for l, v in zip(levels, mu_vals):
+                ax.annotate(f"{v:.3f}", (l, v), textcoords="offset points", xytext=(0,10), ha='center', fontsize=9, color='red', fontweight='bold')
+
+        # Raw data summary (optional): show average target per level (unadjusted)
+        df_raw = pd.DataFrame({"lvl": np.clip(ypred, 0, 4).astype(int), "Y": ytrue})
+        # Normalize Y by self.sigma if set
+        if hasattr(self, 'sigma') and self.sigma:
+            df_raw["Y"] = df_raw["Y"] / self.sigma
+            ylabel = "Adjusted Target Mean ($\mu/\sigma$)"
+        else:
+            ylabel = "Adjusted Target Mean ($\mu$)"
+
+        raw_means = df_raw.groupby("lvl")["Y"].mean()
+        ax.scatter(raw_means.index, raw_means.values, marker='x', s=60, color='green', label='Raw Class Means (Unadjusted)', alpha=0.6)
+
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel("Predicted Class (0-4)", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_xticks(range(5))
+        ax.grid(True, linestyle='--', alpha=0.6)
+
+        # Text box with scores
+        scores_text = (f"Score Low: {score_low:.4f}\n"
+                       f"Score High: {score_high:.4f}\n"
+                       f"Min Class Penalty: {score_min_class:.4f}\n"
+                       f"Total: {score_low+score_high+score_min_class:.4f}")
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        ax.text(0.05, 0.95, scores_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=props)
+
+        ax.legend(loc='lower right')
+
+        if dir_output:
+            out_path = Path(dir_output) / f"{title.lower().replace(' ', '_')}.png"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(out_path, dpi=150, bbox_inches='tight')
+            print(f"Scoring plot saved to {out_path}")
+
+        plt.show()
+        return fig
+
+    # ------------------------------------------------------------------
+    def evaluate_metrics(self, y_true, y_pred, dates=None, zones=None,
+                         y_pred_probas=None, reference: bool = False):
+        """
+        Calcule l'ensemble des métriques (IoU, F1, recall, score monotone, etc.).
+        Le paramètre `reference` est transmis à evaluation_scoring.
+        
+        NOTE : Pour la métrique 'score' (score monotone), plus la valeur est proche de 1.0, 
+        mieux c'est. C'est une métrique très sévère, l'atteinte d'un score de 1.0 est extrêmement difficile.
+        
+        Retourne un dictionnaire de métriques.
+        """
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        if y_pred.ndim > 1:
+            y_pred = y_pred[:, 0]
+
+        iou   = iou_score(y_true, y_pred)
+        f1    = f1_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+        prec  = precision_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+        rec   = recall_score((y_true > 0).astype(int), (y_pred > 0).astype(int), zero_division=0)
+        f1_macro   = f1_score(y_true.astype(int), y_pred.astype(int), zero_division=0, average='macro')
+        prec_macro = precision_score(y_true.astype(int), y_pred.astype(int), zero_division=0, average='macro')
+        rec_macro  = recall_score(y_true.astype(int), y_pred.astype(int), zero_division=0, average='macro')
+        ent   = entropy(y_pred_probas) if y_pred_probas is not None else 0
+        #auoc  = auoc_func(conf_matrix=confusion_matrix(y_true, y_pred, labels=np.union1d(y_true, y_pred)))
+        under = under_prediction_score(y_true, y_pred)
+        over  = over_prediction_score(y_true, y_pred)
+
+        results = {
+            'iou': iou, 'f1': f1, 'under': under, 'over': over,
+            'prec': prec, 'recall': rec,
+            'auoc': -1.0,
+            'f1_macro': f1_macro, 'prec_macro': prec_macro, 'rec_macro': rec_macro,
+            'ent': ent,
+        }
+
+        try:
+            if dates is not None and zones is not None:
+                score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense = \
+                    self.evaluation_scoring(y_pred, y_true, dates, zones, reference=reference)
+                    
+                results['score_high']      = score_high
+                results['score_low']       = score_low
+                results['score']           = score_high + score_low
+                results['score_min_class'] = score_min_class
+                for k, count in coverage_k.items():
+                    results[f'coverage_k{k}'] = count
+                for k, val in score_adj_k.items():
+                    results[f'score_k{k}'] = val
+                for k, val in mu.items():
+                    results[f'mu_{int(k)}'] = val
+                for idx, val in enumerate(mu_dense):
+                    results[f'mu_dense_{idx}'] = val
+            else:
+                for key in ('score_high', 'score_low', 'score', 'score_min_class'):
+                    results[key] = np.nan
+                for k in range(5):
+                    results[f'mu_{k}'] = np.nan
+        except Exception as e:
+            print(f"Warning: monotonic scoring failed in Scoring.evaluate_metrics: {e}")
+            for key in ('score_high', 'score_low', 'score', 'score_min_class'):
+                results[key] = np.nan
+
+        return results
