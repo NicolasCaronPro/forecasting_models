@@ -224,7 +224,7 @@ class SpatialContextSet(nn.Module):
 class MLPLayer(torch.nn.Module):
     def __init__(self, in_feats, hidden_dim, device):
         super(MLPLayer, self).__init__()
-        self.mlp = nn.Linear(in_feats, hidden_dim, bias=True).to(device)
+        self.mlp = nn.Linear(in_feats, hidden_dim, weight_initializer='glorot', bias=True, bias_initializer='zeros').to(device)
         #self.mlp = torch.nn.Linear(in_feats, hidden_dim).to(device)
     def forward(self, x):
         return self.mlp(x)
@@ -232,7 +232,6 @@ class MLPLayer(torch.nn.Module):
 class NetMLP(torch.nn.Module):
     def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0, **kwargs):
         super(NetMLP, self).__init__()
-        self.horizon = horizon
         self.layer1 = MLPLayer(in_dim * n_sequences + end_channels, hidden_dim[0], device) if horizon > 0 else MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
         self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
         self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
@@ -747,7 +746,6 @@ class GraphCastGRU(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.end_channels = end_channels
-        self.task_type = task_type
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
@@ -909,7 +907,6 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.act_func = getattr(torch.nn, act_func)()
         self.return_hidden = return_hidden
         self.end_channels = end_channels
-        self.task_type = task_type
         self.decoder = None
         self._decoder_input = None
         self.horizon = horizon

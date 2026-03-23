@@ -7157,7 +7157,7 @@ class CLMBinnedTransitionLoss(nn.Module):
             p[:, 1:-1] = Fk[:, 1:] - Fk[:, :-1]
         p[:, -1] = 1.0 - Fk[:, -1]
         return p  # (N, C)
-
+        
     def _softmin(self, x):
         return -(1.0 / self.beta) * torch.logsumexp(-self.beta * x, dim=0)
 
@@ -7755,7 +7755,7 @@ def check_finite(name, x):
             raise RuntimeError(f"[NaN ERROR] {name} contains NaN or Inf")
 
 class ClusterCLMBinnedTransitionLoss(nn.Module):
-    def __init__(self, num_classes: int, beta=2.33, t=0.0, eps=1e-8,
+    def __init__(self, num_classes: int, beta=2.33, t=0.0, eps=1e-4,
                  wmed=1.56, wmin=0.0, wneg=1.01, wk=None,
                  learngains=False, gainsfloor=0.5, wkdecay="power", wkpower=2.06, wklambda=0.3495008616795649,
                  wkmin=0.0, gamma=5.0, taugate=0.05, gatetemp=0.11,
@@ -8430,8 +8430,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             torch.full_like(p_t, self.falpha),
             torch.full_like(p_t, 1.0 - self.falpha)
         )
+
         focal_weight = alpha_t * (1.0 - p_t).pow(self.fgamma)
         focal_ce     = -torch.log(p_t)
+
+        #print('#######################################')
+        #print(p_t)
+
+        #print(focal_ce)
 
         check_finite("prob_fire", prob_fire)
         check_finite("p_t", p_t)
