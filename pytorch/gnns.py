@@ -3,14 +3,32 @@ try:
     from forecasting_models.pytorch.graphcast.graph_cast_net import *
 except ImportError:
     pass
-from dgl.nn.pytorch.conv import GraphConv, GATConv
+try:
+    try:
+        from dgl.nn.pytorch.conv import GraphConv, GATConv
+    except ImportError:
+        pass
+except ImportError:
+    pass
 from torch_geometric.nn import GraphNorm, global_mean_pool, global_max_pool
 from torch.nn import ReLU, GELU
 from blitz.modules import BayesianLinear
 from blitz.utils import variational_estimator
 from blitz.losses import kl_divergence_from_nn
-import dgl
-import dgl.function as fn
+try:
+    try:
+        import dgl
+    except ImportError:
+        pass
+except ImportError:
+    pass
+try:
+    try:
+        import dgl.function as fn
+    except ImportError:
+        pass
+except ImportError:
+    pass
 import math
 import numpy as np
 import scipy.sparse

@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 import torch
 
@@ -98,7 +97,7 @@ class GraphCastMeshProcessor(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         if self.has_time_dim and len(nfeat.shape) != 3:
             raise ValueError(

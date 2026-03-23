@@ -5,7 +5,6 @@ import logging
 
 from torch import Tensor
 import torch.nn as nn
-from dgl import DGLGraph
 
 from .graph_cast_net import GraphCastNet
 from .cube_embedder import CubeConv3dViT, CubeConv3d, CubeConv2dLTAE
@@ -16,9 +15,9 @@ logger = logging.getLogger(__name__)
 class GraphCastCubeNet(torch.nn.Module):
     def __init__(
         self,
-        mesh_graph: DGLGraph,
-        g2m_graph: DGLGraph,
-        m2g_graph: DGLGraph,
+        mesh_graph: "Any",
+        g2m_graph: "Any",
+        m2g_graph: "Any",
         grid_width: int = 180,
         grid_height: int = 360,
         timeseries_len: int = 1,

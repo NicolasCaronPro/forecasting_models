@@ -17,7 +17,6 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 import math
 
@@ -149,7 +148,7 @@ class MeshProcessorGruBlock(nn.Module):
         nfeat: Tensor,
         ehidden: Tensor,
         nhidden: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tuple[Tensor, Tensor]:
 
         # First concatenate edge src and dst nodes with edge features.

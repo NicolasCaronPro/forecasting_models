@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 
 from .gnn_layers.mesh_edge_block import MeshEdgeBlock
@@ -94,7 +93,7 @@ class GraphCastProcessor(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         for layer in self.processor_layers:
             efeat, nfeat = layer(efeat, nfeat, graph)

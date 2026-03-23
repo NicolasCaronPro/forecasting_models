@@ -17,7 +17,6 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 
 from .utils import aggregate_and_concat, concat_efeat
@@ -94,7 +93,7 @@ class MeshProcessorBlock(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tuple[Tensor, Tensor]:
         # First concatenate edge src and dst nodes with edge features.
         # Pass result from edge MLP.

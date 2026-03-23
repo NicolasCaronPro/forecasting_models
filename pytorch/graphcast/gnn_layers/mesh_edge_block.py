@@ -16,7 +16,6 @@
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 
 from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum
@@ -82,7 +81,7 @@ class MeshEdgeBlock(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         efeat_new = self.edge_mlp(efeat, nfeat, graph)
         efeat_new = efeat_new + efeat

@@ -1,7 +1,13 @@
 from typing import List
 import numpy as np
 import torch
-import dgl
+try:
+    try:
+        import dgl
+    except ImportError:
+        pass
+except ImportError:
+    pass
 from torch import Tensor, testing
 
 
@@ -50,7 +56,7 @@ def create_graph(
     to_bidirected: bool = True,
     add_self_loop: bool = False,
     dtype: torch.dtype = torch.int32,
-) -> dgl.DGLGraph:
+) -> "Any":
     """
     Creates a DGL graph from an adj matrix in COO format.
 
@@ -69,7 +75,7 @@ def create_graph(
 
     Returns
     -------
-    DGLGraph
+    "Any"
         The dgl Graph.
     """
     graph = dgl.graph((src, dst), idtype=dtype)
@@ -82,7 +88,7 @@ def create_graph(
 
 def create_heterograph(
     src: List, dst: List, labels: str, dtype: torch.dtype = torch.int32
-) -> dgl.DGLGraph:
+) -> "Any":
     """Creates a heterogeneous DGL graph from an adj matrix in COO format.
 
     Parameters
@@ -98,7 +104,7 @@ def create_heterograph(
 
     Returns
     -------
-    DGLGraph
+    "Any"
         The dgl Graph.
     """
     graph = dgl.heterograph({labels: ("coo", (src, dst))}, idtype=dtype)
@@ -106,13 +112,13 @@ def create_heterograph(
 
 
 def add_edge_features(
-    graph: dgl.DGLGraph, pos: Tensor, normalize: bool = True
-) -> dgl.DGLGraph:
+    graph: "Any", pos: Tensor, normalize: bool = True
+) -> "Any":
     """Adds edge features to the graph.
 
     Parameters
     ----------
-    graph : DGLGraph
+    graph : "Any"
         The graph to add edge features to.
     pos : Tensor
         The node positions.
@@ -121,7 +127,7 @@ def add_edge_features(
 
     Returns
     -------
-    DGLGraph
+    "Any"
         The graph with edge features.
     """
 
@@ -171,20 +177,20 @@ def add_edge_features(
     return graph
 
 
-def add_node_features(graph: dgl.DGLGraph, pos: Tensor) -> dgl.DGLGraph:
+def add_node_features(graph: "Any", pos: Tensor) -> "Any":
     """Adds cosine of latitude, sine and cosine of longitude as the node features
     to the graph.
 
     Parameters
     ----------
-    graph : DGLGraph
+    graph : "Any"
         The graph to add node features to.
     pos : Tensor
         The node positions.
 
     Returns
     -------
-    graph : DGLGraph
+    graph : "Any"
         The graph with node features.
     """
     latlon = xyz2latlon(pos)

@@ -4,7 +4,6 @@ import torch
 import logging
 
 from torch import Tensor
-from dgl import DGLGraph
 
 from .gnn_layers.embedder import GraphCastDecoderEmbedder, GraphCastEncoderEmbedder
 from .gnn_layers.mesh_graph_encoder import MeshGraphEncoder
@@ -138,7 +137,7 @@ class GraphCastNet(torch.nn.Module):
             norm_type=None,
         )
 
-    def forward(self, grid_nfeat: Tensor, mesh_graph : DGLGraph, g2m_graph: DGLGraph, m2g_graph: DGLGraph):
+    def forward(self, grid_nfeat: Tensor, mesh_graph : "Any", g2m_graph: "Any", m2g_graph: "Any"):
         
         #grid_nfeat = grid_nfeat.view(grid_nfeat.shape[0], grid_nfeat.shape[1])
 

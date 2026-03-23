@@ -18,7 +18,6 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 
 from .mesh_graph_mlp import MeshGraphMLP
@@ -77,7 +76,7 @@ class MeshNodeBlock(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tuple[Tensor, Tensor]:
         # update edge features
         cat_feat = aggregate_and_concat(efeat, nfeat, graph, self.aggregation)

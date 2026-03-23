@@ -16,18 +16,34 @@
 
 from typing import Any, Callable, Dict, Tuple, Union
 
-import dgl.function as fn
+try:
+    try:
+        import dgl.function as fn
+    except ImportError:
+        pass
+except ImportError:
+    pass
 import torch
-from dgl import DGLGraph
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
-from dgl.nn.functional import edge_softmax
+try:
+    try:
+        from dgl.nn.functional import edge_softmax
+    except ImportError:
+        pass
+except ImportError:
+    pass
 import torch.nn as nn
 
 import torch
 import torch.nn as nn
-import dgl.function as fn
-from dgl import DGLGraph
+try:
+    try:
+        import dgl.function as fn
+    except ImportError:
+        pass
+except ImportError:
+    pass
 
 # ---------------------------
 # 1) Scores de type Transformer
@@ -41,7 +57,7 @@ class EdgeScoreDotProductTransformer(nn.Module):
         self.Be = nn.Linear(input_dim_edge, num_heads, bias=False) if input_dim_edge > 0 else None  # biais par arête
         self.scale = head_dim ** 0.5
 
-    def forward(self, g: DGLGraph, h_src: torch.Tensor,
+    def forward(self, g: "Any", h_src: torch.Tensor,
                 h_dst: torch.Tensor, efeat: torch.Tensor) -> torch.Tensor:
         """
         Retourne des scores bruts (E, H) = (u·v / sqrt(Dh)) + biais d'arête (optionnel)
@@ -73,7 +89,7 @@ class EdgeScoreDotProductGAT(nn.Module):
         nn.init.xavier_uniform_(self.a,        gain=1.414)
         self.leakyrelu = nn.LeakyReLU(negative_slope)
 
-    def forward(self, g: DGLGraph, h_src: torch.Tensor,
+    def forward(self, g: "Any", h_src: torch.Tensor,
                 h_dst: torch.Tensor, efeat: torch.Tensor = None) -> torch.Tensor:
         """
         Retourne des scores bruts e_ij^(h) de GAT (E, H) = LeakyReLU(a_l^T z_i + a_r^T z_j)
@@ -170,7 +186,7 @@ def concat_message_function(edges: Tensor) -> Dict[str, Tensor]:
 def concat_efeat_dgl(
     efeat: Tensor,
     nfeat: Union[Tensor, Tuple[torch.Tensor, torch.Tensor]],
-    graph: DGLGraph,
+    graph: "Any",
 ) -> Tensor:
     """Concatenates edge features with source and destination node features.
     Use for homogeneous graphs.
@@ -181,7 +197,7 @@ def concat_efeat_dgl(
         Edge features.
     nfeat : Tensor | Tuple[Tensor, Tensor]
         Node features.
-    graph : DGLGraph
+    graph : "Any"
         Graph.
 
     Returns
@@ -208,7 +224,7 @@ def concat_efeat_dgl(
 def concat_efeat(
     efeat: Tensor,
     nfeat: Union[Tensor, Tuple[Tensor]],
-    graph: DGLGraph,
+    graph: "Any",
 ) -> Tensor:
     """Concatenates edge features with source and destination node features.
     Use for homogeneous graphs.
@@ -219,7 +235,7 @@ def concat_efeat(
         Edge features.
     nfeat : Tensor | Tuple[Tensor]
         Node features.
-    graph : DGLGraph
+    graph : "Any"
         Graph.
 
     Returns
@@ -266,7 +282,7 @@ def sum_efeat_dgl(
 def sum_efeat(
     efeat: Tensor,
     nfeat: Union[Tensor, Tuple[Tensor]],
-    graph: DGLGraph,
+    graph: "Any",
 ):
     """Sums edge features with source and destination node features.
 
@@ -277,7 +293,7 @@ def sum_efeat(
     nfeat : Tensor | Tuple[Tensor]
         Node features (static setting) or tuple of node features of
         source and destination nodes (bipartite setting).
-    graph : DGLGraph
+    graph : "Any"
         The underlying graph.
 
     Returns
@@ -299,7 +315,7 @@ def sum_efeat(
 
 @torch.jit.ignore()
 def agg_concat_dgl(
-    efeat: Tensor, dst_nfeat: Tensor, graph: DGLGraph, aggregation: str
+    efeat: Tensor, dst_nfeat: Tensor, graph: "Any", aggregation: str
 ) -> Tensor:
     """Aggregates edge features and concatenates result with destination node features.
 
@@ -309,7 +325,7 @@ def agg_concat_dgl(
         Edge features.
     nfeat : Tensor
         Node features (destination nodes).
-    graph : DGLGraph
+    graph : "Any"
         Graph.
     aggregation : str
         Aggregation method (sum or mean).
@@ -344,7 +360,7 @@ def agg_concat_dgl(
 def aggregate_and_concat(
     efeat: Tensor,
     nfeat: Tensor,
-    graph: DGLGraph,
+    graph: "Any",
     aggregation: str,
 ):
     """
@@ -356,7 +372,7 @@ def aggregate_and_concat(
         Edge features.
     nfeat : Tensor
         Node features (destination nodes).
-    graph : DGLGraph
+    graph : "Any"
         Graph.
     aggregation : str
         Aggregation method (sum or mean).
@@ -380,7 +396,7 @@ def aggregate_and_concat(
 def aggregate_and_concat_with_attention(
     efeat: Tensor,
     dst_nfeat: Tensor,
-    graph: DGLGraph,
+    graph: "Any",
     edge_scores: Tensor,
     norm_by: str = "dst",
 ) -> Tensor:
@@ -394,7 +410,7 @@ def aggregate_and_concat_with_attention(
         Features des arêtes, shape (E, De).
     dst_nfeat : Tensor
         Features des nœuds destination, shape (N_dst, Dd).
-    graph : DGLGraph
+    graph : "Any"
         Graphe bipartite/grid->mesh.
     edge_scores : Tensor
         Scores d'attention par arête avant softmax. Shape (E,) ou (E, H).
@@ -438,7 +454,7 @@ def aggregate_and_concat_with_attention(
 def aggregate_and_concat_with_attention(
     efeat: Tensor,
     dst_nfeat: Tensor,
-    graph: DGLGraph,
+    graph: "Any",
     edge_scores: Tensor,
     norm_by: str = "dst",
 ) -> Tensor:
@@ -452,7 +468,7 @@ def aggregate_and_concat_with_attention(
         Features des arêtes, shape (E, De).
     dst_nfeat : Tensor
         Features des nœuds destination, shape (N_dst, Dd).
-    graph : DGLGraph
+    graph : "Any"
         Graphe bipartite/grid->mesh.
     edge_scores : Tensor
         Scores d'attention par arête avant softmax. Shape (E,) ou (E, H).

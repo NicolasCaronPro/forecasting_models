@@ -1,9 +1,20 @@
-import dgl
-import dgl.function as fn
+try:
+    try:
+        import dgl
+    except ImportError:
+        pass
+except ImportError:
+    pass
+try:
+    try:
+        import dgl.function as fn
+    except ImportError:
+        pass
+except ImportError:
+    pass
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
-from dgl import DGLGraph
 
 class GCNLayer(nn.Module):
     def __init__(self, in_feats, out_feats):

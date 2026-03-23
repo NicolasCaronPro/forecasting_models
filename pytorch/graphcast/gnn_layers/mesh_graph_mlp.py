@@ -20,8 +20,13 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dgl import DGLGraph
-from dgl.nn.pytorch import GATConv
+try:
+    try:
+        from dgl.nn.pytorch import GATConv
+    except ImportError:
+        pass
+except ImportError:
+    pass
 from torch import Tensor
 
 try:
@@ -210,7 +215,7 @@ class MeshGraphMLPGAT(MeshGraphMLP):
             raise ValueError(f"aggregate must be one of ['concat','mean','sum','max'], got {self.aggregate}")
         return att_agg
 
-    def forward(self, x: torch.Tensor, graph: DGLGraph) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, graph: "Any") -> torch.Tensor:
         # Normalisation (optionnelle mais utile pour la stabilité)
         # GAT : (N, H, D) avec D = input_dim
         x = (self.proj_grid(x[0]), x[1])
@@ -281,7 +286,7 @@ class MeshGraphEdgeMLPConcat(MeshGraphMLP):
         self,
         efeat: Tensor,
         nfeat: Union[Tensor, Tuple[Tensor]],
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         self.model = self.model.to(efeat.device)
         efeat = concat_efeat(efeat, nfeat, graph)
@@ -382,7 +387,7 @@ class MeshGraphEdgeMLPSum(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Union[Tensor, Tuple[Tensor]],
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         """forward pass of the truncated MLP. This uses separate linear layers without
         bias. Bias is added to one MLP, as we sum afterwards. This adds the bias to the
@@ -403,7 +408,7 @@ class MeshGraphEdgeMLPSum(nn.Module):
         self,
         efeat: Tensor,
         nfeat: Union[Tensor, Tuple[Tensor]],
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         """Default forward pass of the truncated MLP."""
         mlp_sum = self.forward_truncated_sum(

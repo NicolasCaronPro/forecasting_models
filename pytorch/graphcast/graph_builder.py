@@ -5,7 +5,6 @@ import torch
 import numpy as np
 import logging
 import gzip
-from dgl import DGLGraph
 
 from torch import Tensor
 from sklearn.neighbors import NearestNeighbors
@@ -50,7 +49,7 @@ class GraphBuilder:
         # flatten lat/lon grid
         self.lat_lon_grid_flat = lat_lon_grid.permute(2, 0, 1).view(2, -1).permute(1, 0)
 
-    def create_mesh_graph(self) -> DGLGraph:
+    def create_mesh_graph(self) -> "Any":
         """Create the multimesh graph.
 
         Parameters
@@ -60,7 +59,7 @@ class GraphBuilder:
 
         Returns
         -------
-        DGLGraph
+        "Any"
             Multimesh graph.
         """
         # create the bi-directional mesh graph
@@ -90,7 +89,7 @@ class GraphBuilder:
         logger.info("mesh graph={}".format(mesh_graph))
         return mesh_graph
 
-    def create_g2m_graph(self) -> DGLGraph:
+    def create_g2m_graph(self) -> "Any":
         """Create the graph2mesh graph.
 
         Parameters
@@ -100,7 +99,7 @@ class GraphBuilder:
 
         Returns
         -------
-        DGLGraph
+        "Any"
             Graph2mesh graph.
         """
         logger.info("Creating grid2mesh bipartite graph")
@@ -175,7 +174,7 @@ class GraphBuilder:
 
         return g2m_graph
 
-    def create_m2g_graph(self) -> DGLGraph:
+    def create_m2g_graph(self) -> "Any":
         """Create the mesh2grid graph.
 
         Parameters
@@ -185,7 +184,7 @@ class GraphBuilder:
 
         Returns
         -------
-        DGLGraph
+        "Any"
             Mesh2grid graph.
         """
         # create the mesh2grid bipartite graph

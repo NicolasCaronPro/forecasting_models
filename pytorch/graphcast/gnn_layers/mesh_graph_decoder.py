@@ -16,7 +16,6 @@
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
 
 from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP, MeshGraphMLPAttention, MeshGraphMLPGAT
@@ -122,7 +121,7 @@ class MeshGraphDecoder(nn.Module):
         m2g_efeat: Tensor,
         grid_nfeat: Tensor,
         mesh_nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tensor:
         has_time_dim = len(mesh_nfeat.shape) == 3
         if has_time_dim:

@@ -18,9 +18,14 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-from dgl import DGLGraph
 from torch import Tensor
-import dgl.function as fn
+try:
+    try:
+        import dgl.function as fn
+    except ImportError:
+        pass
+except ImportError:
+    pass
 
 from .mesh_graph_mlp import MeshGraphEdgeMLPConcat, MeshGraphEdgeMLPSum, MeshGraphMLP, MeshGraphMLPAttention, MeshGraphMLPGAT
 from .utils import aggregate_and_concat, aggregate_and_concat_with_attention, EdgeScoreDotProductTransformer, EdgeScoreDotProductGAT
@@ -110,7 +115,7 @@ class MeshGraphEncoder(nn.Module):
         g2m_efeat: Tensor,
         grid_nfeat: Tensor,
         mesh_nfeat: Tensor,
-        graph: DGLGraph,
+        graph: "Any",
     ) -> Tuple[Tensor, Tensor]:
         
         has_time_dim = len(grid_nfeat.shape) == 3
