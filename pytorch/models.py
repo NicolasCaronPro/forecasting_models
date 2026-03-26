@@ -11,6 +11,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from forecasting_models.pytorch.gnns import *
+from forecasting_models.pytorch import itransformer
 from forecasting_models.pytorch.utils import corn_class_probs
 
 class SpatialContext(nn.Module):
@@ -90,7 +91,6 @@ class SpatialContext(nn.Module):
         attn_mean = attn.mean(dim=1)                 # [B, K]
 
         return c, attn_mean
-    
 
 class SpatialContextSet(nn.Module):
     """
@@ -709,16 +709,20 @@ class GraphCastGRU(torch.nn.Module):
         self.num_gru_layers = num_gru_layers
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         self.dropout = torch.nn.Dropout(0.03)
+        self.task_type = task_type
         
         self.temporal_idx = temporal_idx
         self.spatial_idx = static_idx
         self.spatialContext = spatialContext
         
+        if self.spatialContext:
+            self.context_layer = SpatialContext(input_dim_grid_nodes, input_dim_grid_nodes, 1, n_heads=4, dropout=0.03)
+        
         # ------------------------------------------------------------------
         # GraphCast core network (unchanged)
         # ------------------------------------------------------------------
         self.net = GraphCastNet(
-            input_dim_grid_nodes,
+            input_dim_grid_nodes if self.spatialContext else input_dim_grid_nodes + len(self.spatial_idx),
             input_dim_mesh_nodes,
             input_dim_edges,
             output_dim_grid_nodes,
@@ -730,14 +734,11 @@ class GraphCastGRU(torch.nn.Module):
             do_concat_trick,
             has_time_dim,
         )
-        
-        if self.spatialContext:
-            self.context_layer = SpatialContext(d_channels, output_dim_grid_nodes, 1, n_heads=4, dropout=0.03)
 
         # ------------------------------------------------------------------
         # Output head
         # ------------------------------------------------------------------
-        self.linear1 = torch.nn.Linear(d_channels if self.spatialContext else output_dim_grid_nodes + len(self.spatial_idx), lin_channels)
+        self.linear1 = torch.nn.Linear(output_dim_grid_nodes, lin_channels)
         self.linear2 = torch.nn.Linear(lin_channels, end_channels)
         self.output_layer = torch.nn.Linear(end_channels, out_channels)
 
@@ -788,17 +789,19 @@ class GraphCastGRU(torch.nn.Module):
         # Keep the last hidden state for each sequence
         gru_last = self.norm(gru_out[:, -1, :])
         gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
-        
-        X_graphcast = gru_last[None, : ,:]
-
-        # GraphCast processing
-        x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
 
         # Head
         if hasattr(self, 'spatialContext') and self.spatialContext:
-            x, _ = self.context_layer(x, X_spa)
-        elif hasattr(self, 'spatialContext'):
-            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
+            X_graphcast, _ = self.context_layer(gru_last, X_spa)
+        else:
+            print(gru_last.shape, X_spa.shape)
+            X_graphcast = torch.concat((gru_last, X_spa[:, :, 0]), dim=1)
+            print(X_graphcast.shape)
+        
+        X_graphcast = X_graphcast[None, : ,:]
+            
+        # GraphCast processing
+        x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
             
         x = self.act_func(self.linear1(x))
         hidden = self.act_func(self.linear2(x))

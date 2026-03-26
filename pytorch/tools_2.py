@@ -7,6 +7,7 @@ import math
 import numpy as np
 #import shap
 from forecasting_models.pytorch.models import *
+from forecasting_models.pytorch.itransformer import *
 from forecasting_models.pytorch.models_2D import *
 from forecasting_models.pytorch.kan import *
 from forecasting_models.pytorch.student_distillation import StudentMLP, StudentMLPConcat
@@ -431,6 +432,34 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
         model = TemporalFusionTransformerClassifier(**default_params)
         model_params.update(default_params)
+    
+    elif model_name == 'itransformer':
+        
+        default_params = {
+            'seq_len': k_days + 1,
+            'input_dim': in_dim,
+            'output_dim': out_channels,
+            'task_type': task_type,              # "classification" ou "regression"
+            'spatial_context': True,
+            'd_model': 128,
+            'n_heads': 8,
+            'e_layers': 3,
+            'd_ff': 256,
+            'factor': 3,
+            'dropout': dropout,
+            'activation': 'gelu',
+            'embed': 'fixed',
+            'freq': 'h',
+            'static_hidden_dim': 128,
+            'horizon': horizon
+            
+        }
+
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        model = OfficialITransformerWrapper(**default_params)
+        model_params.update(default_params)
 
     elif model_name == 'TransformerNetCutClient':
         default_params = {
@@ -791,7 +820,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'n_sequences' : k_days + 1,
             'return_hidden': False,
             'horizon': horizon,
-            'spatialContext' : True
+            'spatialContext' : False
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -823,7 +852,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'n_sequences' : k_days + 1,
             'return_hidden': False,
             'horizon': horizon,
-            'spatialContext' : True
+            'spatialContext' : False
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
