@@ -31,7 +31,7 @@ class WeightedCrossEntropyLossLearnable(torch.nn.Module):
         update_matrix: bool = False,
         sample_weight: Optional[torch.Tensor] = None,
     ):
-        y_true = y_true.long()
+        y_true = y_true.long().to(device=y_pred.device)
 
         # Prédiction des classes
         pred_class = torch.argmax(y_pred, dim=1)
@@ -86,7 +86,7 @@ class WeightedCrossEntropyLoss(torch.nn.Module):
         update_matrix: bool = False,
         sample_weight: Optional[torch.Tensor] = None,
     ):
-        y_true = y_true.long()
+        y_true = y_true.long().to(device=y_pred.device)
 
         #pred_class = torch.argmax(y_pred, dim=1)
         

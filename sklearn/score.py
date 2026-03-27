@@ -3396,6 +3396,7 @@ class Scoring:
         Ajuste un spline Y ~ bs(score) + C(zone) + C(date).
         Retourne (mu, mu_dense, fit).
         """
+        #return fit_spline_mu(df, df_spline=df_spline if df_spline is not None else self.df_spline)
         return fit_spline_mu(df, df_spline=df_spline if df_spline is not None else self.df_spline)
 
     def set_sigma(self, sigma):
@@ -3428,7 +3429,6 @@ class Scoring:
                 deltas.append(delta)
                 pairs_used.append((a, b))
                 coverage += 1
-
 
         raw_deltas_by_pair = {pair: d for pair, d in zip(pairs_used, deltas)}
         

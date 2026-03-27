@@ -211,6 +211,9 @@ class OfficialITransformerWrapper(nn.Module):
     def forward(self, x: torch.Tensor, z_prev=None):
         # ton pipeline semble fournir [B, F, T]
         # si un jour tu passes déjà [B, T, F], il faudra retirer cette ligne
+        _dev = next(self.parameters()).device
+        if x.device != _dev:
+            x = x.to(_dev)
         x = torch.moveaxis(x, 2, 1)  # [B, T, F]
 
         x_dyn, x_static = self._split_inputs(x)
@@ -271,8 +274,6 @@ class OfficialITransformerWrapper(nn.Module):
         # --------------------------------------------------------------
         logits = self.shared_head(fused)
         
-        print(logits.shape)
-
         if self.task_type == "classification":
             probs = self.softmax(logits)
             return probs, logits, dyn_out

@@ -250,6 +250,8 @@ class NetMLP(torch.nn.Module):
         #    self.define_horizon_decodeur()
 
     def forward(self, features, z_prev=None, edges=None):
+        if features.device != self.device:
+            features = features.to(self.device)
         if self.horizon > 0:
             if z_prev is None:
                 z_prev = torch.zeros((features.shape[0], self.end_channels * self.n_sequences))
@@ -358,7 +360,9 @@ class GRU(torch.nn.Module):
             output: Final prediction tensor
             (optionally) hidden_repr: The hidden state before final layer
         """
-
+        
+        X = X.to(self.device) if X.device != self.device else X
+        
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = X[:, self.spatial_idx, -1][:, :, None]
             X = X[:, self.temporal_idx, :]
@@ -491,6 +495,8 @@ class LSTM(torch.nn.Module):
             (optionally) hidden_repr: The hidden state before final layer
         """
         
+        X = X.to(self.device) if X.device != self.device else X
+        
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = X[:, self.spatial_idx, -1][:, :, None]
             X = X[:, self.temporal_idx, :]
@@ -608,6 +614,8 @@ class DilatedCNN(torch.nn.Module):
 
     def forward(self, x, edges=None, z_prev=None):
         # Couche d'entrée
+        
+        x = x.to(self.device) if x.device != self.device else x
 
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = x[:, self.spatial_idx, -1][:, :, None]
@@ -764,6 +772,9 @@ class GraphCastGRU(torch.nn.Module):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
+        _dev = next(self.parameters()).device
+        if X.device != _dev:
+            X = X.to(_dev)
 
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
@@ -772,7 +783,7 @@ class GraphCastGRU(torch.nn.Module):
             X_spa = X[:, self.spatial_idx, -1][:, :, None]
             X = X[:, self.temporal_idx, :]
             C_in = len(self.temporal_idx)
-
+            
         if z_prev is None:
             z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
         else:
@@ -794,9 +805,7 @@ class GraphCastGRU(torch.nn.Module):
         if hasattr(self, 'spatialContext') and self.spatialContext:
             X_graphcast, _ = self.context_layer(gru_last, X_spa)
         else:
-            print(gru_last.shape, X_spa.shape)
             X_graphcast = torch.concat((gru_last, X_spa[:, :, 0]), dim=1)
-            print(X_graphcast.shape)
         
         X_graphcast = X_graphcast[None, : ,:]
             
@@ -932,6 +941,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         """Args:
             X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
         """
+        _dev = next(self.parameters()).device
+        if X.device != _dev:
+            X = X.to(_dev)
         # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
         B, C_in, T = X.shape
 
