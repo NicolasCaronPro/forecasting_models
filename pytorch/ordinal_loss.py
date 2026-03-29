@@ -7755,7 +7755,7 @@ def check_finite(name, x):
             raise RuntimeError(f"[NaN ERROR] {name} contains NaN or Inf")
 
 #
-#    occurence_01_06_25_summer
+#    occurence_01_06_25_summer nbsinister
 #
 
     # "beta": 5.64,
@@ -7776,11 +7776,56 @@ def check_finite(name, x):
     # "mulambdac": 0.74,
     # "ndepartements": 3,
     # "num_classes": 5
+    
+#
+# occurence_01_06_25 nbsinister
+#
+
+   #"beta": 13.34,
+   # "t": 0.11,
+   # "wneg": 0.89,
+   # "gamma": 3.31,
+   # "taugate": 0.02,
+   # "gatetemp": 0.01,
+   # "wkdecay": "None",
+   # "wkmin": 0.0,
+   # "wfocal": 1.46,
+   # "wmu0": 0.22,
+   # "fgamma": 1.11,
+   # "falpha": 0.8,
+   # "mumomentum": 0.89,
+   # "mulambdag": 0.3,
+   # "mulambdac": 1.81,
+   # "ndepartements": 3,
+   # "num_classes": 5
+   
+   
+#
+# occurence 01_06_25 ressource
+#
+
+    #"beta": 12.42,
+    #"t": 0.0,
+    #"wneg": 1.49,
+    #"gamma": 2.07,
+    #"taugate": 0.36,
+    #"gatetemp": 0.02,
+    #"wkdecay": "None",
+    #"wkmin": 0.0,
+    #"wfocal": 1.23,
+    #"wmu0": 1.85,
+    #"fgamma": 3.19,
+    #"falpha": 0.56,
+    #"mumomentum": 0.82,
+    #"mulambdag": 1.13,
+    #"mulambdac": 0.83,
+    #"ndepartements": 3,
+    #"num_classes": 5
 
 
 class ClusterCLMBinnedTransitionLoss(nn.Module):
     def __init__(self, num_classes: int, beta=2.33, t=0.0, eps=1e-4,
-                  wmed=1.56, wk=None,
+                  wneg=1.56, wk=None,
                   learngains=False, gainsfloor=0.5, wkdecay="power", wkpower=2.06, wklambda=0.3495008616795649,
                   wkmin=0.0, gamma=5.0, taugate=0.05, gatetemp=0.11,
                   wfocal=1.76, wmu0=1.94,
@@ -8092,7 +8137,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                         self.mu_momentum * self.mu_prior_global[k]
                         + (1.0 - self.mu_momentum) * mu_hat_k_global.detach()
                     )
-
+                    
             check_finite("p_before_gate", p)
             check_finite("gate", gate)
             check_finite("p_after_gate", p)
@@ -8191,7 +8236,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                     prior_cluster_k,
                     torch.full_like(prior_cluster_k, prior_global_k)
                 )
-                                              
+                                             
             # 6) double shrinkage hiérarchique
             # si pas de masse -> mu = prior_cluster
             # sinon -> shrinkage (mu_hat + prior_cluster + prior_global)

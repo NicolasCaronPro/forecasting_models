@@ -301,6 +301,9 @@ class GRU(torch.nn.Module):
         self.spatial_idx = static_idx
         self.spatialContext = spatialContext
         
+        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx)).to(device)
+        
         g_cha = len(self.temporal_idx)
         
         # GRU layer
@@ -317,7 +320,7 @@ class GRU(torch.nn.Module):
             self.norm = torch.nn.LayerNorm(gru_size).to(device)
         else:
             self.norm = torch.nn.BatchNorm1d(gru_size).to(device)
-
+            
         # Dropout after GRU
         self.dropout = torch.nn.Dropout(p=dropout).to(device)
         
@@ -365,6 +368,8 @@ class GRU(torch.nn.Module):
         
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = X[:, self.spatial_idx, -1][:, :, None]
+            if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
+                X_spa = self.spa_norm(X_spa)
             X = X[:, self.temporal_idx, :]
         
         batch_size = X.size(0)
@@ -446,6 +451,9 @@ class LSTM(torch.nn.Module):
         self.spatial_idx = static_idx
         self.spatialContext = spatialContext
         
+        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx)).to(device)
+        
         g_cha = len(self.temporal_idx)
 
         # LSTM block
@@ -499,6 +507,8 @@ class LSTM(torch.nn.Module):
         
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = X[:, self.spatial_idx, -1][:, :, None]
+            if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
+                X_spa = self.spa_norm(X_spa)
             X = X[:, self.temporal_idx, :]
             
         batch_size = X.size(0)
@@ -560,6 +570,9 @@ class DilatedCNN(torch.nn.Module):
         
         self.temporal_idx = temporal_idx
         self.spatial_idx = static_idx
+        
+        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx)).to(device)
 
         channels[0] = len(self.temporal_idx)
 
@@ -619,6 +632,8 @@ class DilatedCNN(torch.nn.Module):
 
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
             X_spa = x[:, self.spatial_idx, -1][:, :, None]
+            if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
+                X_spa = self.spa_norm(X_spa)
             X = x[:, self.temporal_idx, :]
             x = X
 
@@ -716,6 +731,8 @@ class GraphCastGRU(torch.nn.Module):
         self.gru_size = input_dim_grid_nodes
         self.num_gru_layers = num_gru_layers
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
+        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx))
         self.dropout = torch.nn.Dropout(0.03)
         self.task_type = task_type
         
@@ -789,7 +806,7 @@ class GraphCastGRU(torch.nn.Module):
         else:
             z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
 
-        if self.horizon > 0:            
+        if self.horizon > 0:
             X = torch.cat((X, z_prev), dim=1)
 
         X_for_gru = X.permute(0, 2, 1)
@@ -802,6 +819,8 @@ class GraphCastGRU(torch.nn.Module):
         gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
 
         # Head
+        if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            X_spa = self.spa_norm(X_spa)
         if hasattr(self, 'spatialContext') and self.spatialContext:
             X_graphcast, _ = self.context_layer(gru_last, X_spa)
         else:
@@ -881,6 +900,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         self.dropout = torch.nn.Dropout(0.03)
         self.n_sequences = n_sequences
+        
+        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx))
         
         self.temporal_idx = temporal_idx
         self.spatial_idx = static_idx
@@ -984,6 +1006,8 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
 
         # Head
+        if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
+            X_spa = self.spa_norm(X_spa)
 
         if hasattr(self, 'spatialContext') and self.spatialContext:
             x, _ = self.context_layer(x, X_spa)

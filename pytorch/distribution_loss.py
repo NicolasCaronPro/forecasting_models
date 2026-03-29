@@ -1929,7 +1929,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
         sigma_raw  = inputs[..., 0]
         kappa_raw  = inputs[..., 1]
         xi_raw     = inputs[..., 2]
-
+        
         sigma = self._decode_sigma(sigma_raw, from_logits, None)
         kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
         
@@ -1948,7 +1948,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
         if self.reduction == "sum":
             return nll.sum()
         return nll
-
+    
     # ---------- Trouver y le plus probable : argmax PMF ----------
     @torch.no_grad()
     def _y_where_p_ge(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor):
@@ -1971,7 +1971,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
 
         y_hat = pmf.argmax(dim=1)
         return y_hat
-
+    
     @torch.no_grad()
     def _y(self, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor):
         """
