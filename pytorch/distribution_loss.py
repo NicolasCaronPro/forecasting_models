@@ -1907,7 +1907,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
         F_yp1 = self._egpd_cdf(y+1, sigma, kappa, xi)
         p_raw = torch.clamp(F_yp1 - F_y, min=self.eps)
         return p_raw
-
+    
     # ---------- PMF TRONQUÉE sur {0,...,y_max} ----------
     def _pmf_trunc(self, y_int: torch.Tensor, sigma: torch.Tensor, kappa: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
         p_raw = self._pmf_raw(y_int, sigma, kappa, xi)
@@ -1916,7 +1916,7 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
         Z = torch.clamp(Z, min=self.eps)
         p = p_raw / Z
         return torch.clamp(p, min=self.eps, max=1.0)
-
+    
     # ---------- NLL TRONQUÉE ----------
     def forward(self, inputs: torch.Tensor, y: torch.Tensor,
                 weight: torch.Tensor = None, from_logits: bool = True, sample_weight=None) -> torch.Tensor:

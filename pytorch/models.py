@@ -321,11 +321,15 @@ class GRU(torch.nn.Module):
         else:
             self.norm = torch.nn.BatchNorm1d(gru_size).to(device)
             
+        self.norm_after_concat = torch.nn.LayerNorm(gru_size + len(self.spatial_idx))
+            
         # Dropout after GRU
         self.dropout = torch.nn.Dropout(p=dropout).to(device)
         
         if self.spatialContext:
             self.context_layer = SpatialContextSet(d_channels, gru_size, 1, n_heads=4, dropout=dropout, use_sigmoid_gating=True, renorm_gates=True,)
+        
+        self.encoder_spatial = torch.nn.Linear(len(self.spatial_idx), len(self.spatial_idx))
 
         # Output linear layer
         self.linear1 = torch.nn.Linear(d_channels if self.spatialContext else gru_size + len(self.spatial_idx), hidden_channels).to(device)
@@ -340,7 +344,6 @@ class GRU(torch.nn.Module):
         torch.nn.init.normal_(self.output_layer.weight, mean=0.0, std=0.001)
         if self.output_layer.bias is not None:
             torch.nn.init.zeros_(self.output_layer.bias)
-
 
         # Activation functions - separate instances for SHAP compatibility
         self.act_func1 = getattr(torch.nn, act_func)()
@@ -367,10 +370,11 @@ class GRU(torch.nn.Module):
         X = X.to(self.device) if X.device != self.device else X
         
         if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
-            X_spa = X[:, self.spatial_idx, -1][:, :, None]
+            X_spa = X[:, self.spatial_idx, -1]
             if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
-                X_spa = self.spa_norm(X_spa)
-            X = X[:, self.temporal_idx, :]
+                pass
+        
+        X = X[:, self.temporal_idx, :]
         
         batch_size = X.size(0)
         
@@ -399,12 +403,18 @@ class GRU(torch.nn.Module):
         x = self.dropout(x)
 
         if hasattr(self, 'spatialContext') and self.spatialContext:
+            X_spa = self.encoder_spatial(X_spa)
+            X_spa = self.spa_norm(X_spa)
             x, a = self.context_layer(x, X_spa)
             self.last_attention_coef = a
         elif hasattr(self, 'spatialContext'):
-            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
+            #X_spa = self.encoder_spatial(X_spa)
+            #X_spa = self.spa_norm(X_spa)
+            x = torch.concat((x, X_spa), dim=1)
             self.last_attention_coef = None
-            
+        
+        #x = self.norm_after_concat(x)
+        
         # Activation and output - using separate activation instances
         try:
             x = self.act_func1(self.linear1(x))
@@ -476,7 +486,7 @@ class LSTM(torch.nn.Module):
         
         if self.spatialContext:
             self.context_layer = SpatialContext(d_channels, self.lstm_size, 1, n_heads=4, dropout=dropout)
-
+            
         # Activation function
         self.act_func = getattr(torch.nn, act_func)()
 

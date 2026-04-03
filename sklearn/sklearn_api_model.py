@@ -11,6 +11,13 @@ import shap
 import random
 
 from scipy import stats
+import logging
+import psutil
+import resource
+import os
+import pickle
+import tracemalloc
+logger = logging.getLogger(__name__)
 from forecasting_models.sklearn.score import *
 from forecasting_models.sklearn.ordinal_classifier import *
 from forecasting_models.sklearn.models import *
@@ -56,6 +63,8 @@ try:
         import cupy as cp
 except:
     pass
+
+from copy import deepcopy
 
 np.random.seed(42)
 random.seed(42)
@@ -350,6 +359,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         self.over_sampling = over_sampling
         self.n_run = n_run
         self.metrics = {}
+        self.scoring = Scoring()
+        self.reference_scores = None
+        self.sigma = None
 
     def split_dataset(self, X, y, y_train_score, nb, is_unknowed_risk):        
         # Separate the positive and zero classes based on y
@@ -421,207 +433,428 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         y_combined = pd.concat([y_positive, y_non_fire_sampled]) if isinstance(y, pd.Series) else np.concatenate([y_positive, y_non_fire_sampled])
 
         # Update X and y for training
-        X_combined.reset_index(drop=True, inplace=True)
-        y_combined.reset_index(drop=True, inplace=True)
+        if isinstance(X_combined, pd.DataFrame):
+            X_combined.reset_index(drop=True, inplace=True)
+        if isinstance(y_combined, (pd.DataFrame, pd.Series)):
+            y_combined.reset_index(drop=True, inplace=True)
 
         return X_combined, y_combined
-    
-    def search_samples_proportion(self, X, y, X_val, y_val, X_test, y_test, y_train_score=None, y_val_score=None, y_test_score=None, is_unknowed_risk=False):
 
+    def log_memory(self, stage):
+        """
+        Log memory usage (RSS, MaxRSS, Tracemalloc).
+        """
+        try:
+            import psutil
+            import resource
+            import os
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            rss_mb = mem_info.rss / 1024 / 1024
+            
+            # Resource (ru_maxrss is in KB on Linux)
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            maxrss_mb = usage.ru_maxrss / 1024
+            
+            # Tracemalloc
+            try:
+                import tracemalloc
+                current, peak = tracemalloc.get_traced_memory()
+                current_mb = current / 1024 / 1024
+                peak_mb = peak / 1024 / 1024
+                trace_str = f" | Trace: {current_mb:.2f} MB (Peak: {peak_mb:.2f} MB)"
+            except:
+                trace_str = ""
+            
+            logger.info(f"[MEMORY] {stage} | RSS: {rss_mb:.2f} MB | MaxRSS: {maxrss_mb:.2f} MB{trace_str}")
+        except Exception as e:
+            logger.warning(f"Failed to log memory: {e}")
+
+    def _compute_raw_scores(self, y_true, y_pred, dates, zones):
+        """
+        Compute raw evaluation scores using evaluate_metrics.
+        """
+        metrics = self.scoring.evaluate_metrics(y_true, y_pred, dates=dates, zones=zones)
+        for k in [1, 2, 3, 4]:
+            key = f'score_k{k}'
+            v = metrics.get(key)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                metrics[key] = 0.0
+                
+        key = 'score_min_class'
+        v = metrics.get(key)
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            metrics[key] = 0.0
+        if 'recall' not in metrics or metrics['recall'] is None:
+            try:
+                from sklearn.metrics import recall_score as _rec
+                metrics['recall'] = float(_rec(
+                    (np.asarray(y_true) > 0).astype(int),
+                    (np.asarray(y_pred) > 0).astype(int),
+                    zero_division=0
+                ))
+            except Exception:
+                metrics['recall'] = 0.0
+        return metrics
+
+    def _compute_geometric_agg(self, raw_dict):
+        """
+        Computes normalized scores (u_k) using self.reference_scores and returns
+        the geometric mean (mapped back to -1, 1).
+        Returns tuple: (agg_score, list_of_u_vals)
+        """
+        EPS = 1e-6
+        ref = getattr(self, 'reference_scores', None)
+        if ref is None:
+            return 0.0, []
+        s_ref_map = (ref.get('best_scores') or ref.get('ref_scores', {})) if ref is not None else {}
+        
+        def _u(sk, raw_key):
+            if raw_key not in s_ref_map:
+                return 0.5
+            skr = float(s_ref_map[raw_key])
+            denom = max(abs(skr) + EPS, 0.1)
+            # map tanh (-1, 1) to (0, 1) directly for the list of u_vals too
+            return (np.tanh((sk - skr) / denom) + 1.0) / 2.0
+
+        pairs = [(float(raw_dict[f'score_k{k}']), f'score_k{k}') for k in [1, 2, 3, 4]]
+        if 'recall' in raw_dict:
+            pairs.append((float(raw_dict['recall']), 'recall'))
+        if 'score_min_class' in raw_dict:
+            pairs.append((float(raw_dict['score_min_class']), 'score_min_class'))
+        
+        u_vals = [_u(sk, key) for sk, key in pairs]
+        
+        # u_vals are already in (0, 1)
+        U = np.exp(np.mean(np.log(np.array(u_vals) + EPS)))  # geometric mean in (0,1)
+        agg = float(2.0 * U - 1.0)  # map back to (-1,1)
+        
+        return agg, u_vals
+
+    def define_reference_model(
+        self,
+        df_train,
+        df_test=None,
+        date_col: str  = 'date',
+        zone_col: str  = 'graph_id',
+        nbsinister_col: str = 'nbsinister',
+        fwi_candidates: list = None,
+        n_classes: int = 5,
+        verbose: bool  = True,
+    ):
+        """
+        Find the best FWI-based ordinal discretization as a reference baseline model.
+        Uses self.scoring.evaluate_metrics internally for evaluation.
+        Stores result in self.reference_scores and returns it.
+        """
+        EPS = 1e-6
+        df_eval = df_test if df_test is not None else df_train
+
+        _DEFAULTS = ['fwi', 'fwi_mean', 'isi', 'bui', 'dc', 'ffmc', 'dmc', 'dailySeverityRating']
+        if fwi_candidates is None:
+            fwi_candidates = [c for c in _DEFAULTS if c in df_train.columns]
+        
+        if not fwi_candidates:
+            if getattr(self, 'target_name', '') == 'DFE':
+                if verbose:
+                    print(f"[{getattr(self, 'target_name', 'DFE')}] No FWI candidate needed. Returning dummy reference.")
+                self.reference_scores = {k: 0.001 for k in [1,2,3,4]}
+                self.baseline_scores = {k: 0.001 for k in [1,2,3,4]}
+                return {
+                    'best_config': None,
+                    'best_score': 0.0,
+                    'ref_scores': self.reference_scores,
+                    'baseline_scores': self.baseline_scores,
+                    'all_results': []
+                }
+            # If no FWI candidates but not DFE, we still need a reference for scoring
+            print("Warning: No FWI candidates found for reference model. Using target quantiles as reference.")
+            fwi_candidates = []
+
+        for col in [date_col, zone_col]:
+            if col not in df_train.columns:
+                print(f"Warning: Column '{col}' not found in df_train. Using dummy values.")
+                df_train[col] = 0
+            if col not in df_eval.columns:
+                df_eval[col] = 0
+
+        if nbsinister_col not in df_train.columns:
+            # Try target_name
+            if hasattr(self, 'target_name') and self.target_name in df_train.columns:
+                nbsinister_col = self.target_name
+            else:
+                raise ValueError(f"'{nbsinister_col}' (or '{self.target_name}') not found in dataframe.")
+
+        # y_true: valeurs brutes de nbsinister
+        y_true = df_train[nbsinister_col].fillna(0).values
+        dates  = df_train[date_col].values
+        zones  = df_train[zone_col].values
+
+        if verbose:
+            import collections
+            print(f"[ref_model] y_true stats: min={y_true.min():.2f} max={y_true.max():.2f} mean={y_true.mean():.2f} n={len(y_true)}")
+
+        def _discretize(s_train, s_eval, quantiles):
+            qs  = np.quantile(s_train.dropna(), quantiles[1:-1])
+            return np.searchsorted(qs, s_eval.fillna(s_eval.median()).values
+                                   ).clip(0, n_classes - 1).astype(int)
+
+        def _scores_for(pred, reference=False):
+            """Raw scores keyed by int k + 'recall' + 'score_min_class'."""
+            raw = self.scoring.evaluate_metrics(y_true, pred, dates=dates, zones=zones, reference=reference)
+            for k in [1, 2, 3, 4]:
+                v = raw.get(f'score_k{k}')
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    raw[f'score_k{k}'] = 0.0
+            if 'recall' not in raw or raw['recall'] is None:
+                raw['recall'] = 0.0
+            if 'score_min_class' not in raw or raw['score_min_class'] is None:
+                raw['score_min_class'] = 0.0
+            s = {f'score_k{k}': float(raw[f'score_k{k}']) for k in [1, 2, 3, 4]}
+            s['recall'] = float(raw['recall'])
+            s['score_min_class'] = float(raw['score_min_class'])
+            return s
+
+        self.sigma = np.std(y_true)
+        self.scoring.sigma = self.sigma
+
+        # Baseline: trivial predictor (all class 0)
+        s_baseline = _scores_for(np.zeros(len(y_true), dtype=int), reference=False)
+        if verbose:
+            print(f"[ref_model] baseline: {s_baseline}")
+
+        _QUANTILE_GRID = [
+            ("fwi_quantiles", [0.0, 0.50, 0.75, 0.95, 0.99, 1.0]),
+            ("uniform",       np.linspace(0.0, 1.0, n_classes + 1).tolist()),
+            ("heavy_low",     [0.0, 0.50, 0.70, 0.83, 0.92, 1.0]),
+            ("heavy_high",    [0.0, 0.08, 0.20, 0.40, 0.65, 1.0]),
+            ("low_emphasis",  [0.0, 0.30, 0.55, 0.72, 0.87, 1.0]),
+            ("high_emphasis", [0.0, 0.13, 0.28, 0.45, 0.70, 1.0]),
+            ("balanced_low",  [0.0, 0.40, 0.60, 0.75, 0.88, 1.0]),
+            ("extreme_tail",  [0.0, 0.60, 0.75, 0.85, 0.93, 1.0]),
+            ("mild_tail",     [0.0, 0.20, 0.40, 0.60, 0.80, 1.0]),
+        ]
+
+        if hasattr(self, 'target_name'):
+            _ref_col = f"{self.target_name}-quantile-5-Class-Dept"
+        else:
+             _ref_col = "nbsinister-quantile-5-Class-Dept"
+             
+        if _ref_col in df_train.columns:
+            y_ref_pred = df_train[_ref_col].fillna(0).clip(0, n_classes - 1).astype(int).values
+        else:
+            _qs = np.quantile(df_train[nbsinister_col].fillna(0).values, [0.50, 0.75, 0.95, 0.99])
+            y_ref_pred = np.searchsorted(
+                _qs, df_train[nbsinister_col].fillna(0).values
+            ).clip(0, n_classes - 1).astype(int)
+
+        # Appel reference=True → peuple self.scoring.pair_mean_deltas uniquement
+        _scores_for(y_ref_pred, reference=True)
+
+        if not fwi_candidates:
+            self.reference_scores = {
+                'best_scores': _scores_for(y_ref_pred, reference=False),
+                'best_score': 0.0,
+            }
+            return self.reference_scores
+
+        _init_col    = fwi_candidates[0]
+        _, _init_q   = _QUANTILE_GRID[0]
+        _init_pred   = _discretize(df_train[_init_col], df_train[_init_col], _init_q)
+        _init_scores = _scores_for(_init_pred, reference=False)
+
+        self.reference_scores = {
+            'best_scores': _init_scores,
+            'best_score':  0.0,
+        }
+
+        all_results = []
+        for fwi_col in fwi_candidates:
+            if fwi_col not in df_train.columns or fwi_col not in df_eval.columns:
+                continue
+            for qname, qbounds in _QUANTILE_GRID:
+                pred   = _discretize(df_train[fwi_col], df_eval[fwi_col], qbounds)
+                scores = _scores_for(pred, reference=False)
+                agg, _ = self._compute_geometric_agg(scores)
+                cfg = {'fwi_col': fwi_col, 'quantile_name': qname,
+                       'quantiles': qbounds, 'scores': scores, 'mean_u': float(agg)}
+                all_results.append(cfg)
+
+        if not all_results:
+             self.reference_scores = {
+                'best_scores': _scores_for(y_ref_pred, reference=False),
+                'best_score': 0.0,
+            }
+             return self.reference_scores
+
+        best = max(all_results, key=lambda r: r['mean_u'])
+        if best['mean_u'] <= 0.0:
+            best = all_results[0]
+
+        result = {
+            'best_config':     best,
+            'best_score':      best['mean_u'],
+            'best_scores':     best['scores'],
+            'baseline_scores': s_baseline,
+            'all_results':     all_results,
+        }
+        self.reference_scores = result
+        return result
+    
+    def search_samples_prediction(self, X, y, X_val, y_val, X_test, y_test, y_train_score=None, y_val_score=None, y_test_score=None, is_unknowed_risk=False, features=None):
+        
         if y_test_score is None:
             y_test_score = np.copy(y_test)
 
         if not is_unknowed_risk:
-            test_percentage = np.arange(0.05, 1.05, 0.05)
+                test_percentage = np.round(np.arange(0.1, 1.05, 0.1), 2)
         else:
             test_percentage = np.arange(0.0, 1.05, 0.05)
-
-        under_prediction_score_scores = []
-        over_prediction_score_scores = []
-        iou_scores = []
-
+            
         data_log = None
-        if False:
-            if (self.dir_log / 'unknowned_scores_per_percentage.pkl').is_file():
-                data_log = read_object('unknowned_scores_per_percentage.pkl', self.dir_log)
-        else:
-            if False:
-            #if (self.dir_log / 'metrics.pkl').is_file():
+        find_log = False
+
+        self.metrics['iou_scores'] = []
+ 
+        def _mean_u_agg(m_dict, suffix='_val'):
+            # Build a dictionary looking like raw metric output
+            mapped_dict = {}
+            for k in [1, 2, 3, 4]:
+                vals = np.atleast_1d(m_dict.get(f'score_k{k}{suffix}', [0.0]))
+                sk = float(np.nanmean(vals)) if len(vals) else 0.0
+                mapped_dict[f'score_k{k}'] = sk if not np.isnan(sk) else 0.0
+            
+            rv = np.atleast_1d(m_dict.get(f'recall{suffix}', [0.0]))
+            sk_r = float(np.nanmean(rv)) if len(rv) else 0.0
+            mapped_dict['recall'] = sk_r if not np.isnan(sk_r) else 0.0
+            
+            smcv = np.atleast_1d(m_dict.get(f'score_min_class{suffix}', [0.0]))
+            sk_smc = float(np.nanmean(smcv)) if len(smcv) else 0.0
+            mapped_dict['score_min_class'] = sk_smc if not np.isnan(sk_smc) else 0.0
+            
+            agg, _ = self._compute_geometric_agg(mapped_dict)
+            return float(agg)
+ 
+        try:
+            tracemalloc.start()
+            if hasattr(self, 'log_memory'):
+                self.log_memory("Start search_samples_prediction")
+            
+            if (self.dir_log / 'metrics.pkl').is_file():
                 print(f'Load metrics')
                 find_log = True
-                try:
-                    data_log = read_object('metrics.pkl', self.dir_log)
-                except:
-                    self.metrics = {}
-                    data_log = None
+                data_log = read_object('metrics.pkl', self.dir_log)
             else:
                 xs = [0, 10]
                 for x in xs:
                     other_model = f'{self.model_type}_search_full_{x}_all_one_{self.target_name}_{self.task_type}_{self.loss}'
                     if (self.dir_log / '..'/ other_model / 'metrics.pkl').is_file():
-                        data_log = read_object('metrics.pkl', self.dir_log)
+                        data_log = read_object('metrics.pkl', self.dir_log / '..'/ other_model)
                     if data_log is not None:
                         break
-        
-        print(self.metrics)
-        print(f'data_log : {data_log}')
-        if data_log is not None:
-            try:
-                self.metrics = data_log
-                #test_percentage = self.metrics['test_percentage']
-                under_prediction_score_scores = self.metrics['under_prediction_scores']
-                over_prediction_score_scores = self.metrics['over_prediction_scores']
-                iou_scores = self.metrics['iou_score']
-            except Exception as e:
-                print(e)
-                self.metrics = {}
-                data_log = None
-                pass
-            
-            #test_percentage, under_prediction_score_scores, over_prediction_score_scores, iou_scores = data_log[0], data_log[1], data_log[2], data_log[3]
-        
-        doSearch = True
-        if data_log is not None: #and self.n_run == data_log['n_run']:
-            for i in range(0, len(iou_scores) - 1):
-                try:
-                    test_percentage = self.metrics['test_percentage']
-                    if np.mean(data_log[test_percentage[i]]['iou_val']) > np.mean(data_log[test_percentage[i + 1]]['iou_val']):
-                        print(f"Last score {np.mean(data_log[test_percentage[i]]['iou_val'])} current score {np.mean(data_log[test_percentage[i + 1]]['iou_val'])} -> {test_percentage[i]}")
-                        doSearch = False
-                except Exception as e:
-                    print(e)
-                    doSearch = True
-                    break
-
-            if doSearch:
-                #start_test = np.argmax(iou_scores)
-                start_test = len(iou_scores)
-                #start_test = len(under_prediction_score_scores) - 1
-        else:
+                                             
+            tolerance = 0.1
+            doSearch = True
+            last_score = -math.inf
             start_test = 0
-
-        if doSearch:
-            last_score = -math.inf if start_test == 0 else iou_scores[start_test - 1]
-            for i in range(start_test, test_percentage.shape[0]):
-                tp = test_percentage[i]
-                if not is_unknowed_risk:
-                    nb = int(tp * len(y[y[self.target_name] == 0]))
-                else:
-                    nb = int(tp * len(X[(X['potential_risk'] > 0) & (y == 0)]))
-
-                print(f'Trained with {tp} -> {nb} sample of class 0')
-
-                if tp in self.metrics.keys():
-                    continue
-
-
-                if True:
-                    self.metrics[tp] = {}
-                    self.metrics[tp]['f1'] = []
-                    self.metrics[tp]['prec'] = []
-                    self.metrics[tp]['recall'] = []
-                    self.metrics[tp]['iou'] = []
-                    self.metrics[tp]['iou_val'] = []
-                    self.metrics[tp]['normalized_iou'] = []
-                    self.metrics[tp]['normalized_f1'] = []
-                else:
-                    continue
-
-                for run in range(self.n_run):
-                    print(f'Run {run}')
-
-                    X_combined, y_combined, y_train_score_combined = self.split_dataset(X, y, y_train_score, nb, is_unknowed_risk)
-                    print(y_combined.shape, y_train_score_combined.shape)
-                    print(f'Train mask X shape: {X_combined.shape}, y shape: {y_combined.shape}')
-
-                    copy_model = copy.deepcopy(self)
-                    if 'dual' in self.loss:
-                        params_model = copy_model.best_estimator_.kwargs
-                        params_model['y_train_origin'] = y_train_score_combined
-                        copy_model.best_estimator_.update_params(params_model)
-
-                    copy_model.under_sampling = 'full'
-
-                    copy_model.fit(X_combined, y_combined, X_val, y_val, X_test=X_test, y_test=y_test, y_test_score=y_test_score, \
-                                y_train_score=y_train_score, y_val_score=y_val_score, training_mode='normal', \
-                                    optimization='skip', grid_params=None, fit_params={}, cv_folds=10)
+            
+            if False:
+                if data_log is not None and 'test_percentage' in data_log:
+                    self.metrics = data_log
+                    test_percentage = np.asarray(self.metrics['test_percentage'])
                     
-                    prediction = copy_model.predict(X_val)
-                    metrics_run = evaluate_metrics(y_val[self.target_name] if isinstance(y_val, pd.DataFrame) else y_val, prediction, 
-                                                   dates=y_val['date'] if isinstance(y_val, pd.DataFrame) and 'date' in y_val.columns else y_val[:, date_index], 
-                                                   zones=y_val['graph_id'] if isinstance(y_val, pd.DataFrame) and 'departement' in y_val.columns else y_val[:, graph_ids_index])
-                    metrics_run = round_floats(metrics_run)
-                    update_metrics_as_arrays(self, tp, metrics_run, 'val')
-
-
-                    prediction = copy_model.predict(X_test)
-                    metrics_run = evaluate_metrics(y_test[self.target_name] if isinstance(y_test, pd.DataFrame) else y_test, prediction, 
-                                                   dates=y_test['date'] if isinstance(y_test, pd.DataFrame) and 'date' in y_test.columns else y_val[:, date_index], 
-                                                   zones=y_test['graph_id'] if isinstance(y_test, pd.DataFrame) and 'departement' in y_test.columns else y_test[:, graph_ids_index])
-                    metrics_run = round_floats(metrics_run)
-                    update_metrics_as_arrays(self, tp, metrics_run, 'test')
+                    doSearch = True
+                    for i, tp_val in enumerate(test_percentage):
+                        tp_val = round(tp_val, 2)
+                        if tp_val in self.metrics:
+                            current_agg = _mean_u_agg(self.metrics[tp_val], '_val')
+                            if current_agg >= last_score - tolerance:
+                                if current_agg > last_score:
+                                    last_score = current_agg
+                            else:
+                                print(f'Stopping search: scores declining in logs (last_score={last_score:.4f}, current_agg={current_agg:.4f})')
+                                doSearch = False
+                                break
+                        else:
+                            start_test = i
+                            doSearch = True
+                            print(f'Resuming search from tp={tp_val} (first missing in data_log, index {i})')
+                            break
+                    else:
+                        doSearch = False
+                        print(f'All test_percentage values found in data_log → doSearch=False')
+            
+            if doSearch:
+                y_ori = y[self.target_name].values
+                for i in range(start_test, test_percentage.shape[0]):
+                    tp = round(test_percentage[i], 2)
+    
+                    if tp in self.metrics.keys():
+                        continue
                     
-                    #under_prediction_score_value = under_prediction_score(y_val, prediction)
-                    #over_prediction_score_value = over_prediction_score(y_val, prediction)
-                    #iou = iou_score(y_val, prediction)
-                
-                self.metrics[tp] = add_ic95_to_dict(self.metrics[tp], None, "_ic95")
-                iou = np.mean(self.metrics[tp]['iou_val'])
-                #save_object([test_percentage[:len(under_prediction_score_scores)], under_prediction_score_scores, over_prediction_score_scores, iou_scores], 'test_percentage_scores.pkl', self.dir_log)
-                save_object(self.metrics, 'metrics.pkl', self.dir_log)
-                
-                print(f'Metrics achieved : {self.metrics[tp]}')
+                    if not is_unknowed_risk:
+                        nb = int(tp * y_ori[y_ori == 0].shape[0])
+                    else:
+                        nb = int(tp * len(X[(X['potential_risk'] > 0) & (y_ori == 0)]))
+                        
+                    print(f'Trained with {tp} -> {nb} sample of class 0')
+    
+                    for run in range(self.n_run):
+                        X_combined, y_combined, y_train_score_combined = self.split_dataset(X, y, y_train_score, nb, is_unknowed_risk)
+    
+                        copy_model = deepcopy(self)
+                        copy_model.under_sampling = 'full'
+                        
+                        # Reference scores must be consistent
+                        copy_model.reference_scores = self.reference_scores
+                        
+                        fit_params = copy_model.update_fit_params(X_val, y_val[self.target_name], X_combined['weight'], features)
+                        copy_model.fit(X_combined, y_combined, X_val, y_val, X_test, y_test=y_test, y_test_score=y_test_score, \
+                                    y_train_score=y_train_score_combined, y_val_score=y_val_score, training_mode='normal',
+                                    optimization='skip', fit_params=fit_params, features=features)
+                        
+                        ################%%%%%%%%%%%%% On set val ##############################
+                        prediction = copy_model.predict_proba(X_val)
+                        if self.task_type == 'ordinal-classification':
+                            # prediction is already ordinal? Or needs conversion?
+                            # Sklearn model predict_proba returns [B, C]
+                            pass
+                        
+                        metrics_run = copy_model._compute_raw_scores(
+                            y_val[self.target_name].values, prediction,
+                            zones=X_val['graph_id'].values if 'graph_id' in X_val.columns else None,
+                            dates=X_val['date'].values if 'date' in X_val.columns else None
+                        )
+                        metrics_run = round_floats(metrics_run)
+                        update_metrics_as_arrays(self, tp, metrics_run, 'val')
+    
+                        ############################# On set test ##############################
+                        if X_test is not None:
+                            prediction_test = copy_model.predict_proba(X_test)
+                            metrics_run_test = copy_model._compute_raw_scores(
+                                y_test[self.target_name].values, prediction_test,
+                                zones=X_test['graph_id'].values if 'graph_id' in X_test.columns else None,
+                                dates=X_test['date'].values if 'date' in X_test.columns else None
+                            )
+                            metrics_run_test = round_floats(metrics_run_test)
+                            update_metrics_as_arrays(self, tp, metrics_run_test, 'test')
+                    
+                    self.metrics['test_percentage'] = test_percentage[:i+1].tolist()
+                    save_object(self.metrics, 'metrics.pkl', self.dir_log)
+                    
+                    # Stop if score decreases
+                    current_agg = _mean_u_agg(self.metrics[tp], '_val')
+                    if current_agg < last_score - tolerance:
+                        print(f'Stopping search: scores declining (last_score={last_score:.4f}, current_agg={current_agg:.4f})')
+                        break
+                    if current_agg > last_score:
+                        last_score = current_agg
 
-                if iou > last_score:
-                    last_score = iou
-                else:
-                    break
+            best_tp = self.metrics['test_percentage'][np.argmax([_mean_u_agg(self.metrics[tp], '_val') for tp in self.metrics['test_percentage']])]
+            return best_tp
 
-        keys_array = []
-        eps = 1e-9  # tolérance pour considérer deux moyennes égales
-
-        iou_means = []
-        iou_stds = []
-        for k in self.metrics.keys():
-            if isinstance(k, float) and "iou_val" in self.metrics[k]:
-                vals = np.asarray(self.metrics[k]["iou_val"], dtype=float)
-                mean_iou = float(np.nanmean(vals)) if vals.size else -np.inf
-                std_iou = np.std(vals)
-
-                print(f"{k} -> mean={mean_iou:.6f}, std={std_iou:.6f}")
-                keys_array.append(k)
-                iou_means.append(mean_iou)
-                iou_stds.append(std_iou)
-
-        if not keys_array:
-            raise ValueError("Aucune clé float avec 'iou_val' trouvée dans self.metrics.")
-
-        # Sélection avec tie-break: max(mean), puis min(std)
-        iou_means = np.array(iou_means, dtype=float)
-        iou_stds  = np.array(iou_stds,  dtype=float)
-
-        max_mean = np.nanmax(iou_means)
-        candidates = np.where(np.isclose(iou_means, max_mean, atol=eps))[0]
-        if candidates.size == 1:
-            index_max = int(candidates[0])
-        else:
-            # parmi les ex aequo en moyenne, prendre le plus petit std
-            index_max = int(candidates[np.nanargmin(iou_stds[candidates])])
-
-        best_tp = keys_array[index_max]
-        logger.info(f'Best tp {best_tp}')
-        self.metrics['iou_score'] = iou_scores
-        self.metrics['test_percentage'] = test_percentage
-        self.metrics['under_prediction_scores'] = under_prediction_score_scores
-        self.metrics['over_prediction_scores'] = over_prediction_score_scores
-        self.metrics['best_tp'] = best_tp
-        self.metrics['run'] = self.n_run
-
-        logger.info(f'{self.metrics[best_tp]}')
-
-        save_object(self.metrics, 'metrics.pkl', self.dir_log)
-
-        return best_tp
+        finally:
+            tracemalloc.stop()
 
     def search_samples_limit(self, X, y, X_val, y_val, X_test, y_test):
         classes = [4,3,2,1]
@@ -692,7 +925,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         else:
             return 1.0
 
-    def fit(self, X, y, X_val, y_val, X_test=None, y_test=None, y_val_score=None, y_train_score=None, y_test_score=None, training_mode='normal', optimization='skip', grid_params=None, fit_params={}, cv_folds=10):
+    def fit(self, df_features, y, df_features_val, y_val, df_features_test=None, y_test=None, y_val_score=None, y_train_score=None, y_test_score=None,
+            training_mode='normal', optimization='skip', grid_params=None, fit_params={}, cv_folds=10,
+            features = None):
         """
         Train the model.
 
@@ -703,13 +938,13 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         - optimization: Optimization method to use ('grid' or 'bayes').
         - fit_params: Additional parameters for the fit function.
         """
-
-        features = list(X.columns)
-        if 'weight' in features:
-            features.remove('weight')
-        if 'potential_risk' in features:
-            features.remove('potential_risk')
-
+        
+        X = df_features[features + ['weight']]
+        X_val = df_features_val[features + ['weight']]
+        X_test = df_features_test[features + ['weight']]
+        
+        self.features_selected = features
+        
         if self.task_type == 'binary':
             y_test = (y_test > 0).astype(int) if y_test is not None else None
             y_test_score = (y_test_score > 0).astype(int) if y_test_score is not None else None
@@ -720,7 +955,16 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         #features95, featuresAll = plot_ecdf_with_threshold(importance_df, dir_output=self.dir_log / '../importance', target_name=self.target_name)
         if self.nbfeatures != 'all':
             features = featuresAll[:int(self.nbfeatures)]
-        
+            
+        if self.reference_scores is None:
+            if 'fwi_mean' not in df_features.columns:
+                raise ValueError(f'missing fwi mean in dataframe columns')
+                exit(1)
+            # Create a temporary df for reference model
+            df_train_ref = df_features.copy()
+            df_train_ref[self.target_name] = y[self.target_name]
+            self.define_reference_model(df_train_ref)
+
         #################################################### Handle over sampling ##############################################
 
         if self.under_sampling != 'full':
@@ -731,9 +975,9 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
                     nb = int(vec[-1]) * len(y[y[self.target_name] > 0])
                 except ValueError:
                     print(f'{self.under_sampling} with undefined factor, set to 1 -> {len(y[y > 0])}')
-                    nb = len(y[y > 0])
+                    nb = len(y[y[self.target_name] > 0])
 
-                    X, y, y_score = self.split_dataset(X, y, y_train_score, nb, False)
+                X, y, y_score = self.split_dataset(X, y, y_train_score, nb, False)
 
                 print(f'Original shape {old_shape}, Train mask X shape: {X.shape}, y shape: {y.shape}')
 
@@ -741,7 +985,7 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
 
                 if self.under_sampling.find('search') != -1:
                     ################# No risk sample ##################
-                    best_tp_0 = self.search_samples_proportion(X, y, X_val, y_val, X_test, y_test, y_train_score, y_val_score, y_test_score, False)
+                    best_tp_0 = self.search_samples_prediction(X, y, X_val, y_val, X_test, y_test, y_train_score, y_val_score, y_test_score, False, features=features)
                 else:
                     vec = self.under_sampling.split('-')
                     best_tp_0 = float(vec[1])
@@ -899,7 +1143,11 @@ class Model(BaseEstimator, ClassifierMixin, RegressorMixin):
         y_test_true = y_test[self.target_name] if isinstance(y_test, pd.DataFrame) else y_test
         y_test_dates = y_test['date'] if isinstance(y_test, pd.DataFrame) and 'date' in y_test.columns else None
         y_test_zones = y_test['graph_id'] if isinstance(y_test, pd.DataFrame) and 'departement' in y_test.columns else None
-        self.metrics['final'] = evaluate_metrics(y_test_true, self.predict(X_test), dates=y_test_dates, zones=y_test_zones)
+        
+        pred = self.predict(X_test)
+        print(pred.shape, y_test_true.shape)
+        
+        self.metrics['final'] = evaluate_metrics(y_test_true, pred, dates=y_test_dates, zones=y_test_zones)
         #print(self.metrics)
         
     def get_model(self):
@@ -2876,7 +3124,7 @@ class OneByID(BaseEstimator, ClassifierMixin, RegressorMixin):
             # Create a clone of the base model to avoid interference
             model = copy.deepcopy(self.model)
             fit_params_model = self.update_fit_params(model.model_type, fit_params.copy(), np.argwhere(self.id_train == uid)[:, 0], np.argwhere(self.id_val == uid)[:, 0])
-            model.fit(X_id_train, y_id_train, X_val=X_id_val, y_val=y_id_val, X_test=X_id_test, y_test=y_id_test, features_search=doFeatures_search, optimization=optimization, grid_params=grid_params, fit_params=fit_params_model, cv_folds=10)
+            model.fit(X_id_train, y_id_train, X_val=X_id_val, y_val=y_id_val, X_test=X_id_test, y_test=y_id_test, features_search=doFeatures_search, optimization=optimization, grid_params=grid_params, fit_params=fit_params_model, cv_folds=10, features=features)
 
             self.models_by_id[uid] = copy.deepcopy(model)
 
