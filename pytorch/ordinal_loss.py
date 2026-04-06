@@ -8331,89 +8331,57 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         if mode:
             self.epoch_stats = {}
             
-    def _loss_mid_score_from_bins(self, s: torch.Tensor, theta_rows: torch.Tensor, group_ids: torch.Tensor = None):
+    def _loss_mid(self, mu_ref: torch.Tensor, theta_ref: torch.Tensor) -> torch.Tensor:
         """
-        Build a midpoint loss in SCORE space from the current hard bins.
-
-        For each group g and class k:
-            center_s[g, k] = mean of scores s_i assigned to hard bin k in group g
-
-        Then enforce:
-            theta[g, k] ~ 0.5 * (center_s[g, k] + center_s[g, k+1])
+        Align each threshold theta_k with the midpoint between consecutive centers:
+            theta_k ~ 0.5 * (mu_k + mu_{k+1})
 
         Parameters
         ----------
-        s : (N,)
-            Raw predicted scores.
-        theta_rows : (G, C-1) or (C-1,)
-            Threshold rows to calibrate.
-            - global case: (C-1,)
-            - cluster/department case: (G, C-1)
-        group_ids : (N,) or None
-            Local contiguous group ids in [0..G-1].
-            - None for global thresholds
-            - local_cluster_ids or local_dept_ids otherwise
+        mu_ref : tensor (..., C)
+            Class centers to use for the alignment.
+            Typical choice: mu_active or self.mu_prior[active_slots].
+        theta_ref : tensor (..., C-1)
+            Threshold rows aligned with mu_ref.
+            Must have the same leading dimension as mu_ref, or be broadcastable.
 
         Returns
         -------
-        Lmid : scalar tensor
-        centers_s : (G, C)
-            Mean score in each current hard bin.
-        hard_bins : (N,)
-            Current hard-bin assignment used to build centers.
+        scalar tensor
         """
-        device = s.device
-        dtype = s.dtype
+        if mu_ref.dim() == 1:
+            mu_ref = mu_ref.unsqueeze(0)          # (1, C)
+        if theta_ref.dim() == 1:
+            theta_ref = theta_ref.unsqueeze(0)    # (1, C-1)
 
-        s_det = s.detach()
+        if mu_ref.shape[-1] != self.C:
+            raise ValueError(f"mu_ref last dim must be {self.C}, got {mu_ref.shape}")
+        if theta_ref.shape[-1] != self.C - 1:
+            raise ValueError(f"theta_ref last dim must be {self.C - 1}, got {theta_ref.shape}")
 
-        if theta_rows.dim() == 1:
-            theta_rows = theta_rows.unsqueeze(0)  # (1, C-1)
+        # Broadcast if one side has one row
+        if theta_ref.shape[0] == 1 and mu_ref.shape[0] > 1:
+            theta_ref = theta_ref.expand(mu_ref.shape[0], -1)
+        elif mu_ref.shape[0] == 1 and theta_ref.shape[0] > 1:
+            mu_ref = mu_ref.expand(theta_ref.shape[0], -1)
 
-        if group_ids is None:
-            group_ids = torch.zeros_like(s_det, dtype=torch.long, device=device)
-            G = 1
-        else:
-            group_ids = group_ids.to(device=device, dtype=torch.long).view(-1)
-            G = int(group_ids.max().item()) + 1 if group_ids.numel() > 0 else theta_rows.shape[0]
-
-        if theta_rows.shape[0] == 1 and G > 1:
-            theta_rows = theta_rows.expand(G, -1)
-
-        if theta_rows.shape[0] != G:
+        if mu_ref.shape[0] != theta_ref.shape[0]:
             raise ValueError(
-                f"theta_rows and group_ids mismatch: theta_rows.shape={theta_rows.shape}, G={G}"
+                f"mu_ref and theta_ref are not aligned: {mu_ref.shape} vs {theta_ref.shape}"
             )
 
-        # Current hard bins induced by the CURRENT thresholds
-        thr_s = theta_rows.index_select(0, group_ids)               # (N, C-1)
-        hard_bins = (s_det.unsqueeze(1) > thr_s.detach()).sum(dim=1)  # (N,)
+        target_mid = 0.5 * (mu_ref[:, :-1] + mu_ref[:, 1:])
 
-        centers_s = torch.full((G, self.C), float("nan"), device=device, dtype=dtype)
+        # Important: detach mu so Lmid mainly calibrates thresholds/bins
+        if getattr(self, "mid_detach_mu", True):
+            target_mid = target_mid.detach()
 
-        for k in range(self.C):
-            mask = (hard_bins == k)
-            if not mask.any():
-                continue
-
-            count_k = torch.zeros(G, device=device, dtype=dtype)
-            sum_k = torch.zeros(G, device=device, dtype=dtype)
-
-            ones_k = torch.ones(mask.sum(), device=device, dtype=dtype)
-            count_k.scatter_add_(0, group_ids[mask], ones_k)
-            sum_k.scatter_add_(0, group_ids[mask], s_det[mask])
-
-            centers_s[:, k] = sum_k / count_k.clamp_min(1.0)
-
-        target_mid = 0.5 * (centers_s[:, :-1] + centers_s[:, 1:])   # (G, C-1)
-
-        valid = torch.isfinite(target_mid) & torch.isfinite(theta_rows)
+        valid = torch.isfinite(target_mid) & torch.isfinite(theta_ref)
         if not valid.any():
-            return s.new_tensor(0.0), centers_s, hard_bins
+            return theta_ref.new_tensor(0.0)
 
-        # Pure geometric calibration, no entropy
-        Lmid = F.smooth_l1_loss(theta_rows[valid], target_mid[valid], reduction="mean")
-        return Lmid, centers_s, hard_bins
+        # Robust regression, better than plain MSE if some centers move abruptly
+        return F.smooth_l1_loss(theta_ref[valid], target_mid[valid], reduction="mean")
 
     def forward(self, score, y_cont, clusters_ids, departement_ids, sample_weight=None):
         s = score.view(-1)
@@ -8486,37 +8454,31 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         theta_all = self._compute_thresholds().to(device)
 
         if theta_all.dim() == 1:
-            # Global thresholds
-            Lmid, centers_s_mid, hard_bins_mid = self._loss_mid_score_from_bins(
-                s=s,
-                theta_rows=theta_all,
-                group_ids=None
-            )
+            # global thresholds
+            theta_mid = theta_all.unsqueeze(0).expand(mu_active.shape[0], -1)
 
         elif self.alphatype == "cluster":
-            # Thresholds indexed by active cluster slots
+            # thresholds aligned with active cluster slots
             theta_mid = theta_all.index_select(0, active_cluster_slots)
-            Lmid, centers_s_mid, hard_bins_mid = self._loss_mid_score_from_bins(
-                s=s,
-                theta_rows=theta_mid,
-                group_ids=local_cluster_ids
-            )
 
         elif self.alphatype == "department":
+            # simple and safe version:
+            # if one active department, broadcast its thresholds to all active clusters
             if active_dept_slots is None:
-                Lmid = s.new_tensor(0.0)
-                centers_s_mid = None
-                hard_bins_mid = None
+                theta_mid = theta_all[:1].expand(mu_active.shape[0], -1)
             else:
-                theta_mid = theta_all.index_select(0, active_dept_slots)
-                Lmid, centers_s_mid, hard_bins_mid = self._loss_mid_score_from_bins(
-                    s=s,
-                    theta_rows=theta_mid,
-                    group_ids=local_dept_ids
-                )
+                theta_dep = theta_all.index_select(0, active_dept_slots)
+                if theta_dep.shape[0] == 1:
+                    theta_mid = theta_dep.expand(mu_active.shape[0], -1)
+                else:
+                    # if several departments are active at once, aggregate mu per department
+                    # before using Lmid; for now, fallback on the global running centers
+                    theta_mid = theta_dep[:1].expand(mu_active.shape[0], -1)
 
         else:
             raise ValueError(f"Unknown alphatype: {self.alphatype}")
+
+        Lmid = self._loss_mid(mu_active, theta_mid)
 
         num_active = len(active_local_clusters)
         loss_accum = torch.zeros(num_active, device=device, dtype=s.dtype)
@@ -8579,6 +8541,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                     active_cluster_slots.clamp(0, self.delta_scale_ema.shape[0] - 1)
                 ][:, pair_indices].T.to(device=device).clamp(self.scale_min, self.scale_max)
                 deltas = deltas / sc_raw
+                #deltas = deltas / margins.unsqueeze(1)
             elif self.scaleagg == "department":
                 if active_dept_slots is not None:
                     sc_depts = self.delta_scale_ema[
@@ -8586,13 +8549,25 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                     ][:, pair_indices].to(device=device).mean(dim=0)
                     sc = sc_depts.clamp(self.scale_min, self.scale_max)
                     deltas = deltas / sc.unsqueeze(1)
+                    #deltas = deltas / margins.unsqueeze(1)
             else:
                 sc = self.delta_scale_ema[pair_indices].to(device=device).clamp(self.scale_min, self.scale_max)
                 deltas = deltas / sc.unsqueeze(1)
+                #deltas = deltas / margins.unsqueeze(1)
 
             check_finite("deltas_after_scaling", deltas)
             check_finite("delta_scale_ema", self.delta_scale_ema)
-
+            
+            #print(f'############### Analyse for pair k {pairs} ################')
+            #print('margins:', margins)
+            
+            #print('mu active:', mu_active)
+            
+            #print('Deltas stats')
+            #print(deltas)
+            #print(-deltas)
+            #print(F.softplus(-deltas))
+            
             MEDk = s.new_tensor(0.0)
             MINk = s.new_tensor(0.0)
 
@@ -8600,6 +8575,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             loss_min = 0.0
             
             loss_neg = F.softplus(-deltas).mean(dim=0)
+            
+            #print(f'Loss obtained : {loss_neg}')
 
             check_finite("loss_neg", loss_neg)
             check_finite("MEDk", MEDk)
@@ -8613,6 +8590,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
             Lk = (Lk_clusters * w_viol).sum() / w_viol.sum()
 
+            #Lk = Lk_clusters
             if not hasattr(self, "epoch_stats"):
                 self.epoch_stats = {}
             if "deltas" not in self.epoch_stats:
@@ -8666,6 +8644,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.epoch_stats["mass_active"].append(ma_full.detach().cpu().numpy())
 
         transition_loss = loss / wsum.clamp_min(1e-6)
+        #print('wsum:', wsum.clamp_min(1e-6))
+        #print('transition_loss:', transition_loss)
         target_bin = (y > 0).to(dtype=s.dtype)
         prob_fire = (1.0 - probs[:, 0]).clamp(self.eps, 1.0 - self.eps)
         p_t = torch.where(target_bin > 0.5, prob_fire, 1.0 - prob_fire)
@@ -8833,13 +8813,44 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         return [("ordinal_params", DictWrapper(payload))]
 
     def update_params(self, new_dict, epoch=None):
-        if not isinstance(new_dict, dict):
-            raise TypeError("new_dict must be a dict")
+        """
+        Accepte soit :
+        1) directement un payload dict
+        2) un DictWrapper(payload)
+        3) un dict externe du type:
+            {"epoch": ..., "ordinal_params": DictWrapper(payload)}
+        et met à jour alpha, mu_prior, mu_prior_global si présents.
+        """
 
-        # ---- alpha ----
-        if "alpha" in new_dict and new_dict["alpha"] is not None:
+        # --------------------------------------------------
+        # 1) Déplier la structure externe
+        # --------------------------------------------------
+        payload = new_dict
+
+        # Cas: {"epoch": ..., "ordinal_params": DictWrapper(...)}
+        if isinstance(payload, dict) and "ordinal_params" in payload:
+            if epoch is None and "epoch" in payload:
+                epoch = payload["epoch"]
+            payload = payload["ordinal_params"]
+
+        # Cas: DictWrapper(payload)
+        if hasattr(payload, "numpy") and not isinstance(payload, dict):
+            payload = payload.numpy()
+
+        # Sécurité finale
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"update_params expected a dict-like payload after unwrapping, got {type(payload)}"
+            )
+
+        # --------------------------------------------------
+        # 2) alpha
+        # --------------------------------------------------
+        
+        print('Old alpha', self.alpha)
+        if "alpha" in payload and payload["alpha"] is not None:
             alpha_new = torch.as_tensor(
-                new_dict["alpha"],
+                payload["alpha"],
                 dtype=self.alpha.dtype,
                 device=self.alpha.device,
             )
@@ -8851,10 +8862,12 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             with torch.no_grad():
                 self.alpha.copy_(alpha_new)
 
-        # ---- mu_prior ----
-        if "mu_prior" in new_dict and new_dict["mu_prior"] is not None:
+        # --------------------------------------------------
+        # 3) mu_prior
+        # --------------------------------------------------
+        if "mu_prior" in payload and payload["mu_prior"] is not None:
             mu_prior_new = torch.as_tensor(
-                new_dict["mu_prior"],
+                payload["mu_prior"],
                 dtype=self.mu_prior.dtype,
                 device=self.mu_prior.device,
             )
@@ -8866,10 +8879,12 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             with torch.no_grad():
                 self.mu_prior.copy_(mu_prior_new)
 
-        # ---- mu_prior_global ----
-        if "mu_prior_global" in new_dict and new_dict["mu_prior_global"] is not None:
+        # --------------------------------------------------
+        # 4) mu_prior_global
+        # --------------------------------------------------
+        if "mu_prior_global" in payload and payload["mu_prior_global"] is not None:
             mu_prior_global_new = torch.as_tensor(
-                new_dict["mu_prior_global"],
+                payload["mu_prior_global"],
                 dtype=self.mu_prior_global.dtype,
                 device=self.mu_prior_global.device,
             )
@@ -8881,7 +8896,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             with torch.no_grad():
                 self.mu_prior_global.copy_(mu_prior_global_new)
 
-        # ---- buffers dérivés synchronisés ----
+        # --------------------------------------------------
+        # 5) resynchronisation des seuils dérivés
+        # --------------------------------------------------
         self.thresholds = self._compute_thresholds().detach()
 
         if getattr(self, "learn_gains", False):
@@ -8891,6 +8908,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 floor = float(getattr(self, "gains_floor", 0.0))
                 self.gains = (F.softplus(self.g_raw) + floor).detach()
 
+        print('New alpha', self.alpha)
+        
     def plot_params(self, params_history, log_dir, best_epoch=None):
         import matplotlib.pyplot as plt
 
@@ -9970,11 +9989,30 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         return [("ranknet_params", DictWrapper(payload))]
 
     def update_params(self, new_dict, epoch=None):
-        if "alpha" not in new_dict or new_dict["alpha"] is None:
+        payload = new_dict
+
+        # Cas: {"epoch": ..., "ordinal_params": DictWrapper(...)}
+        if isinstance(payload, dict) and "ordinal_params" in payload:
+            if epoch is None and "epoch" in payload:
+                epoch = payload["epoch"]
+            payload = payload["ordinal_params"]
+
+        # Cas: DictWrapper(...)
+        if hasattr(payload, "numpy") and not isinstance(payload, dict):
+            payload = payload.numpy()
+
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"update_params expected a dict-like payload after unwrapping, got {type(payload)}"
+            )
+            
+        print('Old alpha', self.alpha)
+
+        if "alpha" not in payload or payload["alpha"] is None:
             return
 
         alpha_new = torch.as_tensor(
-            new_dict["alpha"],
+            payload["alpha"],
             dtype=self.alpha.dtype,
             device=self.alpha.device,
         )
@@ -9987,3 +10025,5 @@ class ClusterDepartmentRankNetLoss(nn.Module):
 
         with torch.no_grad():
             self.alpha.copy_(alpha_new)
+        
+        print('New alpha', self.alpha)
