@@ -7917,11 +7917,13 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         mumomentum=0.99,
         mulambdag=0.18,
         mulambdac=1.61,
+        mulambdad=0.75,
         id=0,
         nclusters=1,
         ndepartements=1,
         scaleagg="department",
         alphatype="department",
+        clustersequaldept=False,
         muinit=None,
         scaleinit=None,
     ):
@@ -7952,6 +7954,13 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.mu_momentum = float(mumomentum)
         self.mu_lambda_g = float(mulambdag)
         self.mu_lambda_c = float(mulambdac)
+        self.mu_lambda_d = float(mulambdad)
+        
+        if clustersequaldept:
+            self.mu_lambda_c = 0
+        if self.ndepartements == 1:
+            self.mu_lambda_d = 0
+        
         self.massupdate = float(massupdate)
         
         self.wmid = wmid          # poids de Lmid
@@ -7991,6 +8000,11 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.register_buffer(
             "mu_prior_global",
             torch.full((self.C,), float("nan"), dtype=torch.float32)
+        )
+        
+        self.register_buffer(
+            "mu_prior_departement",
+            torch.full((_dept_buf_size, self.C), float("nan"), dtype=torch.float32)
         )
 
         self.wkdecay = wkdecay
@@ -8187,13 +8201,88 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         valid_mask = torch.ones_like(raw_ids, dtype=torch.bool, device=device)
         return slot_to_raw.clone(), local_ids, valid_mask
+    
+    def _group_centers_from_weights(self, y, weights, group_ids_local, Z):
+        """
+        Compute robust group-wise centers from weights.
 
-    def _mu_soft(self, p, y_cont, clusters_ids_local, sw=None, active_cluster_slots=None):
+        Parameters
+        ----------
+        y : (N,)
+        weights : (N,)
+        group_ids_local : (N,) in [0..Z-1]
+        Z : int
+            Number of active groups
+
+        Returns
+        -------
+        m_k : (Z,)
+            Effective mass per group
+        mu_hat : (Z,)
+            Robust center per group
+        """
+        """device = y.device
+        dtype = y.dtype
+        eps = self.eps
+        alpha = 20.0
+
+        m_k = torch.zeros(Z, device=device, dtype=dtype)
+        m_k.scatter_add_(0, group_ids_local, weights)
+
+        wy = weights * y
+        sum_wy = torch.zeros(Z, device=device, dtype=dtype)
+        sum_wy.scatter_add_(0, group_ids_local, wy)
+        c_loc = sum_wy / m_k.clamp_min(eps)
+
+        logits = -alpha * (y - c_loc[group_ids_local]).abs()
+
+        max_per_group = torch.full((Z,), -float("inf"), device=device, dtype=dtype)
+        max_per_group.scatter_reduce_(0, group_ids_local, logits, reduce="amax", include_self=True)
+
+        logits_shift = logits - max_per_group[group_ids_local]
+        exp_logits = torch.exp(logits_shift)
+
+        den = torch.zeros(Z, device=device, dtype=dtype)
+        den.scatter_add_(0, group_ids_local, exp_logits)
+        w_loc = exp_logits / den[group_ids_local].clamp_min(eps)
+
+        mu_hat = torch.zeros(Z, device=device, dtype=dtype)
+        mu_hat.scatter_add_(0, group_ids_local, w_loc * y)"""
+        
+        device = y.device
+        dtype = y.dtype
+        eps = self.eps
+
+        m_k = torch.zeros(Z, device=device, dtype=dtype)
+        m_k.scatter_add_(0, group_ids_local, weights)
+
+        wy = weights * y
+        sum_wy = torch.zeros(Z, device=device, dtype=dtype)
+        sum_wy.scatter_add_(0, group_ids_local, wy)
+
+        mu_hat = sum_wy / m_k.clamp_min(eps)
+
+        return m_k, mu_hat
+    
+    def _mu_soft(
+        self,
+        p,
+        y_cont,
+        clusters_ids_local,
+        departement_ids_local=None,
+        sw=None,
+        active_cluster_slots=None,
+        active_dept_slots=None,
+    ):
         y = y_cont.to(dtype=p.dtype)
         device = p.device
-        
-        
-        # Gating to remove small contribution
+
+        if self.mu_prior.device != device:
+            self.mu_prior = self.mu_prior.to(device)
+        if self.mu_prior_global.device != device:
+            self.mu_prior_global = self.mu_prior_global.to(device)
+        if hasattr(self, "mu_prior_departement") and self.mu_prior_departement.device != device:
+            self.mu_prior_departement = self.mu_prior_departement.to(device)
 
         gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
         p = p * gate
@@ -8203,18 +8292,52 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             p = p.clamp_min(self.eps).pow(gamma)
             p = p / p.sum(dim=1, keepdim=True).clamp_min(self.eps)
 
-        Z = len(active_cluster_slots) if active_cluster_slots is not None else (
+        Zc = len(active_cluster_slots) if active_cluster_slots is not None else (
             int(clusters_ids_local.max().item()) + 1 if clusters_ids_local.numel() > 0 else 1
         )
 
-        # Define mu and mass attributes
-        mu_clusters = torch.zeros(Z, self.C, device=device, dtype=p.dtype)
-        mass_clusters = torch.zeros(Z, self.C, device=device, dtype=p.dtype)
+        Zd = len(active_dept_slots) if active_dept_slots is not None else (
+            int(departement_ids_local.max().item()) + 1
+            if departement_ids_local is not None and departement_ids_local.numel() > 0
+            else 0
+        )
 
-        # Get weights for shrinkage
-        lambda_g = float(getattr(self, "mu_lambda_g", 1.0))
-        lambda_c = float(getattr(self, "mu_lambda_c", 1.0))
+        mu_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+        mass_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+
+        mu_departements = torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+        mass_departements = torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+
+        lambda_g = self.mu_lambda_g
+        lambda_c = self.mu_lambda_c
+        lambda_d = self.mu_lambda_d
+        
+        print('global', lambda_g)
+        print('cluster', lambda_c)
+        print('departement', lambda_d)
+        
         min_mass_update = self.massupdate * self.taugate
+
+        # Mapping local cluster -> local department
+        if Zd > 0 and departement_ids_local is not None:
+            cluster_to_dept_local = torch.empty(Zc, dtype=torch.long, device=device)
+            for z in range(Zc):
+                dept_z = torch.unique(departement_ids_local[clusters_ids_local == z])
+
+                if dept_z.numel() == 0:
+                    raise ValueError(
+                        f"Empty cluster {z}: no department associated with this cluster in the batch."
+                    )
+
+                if dept_z.numel() > 1:
+                    raise ValueError(
+                        f"Cluster {z} is associated with multiple departments in the same batch: "
+                        f"{dept_z.tolist()}"
+                    )
+
+                cluster_to_dept_local[z] = dept_z[0]
+        else:
+            cluster_to_dept_local = None
 
         for k in range(self.C):
             pk = p[:, k]
@@ -8224,65 +8347,85 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             else:
                 weights = pk
 
+            # ---------------------------
+            # Global prior
+            # ---------------------------
             m_k_global = weights.sum()
             if m_k_global > 0:
-                # Calculate the mu_hat_global for class k
-                weights_norm_global = weights / m_k_global.clamp_min(self.eps)
-                alpha = 20.0
-                c_global = (weights_norm_global * y).sum()
-                w_global = torch.softmax(-alpha * (y - c_global).abs(), dim=0)
-                mu_hat_k_global = (w_global * y).sum()
+                mu_hat_k_global = (weights * y).sum() / m_k_global.clamp_min(self.eps)
             else:
-                mu_hat_k_global = torch.tensor(0.0, device=device, dtype=p.dtype)
+                mu_hat_k_global = y.mean()
 
             with torch.no_grad():
                 if not torch.isfinite(self.mu_prior_global[k]):
                     self.mu_prior_global[k] = mu_hat_k_global.detach()
                 elif m_k_global > min_mass_update:
-                    # update global with EMA
                     self.mu_prior_global[k] = (
                         self.mu_momentum * self.mu_prior_global[k]
                         + (1.0 - self.mu_momentum) * mu_hat_k_global.detach()
                     )
 
-            check_finite("p_before_gate", p)
-            check_finite("gate", gate)
-            check_finite("p_after_gate", p)
-            check_finite("weights", weights)
-            check_finite("m_k_global", m_k_global)
-            check_finite("mu_hat_k_global", mu_hat_k_global)
-            check_finite("mu_prior_global", self.mu_prior_global[k])
+            prior_global_k = self.mu_prior_global[k].to(device=device, dtype=p.dtype)
 
-            eps = self.eps
-            alpha = 20.0
-            
-            # Define mu for cluster and class k
+            # ---------------------------
+            # Department-level mu
+            # ---------------------------
+            if Zd > 0 and departement_ids_local is not None:
+                m_k_d, mu_hat_d = self._group_centers_from_weights(
+                    y=y,
+                    weights=weights,
+                    group_ids_local=departement_ids_local,
+                    Z=Zd,
+                )
+                mass_departements[:, k] = m_k_d.detach()
 
-            m_k = torch.zeros(Z, device=device, dtype=p.dtype)
-            m_k.scatter_add_(0, clusters_ids_local, weights)
-            mass_clusters[:, k] = m_k.detach()
+                valid_d = m_k_d > min_mass_update
+                
+                with torch.no_grad():
+                    if active_dept_slots is not None:
+                        for li, slot_t in enumerate(active_dept_slots):
+                            slot = int(slot_t.item())
+                            old_val = self.mu_prior_departement[slot, k]
+                            if not torch.isfinite(old_val):
+                                self.mu_prior_departement[slot, k] = mu_hat_d[li].detach()
+                            elif valid_d[li]:
+                                self.mu_prior_departement[slot, k] = (
+                                    self.mu_momentum * old_val
+                                    + (1.0 - self.mu_momentum) * mu_hat_d[li].detach()
+                                )
+                if active_dept_slots is not None:
+                    active_dept_slots = active_dept_slots.to(device)
+                    prior_dept_k = self.mu_prior_departement[active_dept_slots, k].to(device=device, dtype=p.dtype)
+                    prior_dept_k = torch.where(
+                        torch.isfinite(prior_dept_k),
+                        prior_dept_k,
+                        torch.full_like(prior_dept_k, prior_global_k),
+                    )
+                else:
+                    prior_dept_k = torch.full((Zd,), prior_global_k, device=device, dtype=p.dtype)
 
-            wy = weights * y
-            sum_wy = torch.zeros(Z, device=device, dtype=p.dtype)
-            sum_wy.scatter_add_(0, clusters_ids_local, wy)
-            c_loc = sum_wy / m_k.clamp_min(eps)
+                mu_k_d = torch.where(
+                    m_k_d <= self.eps,
+                    mu_hat_d,
+                    (m_k_d * mu_hat_d + lambda_d * prior_dept_k + lambda_g * prior_global_k)
+                    / (m_k_d + lambda_d + lambda_g),
+                )
+                mu_departements[:, k] = mu_k_d
+            else:
+                prior_dept_k = None
 
-            logits = -alpha * (y - c_loc[clusters_ids_local]).abs()
+            # ---------------------------
+            # Cluster-level mu
+            # ---------------------------
+            m_k_c, mu_hat_c = self._group_centers_from_weights(
+                y=y,
+                weights=weights,
+                group_ids_local=clusters_ids_local,
+                Z=Zc,
+            )
+            mass_clusters[:, k] = m_k_c.detach()
 
-            max_per_cluster = torch.full((Z,), -float("inf"), device=device, dtype=p.dtype)
-            max_per_cluster.scatter_reduce_(0, clusters_ids_local, logits, reduce="amax", include_self=True)
-
-            logits_shift = logits - max_per_cluster[clusters_ids_local]
-            exp_logits = torch.exp(logits_shift)
-
-            den = torch.zeros(Z, device=device, dtype=p.dtype)
-            den.scatter_add_(0, clusters_ids_local, exp_logits)
-            w_loc = exp_logits / den[clusters_ids_local].clamp_min(eps)
-
-            mu_hat = torch.zeros(Z, device=device, dtype=p.dtype)
-            mu_hat.scatter_add_(0, clusters_ids_local, w_loc * y)
-
-            valid = m_k > min_mass_update
+            valid_c = m_k_c > min_mass_update
 
             with torch.no_grad():
                 if active_cluster_slots is not None:
@@ -8290,46 +8433,137 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                         slot = int(slot_t.item())
                         old_val = self.mu_prior[slot, k]
                         if not torch.isfinite(old_val):
-                            self.mu_prior[slot, k] = mu_hat[li].detach()
-                        elif valid[li]: # update mu cluster with EMA
+                            self.mu_prior[slot, k] = mu_hat_c[li].detach()
+                        elif valid_c[li]:
                             self.mu_prior[slot, k] = (
                                 self.mu_momentum * old_val
-                                + (1.0 - self.mu_momentum) * mu_hat[li].detach()
+                                + (1.0 - self.mu_momentum) * mu_hat_c[li].detach()
                             )
 
-            _pg_raw = self.mu_prior_global[k].to(device=device, dtype=p.dtype)
-            prior_global_k = _pg_raw if torch.isfinite(_pg_raw) else y.mean()
+            if cluster_to_dept_local is not None and prior_dept_k is not None:
+                dept_prior_for_cluster = prior_dept_k.index_select(0, cluster_to_dept_local)
+            else:
+                dept_prior_for_cluster = torch.full(
+                    (Zc,),
+                    prior_global_k,
+                    device=device,
+                    dtype=p.dtype,
+                )
 
             if active_cluster_slots is not None:
+                active_cluster_slots = active_cluster_slots.to(device)
                 prior_cluster_k = self.mu_prior[active_cluster_slots, k].to(device=device, dtype=p.dtype)
                 prior_cluster_k = torch.where(
                     torch.isfinite(prior_cluster_k),
                     prior_cluster_k,
-                    torch.full_like(prior_cluster_k, prior_global_k)
+                    dept_prior_for_cluster,
                 )
             else:
-                prior_cluster_k = self.mu_prior[:Z, k].to(device=device, dtype=p.dtype)
-                prior_cluster_k = torch.where(
-                    torch.isfinite(prior_cluster_k),
-                    prior_cluster_k,
-                    torch.full_like(prior_cluster_k, prior_global_k)
+                prior_cluster_k = dept_prior_for_cluster
+
+            if prior_dept_k is not None and cluster_to_dept_local is not None:
+                prior_dept_for_cluster = prior_dept_k.index_select(0, cluster_to_dept_local)
+                mu_k_c = torch.where(
+                    m_k_c <= self.eps,
+                    m_k_c,
+                    (m_k_c * mu_hat_c + lambda_c * prior_cluster_k + lambda_d * prior_dept_for_cluster + lambda_g * prior_global_k)
+                    / (m_k_c + lambda_c + lambda_d + lambda_g),
+                )
+            else:
+                mu_k_c = torch.where(
+                    m_k_c <= self.eps,
+                    m_k_c,
+                    (m_k_c * mu_hat_c + lambda_c * prior_cluster_k + lambda_g * prior_global_k)
+                    / (m_k_c + lambda_c + lambda_g),
                 )
 
-            mu_k = torch.where(
-                m_k <= eps,
-                prior_cluster_k,
-                (m_k * mu_hat + lambda_c * prior_cluster_k + lambda_g * prior_global_k)
-                / (m_k + lambda_c + lambda_g)
+            mu_clusters[:, k] = mu_k_c
+
+        return mu_clusters, mass_clusters, mu_departements, mass_departements
+    
+    def _score_centers_soft(
+        self,
+        scores,
+        p,
+        clusters_ids_local,
+        departement_ids_local=None,
+        sw=None,
+        active_cluster_slots=None,
+        active_dept_slots=None,
+    ):
+        """
+        Compute class centers in score space (predicted score s), not in target space.
+
+        Returns
+        -------
+        score_clusters : (Zc, C)
+            Soft class centers per cluster in score space.
+        mass_clusters : (Zc, C)
+            Effective mass per cluster and class.
+        score_departements : (Zd, C) or None
+            Soft class centers per department in score space.
+        mass_departements : (Zd, C) or None
+            Effective mass per department and class.
+        """
+        scores = scores.view(-1).to(dtype=p.dtype, device=p.device)
+        device = p.device
+
+        gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
+        p_eff = p * gate
+
+        gamma = getattr(self, "gamma", 1.0)
+        if gamma != 1.0:
+            p_eff = p_eff.clamp_min(self.eps).pow(gamma)
+            p_eff = p_eff / p_eff.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        Zc = len(active_cluster_slots) if active_cluster_slots is not None else (
+            int(clusters_ids_local.max().item()) + 1 if clusters_ids_local.numel() > 0 else 1
+        )
+
+        Zd = len(active_dept_slots) if active_dept_slots is not None else (
+            int(departement_ids_local.max().item()) + 1
+            if departement_ids_local is not None and departement_ids_local.numel() > 0
+            else 0
+        )
+        
+        score_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+        mass_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+
+        score_departements = (
+            torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+        )                        
+
+        mass_departements = (
+            torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+        )
+
+        sw_eff = sw.to(device=device, dtype=p.dtype).clamp_min(self.eps) if sw is not None else None
+
+        for k in range(self.C):
+            weights = p_eff[:, k]
+            if sw_eff is not None:
+                weights = weights * sw_eff
+
+            m_k_c, s_hat_c = self._group_centers_from_weights(
+                y=scores,
+                weights=weights,
+                group_ids_local=clusters_ids_local,
+                Z=Zc,
             )
+            score_clusters[:, k] = s_hat_c
+            mass_clusters[:, k] = m_k_c
 
-            mu_clusters[:, k] = mu_k
+            if Zd > 0 and departement_ids_local is not None:
+                m_k_d, s_hat_d = self._group_centers_from_weights(
+                    y=scores,
+                    weights=weights,
+                    group_ids_local=departement_ids_local,
+                    Z=Zd,
+                )
+                score_departements[:, k] = s_hat_d
+                mass_departements[:, k] = m_k_d
 
-        return mu_clusters, mass_clusters
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if mode:
-            self.epoch_stats = {}
+        return score_clusters, mass_clusters, score_departements, mass_departements
             
     def _loss_mid(self, mu_ref: torch.Tensor, theta_ref: torch.Tensor) -> torch.Tensor:
         """
@@ -8364,13 +8598,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             theta_ref = theta_ref.expand(mu_ref.shape[0], -1)
         elif mu_ref.shape[0] == 1 and theta_ref.shape[0] > 1:
             mu_ref = mu_ref.expand(theta_ref.shape[0], -1)
-
+            
         if mu_ref.shape[0] != theta_ref.shape[0]:
             raise ValueError(
                 f"mu_ref and theta_ref are not aligned: {mu_ref.shape} vs {theta_ref.shape}"
             )
 
         target_mid = 0.5 * (mu_ref[:, :-1] + mu_ref[:, 1:])
+        target_mid = target_mid.detach()
 
         # Important: detach mu so Lmid mainly calibrates thresholds/bins
         if getattr(self, "mid_detach_mu", True):
@@ -8385,7 +8620,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
     def forward(self, score, y_cont, clusters_ids, departement_ids, sample_weight=None):
         s = score.view(-1)
-        y = y_cont.view(-1).to(device=s.device).long()
+        y = y_cont.view(-1).to(device=s.device)
 
         check_finite("score", s)
         check_finite("y_cont", y_cont)
@@ -8418,7 +8653,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             departement_ids=dept_slot_ids if self.alphatype == "department" else None,
         )
         check_finite("probs", probs)
-
+        
         probs = torch.nan_to_num(probs, nan=self.eps, posinf=1.0, neginf=0.0)
         probs = probs.clamp_min(0.0)
         probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(self.eps)
@@ -8430,12 +8665,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         else:
             active_dept_slots = local_dept_ids = None
 
-        mu, mass = self._mu_soft(
+        mu, mass, mu_departement, mass_departement = self._mu_soft(
             probs,
             y,
             local_cluster_ids,
+            departement_ids_local=local_dept_ids,
             sw=sw,
-            active_cluster_slots=active_cluster_slots
+            active_cluster_slots=active_cluster_slots,
+            active_dept_slots=active_dept_slots,
         )
         check_finite("mu", mu)
         check_finite("mass", mass)
@@ -8446,39 +8683,48 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         loss = s.new_tensor(0.0)
         wsum = s.new_tensor(0.0)
-
+        
         mu_active = mu[active_local_clusters]
         mass_active = mass[active_local_clusters]
         check_finite("mu_active", mu_active)
         
         theta_all = self._compute_thresholds().to(device)
 
-        if theta_all.dim() == 1:
-            # global thresholds
-            theta_mid = theta_all.unsqueeze(0).expand(mu_active.shape[0], -1)
+        # --------------------------------------------------
+        # Score-space centers for Lmid
+        # theta_k is pushed toward 0.5 * (s_k + s_{k+1})
+        # --------------------------------------------------
+        score_centers_cluster, score_mass_cluster, score_centers_dept, score_mass_dept = self._score_centers_soft(
+            s,
+            probs,
+            local_cluster_ids,
+            departement_ids_local=local_dept_ids,
+            sw=sw,
+            active_cluster_slots=active_cluster_slots,
+            active_dept_slots=active_dept_slots,
+        )
 
-        elif self.alphatype == "cluster":
-            # thresholds aligned with active cluster slots
-            theta_mid = theta_all.index_select(0, active_cluster_slots)
+        if theta_all.dim() == 1:
+            # global thresholds -> target = average class-score centers over active clusters
+            score_ref = score_centers_cluster.mean(dim=0, keepdim=True)
+            theta_mid = theta_all.unsqueeze(0)
 
         elif self.alphatype == "department":
-            # simple and safe version:
-            # if one active department, broadcast its thresholds to all active clusters
-            if active_dept_slots is None:
-                theta_mid = theta_all[:1].expand(mu_active.shape[0], -1)
+            theta_mid = theta_all.index_select(0, active_dept_slots)
+
+            if score_centers_dept is not None and score_centers_dept.shape[0] > 0:
+                score_ref = score_centers_dept
             else:
-                theta_dep = theta_all.index_select(0, active_dept_slots)
-                if theta_dep.shape[0] == 1:
-                    theta_mid = theta_dep.expand(mu_active.shape[0], -1)
-                else:
-                    # if several departments are active at once, aggregate mu per department
-                    # before using Lmid; for now, fallback on the global running centers
-                    theta_mid = theta_dep[:1].expand(mu_active.shape[0], -1)
+                score_ref = score_centers_cluster.mean(dim=0, keepdim=True).expand(theta_mid.shape[0], -1)
+
+        elif self.alphatype == "cluster":
+            theta_mid = theta_all.index_select(0, active_cluster_slots)
+            score_ref = score_centers_cluster
 
         else:
             raise ValueError(f"Unknown alphatype: {self.alphatype}")
 
-        Lmid = self._loss_mid(mu_active, theta_mid)
+        Lmid = self._loss_mid(score_ref, theta_mid)
 
         num_active = len(active_local_clusters)
         loss_accum = torch.zeros(num_active, device=device, dtype=s.dtype)
@@ -8493,8 +8739,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         w_viol = w_viol.detach() + self.eps
 
         for k, pairs in self.P.items():
-            raw = torch.stack([mu_active[:, b] - mu_active[:, a] for (a, b) in pairs], dim=0)
-            margins = torch.stack([gains[a:b].sum() for (a, b) in pairs], dim=0)
+            raw = torch.stack([mu_active[:, b] - mu_active[:, a] for (a, b) in pairs], dim=0).to(s.device)
+            margins = torch.stack([gains[a:b].sum() for (a, b) in pairs], dim=0).to(device)
             deltas = raw - margins.unsqueeze(1)
             check_finite("deltas_before_scaling", deltas)
 
@@ -8530,11 +8776,17 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                             self.delta_scale_ema[slot, pair_indices] = (
                                 old * self.scale_momentum + batch_scale_per_pair * (1.0 - self.scale_momentum)
                             )
-                else:
+                
+                elif self.scaleagg == "None":
+                    pass
+                
+                elif self.scaleagg == "global":
                     old = self.delta_scale_ema[pair_indices]
                     self.delta_scale_ema[pair_indices] = (
                         old * self.scale_momentum + batch_scale_per_pair * (1.0 - self.scale_momentum)
                     )
+                else:
+                    raise ValueError(f'Unknowed value of scaleagg {self.scaleagg}')
 
             if self.scaleagg == "cluster":
                 sc_raw = self.delta_scale_ema[
@@ -8550,10 +8802,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                     sc = sc_depts.clamp(self.scale_min, self.scale_max)
                     deltas = deltas / sc.unsqueeze(1)
                     #deltas = deltas / margins.unsqueeze(1)
-            else:
+            elif self.scaleagg == "None":
+                pass
+            elif self.scaleagg == "global":
                 sc = self.delta_scale_ema[pair_indices].to(device=device).clamp(self.scale_min, self.scale_max)
                 deltas = deltas / sc.unsqueeze(1)
                 #deltas = deltas / margins.unsqueeze(1)
+            else:
+                raise ValueError(f'Unknowed value of scaleagg {self.scaleagg}')
 
             check_finite("deltas_after_scaling", deltas)
             check_finite("delta_scale_ema", self.delta_scale_ema)
@@ -8657,17 +8913,19 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         focal_weight = alpha_t * (1.0 - p_t).pow(self.fgamma)
         focal_ce = -torch.log(p_t)
-
+        
         check_finite("prob_fire", prob_fire)
         check_finite("p_t", p_t)
         check_finite("focal_ce", focal_ce)
         assert (p_t > 0).all(), "p_t contains zeros -> log instability"
-
+        
         if sw is not None:
             sw_norm = sw / sw.sum().clamp_min(1e-6) * sw.numel()
             focal_loss = (focal_weight * focal_ce * sw_norm).mean()
         else:
             focal_loss = (focal_weight * focal_ce).mean()
+            
+        #focal_loss = F.mse_loss(score, y_cont)
 
         if "focal" not in self.epoch_stats:
             self.epoch_stats["focal"] = []
@@ -8688,7 +8946,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             mu0_val = mu0_val.clamp(-100.0, 100.0)
 
         mu0_term = F.softplus(mu0_val)
-
+        
         if "mu0_term" not in self.epoch_stats:
             self.epoch_stats["mu0_term"] = []
         self.epoch_stats["mu0_term"].append(mu0_term.item())
@@ -8763,6 +9021,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             "mu_prior_global": self.mu_prior_global.detach().cpu().numpy(),
             "cluster_slot_to_raw": self.cluster_slot_to_raw.detach().cpu().numpy(),
             "departement_slot_to_raw": self.departement_slot_to_raw.detach().cpu().numpy(),
+            "mu_prior_departement": self.mu_prior_departement.detach().cpu().numpy(),
         }
 
         if getattr(self, "learn_gains", False):
@@ -8846,7 +9105,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         # --------------------------------------------------
         # 2) alpha
         # --------------------------------------------------
-        
         print('Old alpha', self.alpha)
         if "alpha" in payload and payload["alpha"] is not None:
             alpha_new = torch.as_tensor(
@@ -8895,6 +9153,23 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 )
             with torch.no_grad():
                 self.mu_prior_global.copy_(mu_prior_global_new)
+                
+        # --------------------------------------------------
+        # 4) mu_prior_departement
+        # --------------------------------------------------
+        if "mu_prior_departement" in payload and payload["mu_prior_departement"] is not None:
+            mu_prior_departement_new = torch.as_tensor(
+                payload["mu_prior_departement"],
+                dtype=self.mu_prior_departement.dtype,
+                device=self.mu_prior_departement.device,
+            )
+            if mu_prior_departement_new.shape != self.mu_prior_departement.shape:
+                raise ValueError(
+                    f"mu_prior_departement shape mismatch: got {tuple(mu_prior_departement_new.shape)}, "
+                    f"expected {tuple(self.mu_prior_departement.shape)}"
+                )
+            with torch.no_grad():
+                self.mu_prior_departement.copy_(mu_prior_departement_new)
 
         # --------------------------------------------------
         # 5) resynchronisation des seuils dérivés
@@ -8927,6 +9202,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         cluster_weights_list = []
         mass_active_list = []
         cluster_slot_to_raw_list = []
+        mu_prior_departement_list = []
+        departement_slot_to_raw_list = []
 
         iterator = []
         if isinstance(params_history, dict):
@@ -8949,7 +9226,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
             if "thresholds" not in p:
                 continue
-
+            
+            mu_prior_departement_list.append(p.get("mu_prior_departement", None))
+            departement_slot_to_raw_list.append(p.get("departement_slot_to_raw", None))
             epochs.append(ep)
             thresholds_list.append(p["thresholds"])
             gains_list.append(p.get("gains", None))
@@ -9361,6 +9640,97 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         except Exception:
             plt.close("all")
             
+        # --- Plot Mu per department (depuis mu_prior_departement : shape (ndepartements, C)) ---
+        try:
+            valid_mupd = [(ep, m) for ep, m in zip(epochs, mu_prior_departement_list) if m is not None]
+            if valid_mupd:
+                md_epochs, md_vals = zip(*valid_mupd)
+                md_arr = np.array(md_vals)  # (epochs, ndepartements, C)
+
+                dept_maps = [np.asarray(x) if x is not None else None for x in departement_slot_to_raw_list]
+
+                if md_arr.ndim == 3:
+                    n_buf = md_arr.shape[1]
+                    n_classes = md_arr.shape[2]
+
+                    dept_slots_to_plot = [
+                        d for d in range(n_buf)
+                        if np.isfinite(md_arr[:, d, :]).any()
+                    ]
+                    n_depts_plot = len(dept_slots_to_plot)
+
+                    if n_depts_plot > 0:
+                        cols = min(4, n_depts_plot)
+                        rows = (n_depts_plot + cols - 1) // cols
+
+                        fig, axes = plt.subplots(
+                            rows,
+                            cols,
+                            figsize=(5 * cols, 3.5 * rows),
+                            sharey=False,
+                            sharex=True
+                        )
+
+                        if rows == 1 and cols == 1:
+                            axes = np.array([[axes]])
+                        elif rows == 1:
+                            axes = axes[None, :]
+
+                        axes_flat = axes.flatten()
+                        cmap = plt.cm.plasma
+
+                        last_dept_map = dept_maps[-1] if len(dept_maps) > 0 else None
+
+                        for plot_idx, d in enumerate(dept_slots_to_plot):
+                            ax = axes_flat[plot_idx]
+
+                            for c in range(n_classes):
+                                ax.plot(
+                                    list(md_epochs),
+                                    md_arr[:, d, c],
+                                    color=cmap(c / max(n_classes - 1, 1)),
+                                    label=f"class {c}"
+                                )
+
+                            if best_epoch is not None:
+                                ax.axvline(best_epoch, color="r", linestyle="--", linewidth=0.8)
+
+                            if last_dept_map is not None and d < len(last_dept_map) and last_dept_map[d] >= 0:
+                                ax.set_title(f"dept slot {d} / raw {int(last_dept_map[d])}")
+                            else:
+                                ax.set_title(f"dept slot {d}")
+
+                            ax.set_xlabel("Epoch")
+                            ax.grid(True, alpha=0.3)
+
+                            # Échelle propre à chaque sous-figure
+                            yvals = md_arr[:, d, :]
+                            finite_mask = np.isfinite(yvals)
+
+                            if finite_mask.any():
+                                ymin = np.nanmin(yvals)
+                                ymax = np.nanmax(yvals)
+
+                                if np.isclose(ymin, ymax):
+                                    pad = 0.1 if np.isclose(ymin, 0.0) else 0.05 * abs(ymin)
+                                    ax.set_ylim(ymin - pad, ymax + pad)
+                                else:
+                                    pad = 0.05 * (ymax - ymin)
+                                    ax.set_ylim(ymin - pad, ymax + pad)
+
+                        for j in range(n_depts_plot, len(axes_flat)):
+                            axes_flat[j].set_visible(False)
+
+                        axes_flat[n_depts_plot - 1].legend(fontsize=7, loc="best")
+                        fig.suptitle(f"{self.__class__.__name__} — Mu Prior per department", fontsize=12)
+                        plt.tight_layout()
+                        plt.savefig(root_dir / "mu_per_departement.png")
+                        plt.close()
+
+        except Exception as _e:
+            plt.close("all")
+            print(f"[plot_params] mu_per_departement error: {_e}")
+        
 class ClusterDepartmentRankNetLoss(nn.Module):
     """
     RankNet pairwise loss + thresholds learned per department or per cluster.
@@ -9570,7 +9940,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
             else:
                 theta = theta0
             return theta
-
+        
         theta0 = alpha[:, 0:1]
         if alpha.size(1) > 1:
             incr = F.softplus(alpha[:, 1:])
@@ -9670,7 +10040,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
 
         dy = yi - yj
         abs_dy = dy.abs()
-
+        
         # ignore ties / quasi-ties
         valid = abs_dy > self.tie_epsilon
         if not valid.any():
@@ -10027,3 +10397,1215 @@ class ClusterDepartmentRankNetLoss(nn.Module):
             self.alpha.copy_(alpha_new)
         
         print('New alpha', self.alpha)
+        
+class CIOL(nn.Module):
+    """
+    CIOL version logits:
+    - l'entrée `score` est maintenant un tenseur de logits de shape (N, C)
+    - les probabilités de classe sont obtenues directement par softmax(score)
+    - toute la partie seuils/cutpoints/alpha/Lmid est supprimée
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        eps=1e-4,
+        wk=None,
+        learngains=False,
+        gainsfloor=2.5,
+        wkdecay="None",
+        wkpower=2.06,
+        wklambda=0.3495008616795649,
+        gamma=5.0,
+        taugate=0.05,
+        gatetemp=0.11,
+        wfocal=1.76,
+        wmu0=1.94,
+        wtrans=1.0,
+        fgamma=1.03,
+        falpha=0.89,
+        massupdate=0.5,
+        mumomentum=0.99,
+        mulambdag=0.18,
+        mulambdac=1.61,
+        mulambdad=0.75,
+        id=0,
+        nclusters=1,
+        ndepartements=1,
+        scaleagg="department",
+        alphatype="department",   # gardé pour compatibilité, mais non utilisé
+        muinit=None,
+        scaleinit=None,
+    ):
+        super().__init__()
+
+        self.C = int(num_classes)
+        self.id = int(id)
+        self.nclusters = int(nclusters)
+        self.ndepartements = int(ndepartements)
+        self.scaleagg = str(scaleagg)
+        self.alphatype = str(alphatype)  # compat seulement
+
+        self.beta = 0.0
+        self.t = 0.0
+        self.eps = float(eps)
+
+        self.wfocal = float(wfocal)
+        self.wmu0 = float(wmu0)
+        self.wtrans = float(wtrans)
+
+        self.fgamma = float(fgamma)
+        self.falpha = float(falpha)
+
+        self.gamma = float(gamma)
+        self.taugate = float(taugate)
+        self.gatetemp = float(gatetemp)
+
+        self.mu_momentum = float(mumomentum)
+        self.mu_lambda_g = float(mulambdag)
+        self.mu_lambda_c = float(mulambdac)
+        self.mu_lambda_d = float(mulambdad)
+        self.massupdate = float(massupdate)
+
+        _buf_size = self.nclusters
+        _dept_buf_size = self.ndepartements
+
+        # --------------------------------------------------
+        # mappings raw ids -> internal slots
+        # --------------------------------------------------
+        self.cluster_raw_to_slot = {}
+        self.departement_raw_to_slot = {}
+        self.cluster_next_free_slot = 0
+        self.departement_next_free_slot = 0
+
+        self.register_buffer(
+            "cluster_slot_to_raw",
+            torch.full((_buf_size,), -1, dtype=torch.long)
+        )
+        self.register_buffer(
+            "departement_slot_to_raw",
+            torch.full((_dept_buf_size,), -1, dtype=torch.long)
+        )
+
+        # --------------------------------------------------
+        # priors mu
+        # --------------------------------------------------
+        if muinit is not None:
+            _mu = torch.as_tensor(muinit, dtype=torch.float32)
+            if _mu.shape == (self.nclusters, self.C):
+                self.register_buffer("mu_prior", _mu.clone())
+            else:
+                raise ValueError(
+                    f"muinit shape {tuple(_mu.shape)} != ({self.nclusters}, {self.C})"
+                )
+        else:
+            self.register_buffer(
+                "mu_prior",
+                torch.full((_buf_size, self.C), float("nan"), dtype=torch.float32)
+            )
+
+        self.register_buffer(
+            "mu_prior_global",
+            torch.full((self.C,), float("nan"), dtype=torch.float32)
+        )
+
+        self.register_buffer(
+            "mu_prior_departement",
+            torch.full((_dept_buf_size, self.C), float("nan"), dtype=torch.float32)
+        )
+
+        # --------------------------------------------------
+        # weights per transition distance
+        # --------------------------------------------------
+        self.wkdecay = wkdecay
+        self.wkpower = wkpower
+        self.wklambda = wklambda
+        self.wkmin = 0.0
+
+        self.P = {
+            k: [(a, a + k) for a in range(0, self.C - k)]
+            for k in range(1, self.C)
+        }
+
+        if wk is None:
+            self.wk = self._build_wk_monotone()
+        else:
+            self.wk = wk
+
+        self.all_pairs = [
+            (a, b) for k in range(1, self.C) for (a, b) in self.P[k]
+        ]
+        self.pair_to_idx = {(a, b): i for i, (a, b) in enumerate(self.all_pairs)}
+        num_pairs = len(self.all_pairs)
+
+        # --------------------------------------------------
+        # gains
+        # --------------------------------------------------
+        self.learn_gains = bool(learngains)
+        self.gains_floor = float(gainsfloor)
+        if self.learn_gains:
+            self.g_raw = nn.Parameter(torch.zeros(self.C - 1))
+        else:
+            self.register_buffer("g_raw", torch.zeros(self.C - 1))
+
+        # --------------------------------------------------
+        # delta scale ema
+        # --------------------------------------------------
+        if self.scaleagg == "cluster":
+            _default_scale = torch.ones(_buf_size, num_pairs)
+            self.register_buffer("delta_scale_ema", _default_scale)
+        elif self.scaleagg == "department":
+            _default_scale = torch.ones(_dept_buf_size, num_pairs)
+            self.register_buffer("delta_scale_ema", _default_scale)
+        else:
+            _default_scale = torch.ones(num_pairs)
+            self.register_buffer("delta_scale_ema", _default_scale)
+
+        if scaleinit is not None:
+            _sc = torch.as_tensor(scaleinit, dtype=torch.float32)
+            if _sc.shape == self.delta_scale_ema.shape:
+                self.delta_scale_ema.copy_(_sc)
+            else:
+                raise ValueError(
+                    f"scaleinit shape {tuple(_sc.shape)} != {tuple(self.delta_scale_ema.shape)}"
+                )
+
+        self.scale_momentum = 0.99
+        self.scale_min = 1e-3
+        self.scale_max = 1e3
+
+        # --------------------------------------------------
+        # cluster loss reweighting
+        # --------------------------------------------------
+        self.tau_loss = 1.5
+        self.loss_ema_momentum = 0.99
+        self.register_buffer(
+            "loss_ema",
+            torch.zeros(_buf_size, dtype=torch.float32)
+        )
+
+    def _build_wk_monotone(self):
+        wk = {}
+        decay = getattr(self, "wkdecay", "power")
+        raw = {}
+
+        for k in range(1, self.C):
+            if decay == "exp":
+                w = float(math.exp(-self.wklambda * (k - 1)))
+            elif decay == "None" or decay is None:
+                w = 1.0
+            else:
+                w = 1.0 / (float(k) ** float(self.wkpower))
+            raw[k] = max(w, float(self.wkmin))
+
+        ks = sorted(raw.keys())
+        vals = [raw[k] for k in ks]
+        for k, v in zip(ks, reversed(vals)):
+            wk[k] = v
+        return wk
+
+    def _compute_gains(self):
+        if not self.learn_gains:
+            return torch.zeros(
+                self.C - 1,
+                device=self.g_raw.device,
+                dtype=self.g_raw.dtype,
+            )
+
+        gains = []
+        floor = float(getattr(self, "gains_floor", 0.0))
+
+        cur = F.softplus(self.g_raw[0]) + floor
+        gains.append(cur)
+
+        for i in range(1, len(self.g_raw)):
+            cur = cur + F.softplus(self.g_raw[i])
+            gains.append(cur)
+
+        return torch.stack(gains)
+
+    def _remap_ids(self, raw_ids: torch.Tensor, buf_size: int, kind: str):
+        if raw_ids.dim() != 1:
+            raw_ids = raw_ids.view(-1)
+
+        raw_ids = raw_ids.long()
+        device = raw_ids.device
+
+        if kind == "cluster":
+            raw_to_slot = self.cluster_raw_to_slot
+            slot_to_raw = self.cluster_slot_to_raw
+            next_free_attr = "cluster_next_free_slot"
+        elif kind == "department":
+            raw_to_slot = self.departement_raw_to_slot
+            slot_to_raw = self.departement_slot_to_raw
+            next_free_attr = "departement_next_free_slot"
+        else:
+            raise ValueError(f"Unknown kind: {kind}")
+
+        local_ids = torch.empty_like(raw_ids, dtype=torch.long, device=device)
+        next_free_slot = getattr(self, next_free_attr)
+
+        for i in range(raw_ids.numel()):
+            rid = int(raw_ids[i].item())
+
+            if rid in raw_to_slot:
+                slot = raw_to_slot[rid]
+            else:
+                if next_free_slot >= buf_size:
+                    raise ValueError(
+                        f"No free slot left for kind='{kind}'. "
+                        f"Encountered new raw id {rid}, but buf_size={buf_size}."
+                    )
+                slot = next_free_slot
+                raw_to_slot[rid] = slot
+                slot_to_raw[slot] = rid
+                next_free_slot += 1
+
+            local_ids[i] = slot
+
+        setattr(self, next_free_attr, next_free_slot)
+
+        valid_mask = torch.ones_like(raw_ids, dtype=torch.bool, device=device)
+        return slot_to_raw.clone(), local_ids, valid_mask
+
+    def _group_centers_from_weights(self, y, weights, group_ids_local, Z):
+        """
+        Weighted mean per group.
+        """
+        device = y.device
+        dtype = y.dtype
+        eps = self.eps
+
+        m_k = torch.zeros(Z, device=device, dtype=dtype)
+        m_k.scatter_add_(0, group_ids_local, weights)
+
+        wy = weights * y
+        sum_wy = torch.zeros(Z, device=device, dtype=dtype)
+        sum_wy.scatter_add_(0, group_ids_local, wy)
+
+        mu_hat = sum_wy / m_k.clamp_min(eps)
+        return m_k, mu_hat
+
+    def _build_cluster_to_dept_map(self, clusters_ids_local, departement_ids_local, Zc):
+        """
+        Associe chaque cluster local à un département local, en prenant
+        le premier département rencontré pour ce cluster dans le batch.
+        """
+        device = clusters_ids_local.device
+        out = torch.full((Zc,), -1, device=device, dtype=torch.long)
+
+        if departement_ids_local is None:
+            return out
+
+        for z in range(Zc):
+            idx = (clusters_ids_local == z).nonzero(as_tuple=False)
+            if idx.numel() > 0:
+                out[z] = departement_ids_local[idx[0, 0]]
+        return out
+
+    def _mu_soft(
+        self,
+        p,
+        y_cont,
+        clusters_ids_local,
+        departement_ids_local=None,
+        sw=None,
+        active_cluster_slots=None,
+        active_dept_slots=None,
+    ):
+        y = y_cont.to(dtype=p.dtype)
+        device = p.device
+
+        gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
+        p = p * gate
+
+        gamma = getattr(self, "gamma", 1.0)
+        if gamma != 1.0:
+            p = p.clamp_min(self.eps).pow(gamma)
+            p = p / p.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        Zc = len(active_cluster_slots) if active_cluster_slots is not None else (
+            int(clusters_ids_local.max().item()) + 1 if clusters_ids_local.numel() > 0 else 1
+        )
+
+        Zd = len(active_dept_slots) if active_dept_slots is not None else (
+            int(departement_ids_local.max().item()) + 1
+            if departement_ids_local is not None and departement_ids_local.numel() > 0
+            else 0
+        )
+
+        mu_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+        mass_clusters = torch.zeros(Zc, self.C, device=device, dtype=p.dtype)
+
+        mu_departements = (
+            torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+        )
+        mass_departements = (
+            torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
+        )
+
+        lambda_g = float(getattr(self, "mu_lambda_g", 1.0))
+        lambda_c = float(getattr(self, "mu_lambda_c", 1.0))
+        lambda_d = float(getattr(self, "mu_lambda_d", 1.0))
+        min_mass_update = self.massupdate * self.taugate
+
+        cluster_to_dept_local = self._build_cluster_to_dept_map(
+            clusters_ids_local=clusters_ids_local,
+            departement_ids_local=departement_ids_local,
+            Zc=Zc,
+        )
+
+        for k in range(self.C):
+            pk = p[:, k]
+            if sw is not None:
+                swk = sw.to(device=device, dtype=p.dtype).clamp_min(self.eps)
+                weights = pk * swk
+            else:
+                weights = pk
+
+            # ---------------------------
+            # Global prior
+            # ---------------------------
+            m_k_global = weights.sum()
+            if m_k_global > 0:
+                mu_hat_k_global = (weights * y).sum() / m_k_global.clamp_min(self.eps)
+            else:
+                mu_hat_k_global = y.mean()
+
+            with torch.no_grad():
+                if not torch.isfinite(self.mu_prior_global[k]):
+                    self.mu_prior_global[k] = mu_hat_k_global.detach()
+                elif m_k_global > min_mass_update:
+                    self.mu_prior_global[k] = (
+                        self.mu_momentum * self.mu_prior_global[k]
+                        + (1.0 - self.mu_momentum) * mu_hat_k_global.detach()
+                    )
+
+            prior_global_k = self.mu_prior_global[k].to(device=device, dtype=p.dtype)
+
+            # ---------------------------
+            # Department-level mu
+            # ---------------------------
+            if Zd > 0 and departement_ids_local is not None:
+                m_k_d, mu_hat_d = self._group_centers_from_weights(
+                    y=y,
+                    weights=weights,
+                    group_ids_local=departement_ids_local,
+                    Z=Zd,
+                )
+                mass_departements[:, k] = m_k_d.detach()
+
+                valid_d = m_k_d > min_mass_update
+
+                with torch.no_grad():
+                    if active_dept_slots is not None:
+                        for li, slot_t in enumerate(active_dept_slots):
+                            slot = int(slot_t.item())
+                            old_val = self.mu_prior_departement[slot, k]
+                            if not torch.isfinite(old_val):
+                                self.mu_prior_departement[slot, k] = mu_hat_d[li].detach()
+                            elif valid_d[li]:
+                                self.mu_prior_departement[slot, k] = (
+                                    self.mu_momentum * old_val
+                                    + (1.0 - self.mu_momentum) * mu_hat_d[li].detach()
+                                )
+
+                if active_dept_slots is not None:
+                    prior_dept_k = self.mu_prior_departement[active_dept_slots, k].to(
+                        device=device, dtype=p.dtype
+                    )
+                    prior_dept_k = torch.where(
+                        torch.isfinite(prior_dept_k),
+                        prior_dept_k,
+                        torch.full_like(prior_dept_k, prior_global_k),
+                    )
+                else:
+                    prior_dept_k = torch.full(
+                        (Zd,), prior_global_k, device=device, dtype=p.dtype
+                    )
+
+                mu_k_d = torch.where(
+                    m_k_d <= self.eps,
+                    prior_dept_k,
+                    (m_k_d * mu_hat_d + lambda_c * prior_dept_k + lambda_g * prior_global_k)
+                    / (m_k_d + lambda_c + lambda_g),
+                )
+                mu_departements[:, k] = mu_k_d
+            else:
+                prior_dept_k = None
+
+            # ---------------------------
+            # Cluster-level mu
+            # ---------------------------
+            m_k_c, mu_hat_c = self._group_centers_from_weights(
+                y=y,
+                weights=weights,
+                group_ids_local=clusters_ids_local,
+                Z=Zc,
+            )
+            mass_clusters[:, k] = m_k_c.detach()
+
+            valid_c = m_k_c > min_mass_update
+
+            with torch.no_grad():
+                if active_cluster_slots is not None:
+                    for li, slot_t in enumerate(active_cluster_slots):
+                        slot = int(slot_t.item())
+                        old_val = self.mu_prior[slot, k]
+                        if not torch.isfinite(old_val):
+                            self.mu_prior[slot, k] = mu_hat_c[li].detach()
+                        elif valid_c[li]:
+                            self.mu_prior[slot, k] = (
+                                self.mu_momentum * old_val
+                                + (1.0 - self.mu_momentum) * mu_hat_c[li].detach()
+                            )
+
+            if active_cluster_slots is not None:
+                prior_cluster_k = self.mu_prior[active_cluster_slots, k].to(
+                    device=device, dtype=p.dtype
+                )
+                prior_cluster_k = torch.where(
+                    torch.isfinite(prior_cluster_k),
+                    prior_cluster_k,
+                    torch.full_like(prior_cluster_k, prior_global_k),
+                )
+            else:
+                prior_cluster_k = torch.full(
+                    (Zc,), prior_global_k, device=device, dtype=p.dtype
+                )
+
+            if prior_dept_k is not None:
+                cluster_dept_prior = torch.full(
+                    (Zc,), prior_global_k, device=device, dtype=p.dtype
+                )
+                valid_map = cluster_to_dept_local >= 0
+                if valid_map.any():
+                    cluster_dept_prior[valid_map] = prior_dept_k[
+                        cluster_to_dept_local[valid_map]
+                    ]
+
+                mu_k_c = torch.where(
+                    m_k_c <= self.eps,
+                    prior_cluster_k,
+                    (
+                        m_k_c * mu_hat_c
+                        + lambda_c * prior_cluster_k
+                        + lambda_d * cluster_dept_prior
+                        + lambda_g * prior_global_k
+                    ) / (m_k_c + lambda_c + lambda_d + lambda_g),
+                )
+            else:
+                mu_k_c = torch.where(
+                    m_k_c <= self.eps,
+                    prior_cluster_k,
+                    (
+                        m_k_c * mu_hat_c
+                        + lambda_c * prior_cluster_k
+                        + lambda_g * prior_global_k
+                    ) / (m_k_c + lambda_c + lambda_g),
+                )
+
+            mu_clusters[:, k] = mu_k_c
+
+        return mu_clusters, mass_clusters, mu_departements, mass_departements
+
+    def forward(self, score, y_cont, clusters_ids, departement_ids, sample_weight=None):
+        # --------------------------------------------------
+        # logits input
+        # score : (N, C)
+        # --------------------------------------------------
+        logits = score
+        if logits.dim() != 2 or logits.size(1) != self.C:
+            raise ValueError(
+                f"`score` must have shape (N, {self.C}), got {tuple(logits.shape)}"
+            )
+
+        device = logits.device
+        y = y_cont.view(-1).to(device=device, dtype=logits.dtype)
+
+        check_finite("logits", logits)
+        check_finite("y_cont", y)
+
+        clusters_ids = clusters_ids.view(-1).long().to(device=device)
+        if departement_ids is not None:
+            departement_ids = departement_ids.view(-1).long().to(device=device)
+
+        sw = sample_weight.view(-1).to(device=device) if sample_weight is not None else None
+        if sw is not None:
+            check_finite("sample_weight", sw)
+            assert (sw >= 0).all(), "Negative sample_weight detected"
+
+        # --------------------------------------------------
+        # internal remapping
+        # --------------------------------------------------
+        _, cluster_slot_ids, _ = self._remap_ids(
+            clusters_ids, self.nclusters, kind="cluster"
+        )
+
+        if departement_ids is not None:
+            _, dept_slot_ids, _ = self._remap_ids(
+                departement_ids, self.ndepartements, kind="department"
+            )
+        else:
+            dept_slot_ids = None
+
+        # --------------------------------------------------
+        # probs directly from logits
+        # --------------------------------------------------
+        probs = F.softmax(logits, dim=1)
+        check_finite("probs", probs)
+
+        probs = torch.nan_to_num(probs, nan=self.eps, posinf=1.0, neginf=0.0)
+        probs = probs.clamp_min(0.0)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        active_cluster_slots, local_cluster_ids = torch.unique(
+            cluster_slot_ids, return_inverse=True
+        )
+
+        if dept_slot_ids is not None:
+            active_dept_slots, local_dept_ids = torch.unique(
+                dept_slot_ids, return_inverse=True
+            )
+        else:
+            active_dept_slots = None
+            local_dept_ids = None
+
+        mu, mass, mu_departement, mass_departement = self._mu_soft(
+            probs,
+            y,
+            local_cluster_ids,
+            departement_ids_local=local_dept_ids,
+            sw=sw,
+            active_cluster_slots=active_cluster_slots,
+            active_dept_slots=active_dept_slots,
+        )
+        check_finite("mu", mu)
+        check_finite("mass", mass)
+        check_finite("mu_prior_global", self.mu_prior_global)
+
+        gains = self._compute_gains().to(device=device, dtype=logits.dtype)
+
+        active_local_clusters = torch.arange(len(active_cluster_slots), device=device)
+
+        loss = logits.new_tensor(0.0)
+        wsum = logits.new_tensor(0.0)
+
+        mu_active = mu[active_local_clusters]
+        mass_active = mass[active_local_clusters]
+        check_finite("mu_active", mu_active)
+
+        num_active = len(active_local_clusters)
+        loss_accum = torch.zeros(num_active, device=device, dtype=logits.dtype)
+        waccum = 0.0
+
+        tau = float(getattr(self, "tau_loss", 1.5))
+        beta = float(getattr(self, "loss_ema_momentum", 0.99))
+
+        loss_ema_dev = self.loss_ema.to(device=device)
+        ema_active = loss_ema_dev[
+            active_cluster_slots.clamp(0, loss_ema_dev.shape[0] - 1)
+        ].to(dtype=mu_active.dtype)
+
+        w_viol = torch.softmax(tau * ema_active, dim=0)
+        w_viol = w_viol.detach() + self.eps
+
+        # --------------------------------------------------
+        # transition loss
+        # --------------------------------------------------
+        for k, pairs in self.P.items():
+            raw = torch.stack(
+                [mu_active[:, b] - mu_active[:, a] for (a, b) in pairs],
+                dim=0
+            )
+
+            margins = torch.stack(
+                [gains[a:b].sum() for (a, b) in pairs],
+                dim=0
+            )
+
+            deltas = raw - margins.unsqueeze(1)
+            check_finite("deltas_before_scaling", deltas)
+
+            pair_indices = torch.as_tensor(
+                [self.pair_to_idx[(a, b)] for (a, b) in pairs],
+                device=device,
+                dtype=torch.long
+            )
+
+            abs_deltas = deltas.detach().abs()
+            batch_scale_per_pair = abs_deltas.median(dim=1).values.clamp_min(self.eps)
+
+            with torch.no_grad():
+                if self.scaleagg == "cluster":
+                    for ci, slot_t in enumerate(active_cluster_slots):
+                        slot = int(slot_t.item())
+                        if slot < 0 or slot >= self.delta_scale_ema.shape[0]:
+                            continue
+                        bs_cid = abs_deltas[:, ci].clamp_min(self.eps)
+                        old = self.delta_scale_ema[slot, pair_indices]
+                        self.delta_scale_ema[slot, pair_indices] = (
+                            old * self.scale_momentum + bs_cid * (1.0 - self.scale_momentum)
+                        )
+
+                elif self.scaleagg == "department":
+                    if active_dept_slots is not None:
+                        for slot_t in active_dept_slots:
+                            slot = int(slot_t.item())
+                            if slot < 0 or slot >= self.delta_scale_ema.shape[0]:
+                                continue
+                            old = self.delta_scale_ema[slot, pair_indices]
+                            self.delta_scale_ema[slot, pair_indices] = (
+                                old * self.scale_momentum
+                                + batch_scale_per_pair * (1.0 - self.scale_momentum)
+                            )
+                else:
+                    old = self.delta_scale_ema[pair_indices]
+                    self.delta_scale_ema[pair_indices] = (
+                        old * self.scale_momentum
+                        + batch_scale_per_pair * (1.0 - self.scale_momentum)
+                    )
+
+            if self.scaleagg == "cluster":
+                sc_raw = self.delta_scale_ema[
+                    active_cluster_slots.clamp(0, self.delta_scale_ema.shape[0] - 1)
+                ][:, pair_indices].T.to(device=device).clamp(self.scale_min, self.scale_max)
+                deltas = deltas / sc_raw
+
+            elif self.scaleagg == "department":
+                if active_dept_slots is not None:
+                    sc_depts = self.delta_scale_ema[
+                        active_dept_slots.clamp(0, self.delta_scale_ema.shape[0] - 1).long()
+                    ][:, pair_indices].to(device=device).mean(dim=0)
+                    sc = sc_depts.clamp(self.scale_min, self.scale_max)
+                    deltas = deltas / sc.unsqueeze(1)
+
+            else:
+                sc = self.delta_scale_ema[pair_indices].to(device=device).clamp(
+                    self.scale_min, self.scale_max
+                )
+                deltas = deltas / sc.unsqueeze(1)
+
+            check_finite("deltas_after_scaling", deltas)
+            check_finite("delta_scale_ema", self.delta_scale_ema)
+
+            loss_neg = F.softplus(-deltas).mean(dim=0)
+            check_finite("loss_neg", loss_neg)
+
+            Lk_clusters = loss_neg
+
+            w = float(self.wk.get(k, 1.0))
+            loss_accum = loss_accum + w * Lk_clusters.detach()
+            waccum = waccum + w
+
+            Lk = (Lk_clusters * w_viol).sum() / w_viol.sum()
+
+            if not hasattr(self, "epoch_stats"):
+                self.epoch_stats = {}
+            if "deltas" not in self.epoch_stats:
+                self.epoch_stats["deltas"] = {}
+            if k not in self.epoch_stats["deltas"]:
+                self.epoch_stats["deltas"][k] = {
+                    "median": [], "min": [], "viol": [], "neg": []
+                }
+
+            self.epoch_stats["deltas"][k]["median"].append(0.0)
+            self.epoch_stats["deltas"][k]["min"].append(0.0)
+            self.epoch_stats["deltas"][k]["viol"].append((deltas < 0).float().mean().item())
+            self.epoch_stats["deltas"][k]["neg"].append(loss_neg.mean().item())
+
+            loss = loss + w * Lk
+            wsum = wsum + w
+
+        # --------------------------------------------------
+        # EMA cluster losses
+        # --------------------------------------------------
+        if waccum > 0:
+            loss_mean_per_cluster = loss_accum / waccum
+            check_finite("loss_mean_per_cluster", loss_mean_per_cluster)
+
+            with torch.no_grad():
+                for ci, slot_t in enumerate(active_cluster_slots):
+                    slot = int(slot_t.item())
+                    if 0 <= slot < self.loss_ema.shape[0]:
+                        self.loss_ema[slot] = (
+                            beta * self.loss_ema[slot]
+                            + (1.0 - beta) * loss_mean_per_cluster[ci]
+                        )
+
+        # --------------------------------------------------
+        # logging mu
+        # --------------------------------------------------
+        w_mu = mass_active.sum(dim=1).clamp_min(1e-6)
+        w_mu_sum = w_mu.sum().clamp_min(1e-6)
+        mu_log = (mu_active * w_mu.unsqueeze(1)).sum(dim=0) / w_mu_sum
+
+        if not hasattr(self, "epoch_stats"):
+            self.epoch_stats = {}
+
+        if "mu" not in self.epoch_stats:
+            self.epoch_stats["mu"] = []
+        self.epoch_stats["mu"].append(mu_log.detach().cpu().numpy())
+
+        if "cluster_weights" not in self.epoch_stats:
+            self.epoch_stats["cluster_weights"] = []
+        cw_full = torch.zeros(self.loss_ema.shape[0], dtype=w_viol.dtype, device=device)
+        for ci, slot_t in enumerate(active_cluster_slots):
+            slot = int(slot_t.item())
+            if 0 <= slot < cw_full.shape[0]:
+                cw_full[slot] = w_viol[ci].to(device=device)
+        self.epoch_stats["cluster_weights"].append(cw_full.detach().cpu().numpy())
+
+        if "mass_active" not in self.epoch_stats:
+            self.epoch_stats["mass_active"] = []
+        ma_full = torch.zeros(
+            self.mu_prior.shape[0], self.C, device=device, dtype=mass_active.dtype
+        )
+        for ci, slot_t in enumerate(active_cluster_slots):
+            slot = int(slot_t.item())
+            ma_full[slot] = mass_active[ci].to(device=device).detach()
+        self.epoch_stats["mass_active"].append(ma_full.detach().cpu().numpy())
+
+        # --------------------------------------------------
+        # transition loss
+        # --------------------------------------------------
+        transition_loss = loss / wsum.clamp_min(1e-6)
+
+        # --------------------------------------------------
+        # focal binary fire / non-fire from class probs
+        # --------------------------------------------------
+        target_bin = (y > 0).to(dtype=logits.dtype)
+
+        prob_fire = (1.0 - probs[:, 0]).clamp(self.eps, 1.0 - self.eps)
+        p_t = torch.where(target_bin > 0.5, prob_fire, 1.0 - prob_fire)
+
+        alpha_t = torch.where(
+            target_bin > 0.5,
+            torch.full_like(p_t, self.falpha),
+            torch.full_like(p_t, 1.0 - self.falpha)
+        )
+
+        focal_weight = alpha_t * (1.0 - p_t).pow(self.fgamma)
+        focal_ce = -torch.log(p_t)
+
+        check_finite("prob_fire", prob_fire)
+        check_finite("p_t", p_t)
+        check_finite("focal_ce", focal_ce)
+        assert (p_t > 0).all(), "p_t contains zeros -> log instability"
+
+        if sw is not None:
+            sw_norm = sw / sw.sum().clamp_min(1e-6) * sw.numel()
+            focal_loss = (focal_weight * focal_ce * sw_norm).mean()
+        else:
+            focal_loss = (focal_weight * focal_ce).mean()
+
+        if "focal" not in self.epoch_stats:
+            self.epoch_stats["focal"] = []
+        self.epoch_stats["focal"].append(focal_loss.item())
+
+        if "transition" not in self.epoch_stats:
+            self.epoch_stats["transition"] = []
+        self.epoch_stats["transition"].append(transition_loss.item())
+
+        # --------------------------------------------------
+        # mu0 regularizer
+        # --------------------------------------------------
+        mu0_val = mu_log[0]
+        if not torch.isfinite(mu0_val):
+            mu0_val = mu0_val.new_tensor(0.0)
+        else:
+            mu0_val = mu0_val.clamp(-100.0, 100.0)
+
+        mu0_term = F.softplus(mu0_val)
+
+        if "mu0_term" not in self.epoch_stats:
+            self.epoch_stats["mu0_term"] = []
+        self.epoch_stats["mu0_term"].append(mu0_term.item())
+
+        check_finite("transition_loss", transition_loss)
+        check_finite("focal_loss", focal_loss)
+        check_finite("mu0_term", mu0_term)
+
+        total_loss = (
+            self.wtrans * transition_loss
+            + self.wfocal * focal_loss
+            + self.wmu0 * mu0_term
+        )
+
+        return total_loss
+
+    def get_learnable_parameters(self):
+        params = {}
+        if getattr(self, "learn_gains", False):
+            params["g_raw"] = self.g_raw
+        return params
+
+    @torch.no_grad()
+    def score_to_class(
+        self,
+        scores: torch.Tensor,
+        clusters_ids: torch.Tensor = None,
+        departement_ids: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Maintenant `scores` = logits (N, C), donc la classe prédite est argmax.
+        """
+        if scores.dim() != 2 or scores.size(1) != self.C:
+            raise ValueError(
+                f"`scores` must have shape (N, {self.C}), got {tuple(scores.shape)}"
+            )
+        return scores.argmax(dim=1)
+
+    def get_attribute(self):
+        payload = {
+            "mode": "logits",
+            "mu_prior": self.mu_prior.detach().cpu().numpy(),
+            "mu_prior_global": self.mu_prior_global.detach().cpu().numpy(),
+            "cluster_slot_to_raw": self.cluster_slot_to_raw.detach().cpu().numpy(),
+            "departement_slot_to_raw": self.departement_slot_to_raw.detach().cpu().numpy(),
+            "mu_prior_departement": self.mu_prior_departement.detach().cpu().numpy(),
+            "delta_scale_ema": self.delta_scale_ema.detach().cpu().numpy(),
+        }
+
+        if getattr(self, "learn_gains", False):
+            payload["g_raw"] = self.g_raw.detach().cpu().numpy()
+            payload["gains"] = self._compute_gains().detach().cpu().numpy()
+
+        if hasattr(self, "epoch_stats") and "deltas" in self.epoch_stats:
+            agg_deltas = {}
+            for k, dstats in self.epoch_stats["deltas"].items():
+                agg_deltas[k] = {
+                    "median": np.mean(dstats["median"]) if dstats["median"] else 0.0,
+                    "min": np.mean(dstats["min"]) if dstats["min"] else 0.0,
+                    "viol": np.mean(dstats["viol"]) if dstats["viol"] else 0.0,
+                    "neg": np.mean(dstats["neg"]) if dstats["neg"] else 0.0,
+                }
+            payload["deltas"] = agg_deltas
+
+        if hasattr(self, "epoch_stats") and "mu" in self.epoch_stats and len(self.epoch_stats["mu"]) > 0:
+            mu_stack = np.stack(self.epoch_stats["mu"])
+            payload["mu"] = np.mean(mu_stack, axis=0)
+
+        if hasattr(self, "epoch_stats"):
+            for _lkey in ("transition", "focal", "mu0_term"):
+                vals = self.epoch_stats.get(_lkey, [])
+                if vals:
+                    payload[_lkey] = [float(np.mean(vals))]
+
+        if hasattr(self, "epoch_stats") and self.epoch_stats.get("cluster_weights"):
+            cw_stack = np.stack(self.epoch_stats["cluster_weights"])
+            payload["cluster_weights"] = np.mean(cw_stack, axis=0)
+
+        if hasattr(self, "epoch_stats") and self.epoch_stats.get("mass_active"):
+            ma_stack = np.stack(self.epoch_stats["mass_active"])
+            payload["mass_active"] = np.max(ma_stack, axis=0)
+
+        return [("ordinal_params", DictWrapper(payload))]
+
+    def update_params(self, new_dict, epoch=None):
+        """
+        Accepte :
+        1) un payload dict direct
+        2) un DictWrapper(payload)
+        3) un dict externe du type:
+           {"epoch": ..., "ordinal_params": DictWrapper(payload)}
+        """
+
+        payload = new_dict
+
+        if isinstance(payload, dict) and "ordinal_params" in payload:
+            if epoch is None and "epoch" in payload:
+                epoch = payload["epoch"]
+            payload = payload["ordinal_params"]
+
+        if hasattr(payload, "numpy") and not isinstance(payload, dict):
+            payload = payload.numpy()
+
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"update_params expected a dict-like payload after unwrapping, got {type(payload)}"
+            )
+
+        # legacy alpha ignored on purpose
+        # if "alpha" in payload: ignored
+
+        if self.learn_gains and "g_raw" in payload and payload["g_raw"] is not None:
+            g_raw_new = torch.as_tensor(
+                payload["g_raw"],
+                dtype=self.g_raw.dtype,
+                device=self.g_raw.device,
+            )
+            if g_raw_new.shape != self.g_raw.shape:
+                raise ValueError(
+                    f"g_raw shape mismatch: got {tuple(g_raw_new.shape)}, "
+                    f"expected {tuple(self.g_raw.shape)}"
+                )
+            with torch.no_grad():
+                self.g_raw.copy_(g_raw_new)
+
+        if "mu_prior" in payload and payload["mu_prior"] is not None:
+            mu_prior_new = torch.as_tensor(
+                payload["mu_prior"],
+                dtype=self.mu_prior.dtype,
+                device=self.mu_prior.device,
+            )
+            if mu_prior_new.shape != self.mu_prior.shape:
+                raise ValueError(
+                    f"mu_prior shape mismatch: got {tuple(mu_prior_new.shape)}, "
+                    f"expected {tuple(self.mu_prior.shape)}"
+                )
+            with torch.no_grad():
+                self.mu_prior.copy_(mu_prior_new)
+
+        if "mu_prior_global" in payload and payload["mu_prior_global"] is not None:
+            mu_prior_global_new = torch.as_tensor(
+                payload["mu_prior_global"],
+                dtype=self.mu_prior_global.dtype,
+                device=self.mu_prior_global.device,
+            )
+            if mu_prior_global_new.shape != self.mu_prior_global.shape:
+                raise ValueError(
+                    f"mu_prior_global shape mismatch: got {tuple(mu_prior_global_new.shape)}, "
+                    f"expected {tuple(self.mu_prior_global.shape)}"
+                )
+            with torch.no_grad():
+                self.mu_prior_global.copy_(mu_prior_global_new)
+
+        if "mu_prior_departement" in payload and payload["mu_prior_departement"] is not None:
+            mu_prior_departement_new = torch.as_tensor(
+                payload["mu_prior_departement"],
+                dtype=self.mu_prior_departement.dtype,
+                device=self.mu_prior_departement.device,
+            )
+            if mu_prior_departement_new.shape != self.mu_prior_departement.shape:
+                raise ValueError(
+                    f"mu_prior_departement shape mismatch: got {tuple(mu_prior_departement_new.shape)}, "
+                    f"expected {tuple(self.mu_prior_departement.shape)}"
+                )
+            with torch.no_grad():
+                self.mu_prior_departement.copy_(mu_prior_departement_new)
+
+        if "delta_scale_ema" in payload and payload["delta_scale_ema"] is not None:
+            scale_new = torch.as_tensor(
+                payload["delta_scale_ema"],
+                dtype=self.delta_scale_ema.dtype,
+                device=self.delta_scale_ema.device,
+            )
+            if scale_new.shape != self.delta_scale_ema.shape:
+                raise ValueError(
+                    f"delta_scale_ema shape mismatch: got {tuple(scale_new.shape)}, "
+                    f"expected {tuple(self.delta_scale_ema.shape)}"
+                )
+            with torch.no_grad():
+                self.delta_scale_ema.copy_(scale_new.clamp(self.scale_min, self.scale_max))
+
+    def plot_params(self, params_history, log_dir, best_epoch=None):
+        import matplotlib.pyplot as plt
+
+        root_dir = log_dir / "ordinal_params"
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        epochs = []
+        gains_list = []
+        deltas_list = []
+        mu_list = []
+        delta_scale_ema_list = []
+        mu_prior_list = []
+        mu_prior_global_list = []
+        cluster_weights_list = []
+        mass_active_list = []
+
+        iterator = []
+        if isinstance(params_history, dict):
+            iterator = sorted(params_history.items())
+        else:
+            for entry in params_history:
+                if isinstance(entry, dict) and ("epoch" in entry):
+                    iterator.append((entry["epoch"], entry))
+            iterator.sort(key=lambda x: x[0])
+
+        for ep, entry in iterator:
+            if "ordinal_params" not in entry:
+                continue
+
+            stats_container = entry["ordinal_params"]
+            p = stats_container.d if hasattr(stats_container, "d") else stats_container
+
+            if not isinstance(p, dict):
+                continue
+
+            epochs.append(ep)
+            gains_list.append(p.get("gains", None))
+            deltas_list.append(p.get("deltas", None))
+            mu_list.append(p.get("mu", None))
+            delta_scale_ema_list.append(p.get("delta_scale_ema", None))
+            mu_prior_list.append(p.get("mu_prior", None))
+            mu_prior_global_list.append(p.get("mu_prior_global", None))
+            cluster_weights_list.append(p.get("cluster_weights", None))
+            mass_active_list.append(p.get("mass_active", None))
+
+        if not epochs:
+            return
+
+        # gains
+        try:
+            valid_gains = [(ep, g) for ep, g in zip(epochs, gains_list) if g is not None]
+            if valid_gains:
+                g_epochs, g_vals = zip(*valid_gains)
+                gains_arr = np.array(g_vals)
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for i in range(gains_arr.shape[1]):
+                    ax.plot(list(g_epochs), gains_arr[:, i], label=f"gain_{i}")
+                ax.set_title(f"{self.__class__.__name__} Gains Evolution")
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("Gain Value")
+                ax.grid(True, alpha=0.3)
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(root_dir / "gains_evolution.png")
+                plt.close()
+        except Exception:
+            plt.close("all")
+
+        # deltas
+        try:
+            valid_deltas = [(ep, d) for ep, d in zip(epochs, deltas_list) if d is not None]
+            if valid_deltas:
+                d_epochs, d_vals = zip(*valid_deltas)
+                d_epochs = list(d_epochs)
+                ks = sorted(d_vals[0].keys())
+                if ks:
+                    fig, axes = plt.subplots(len(ks), 4, figsize=(20, 3 * len(ks)), sharex=True)
+                    if len(ks) == 1:
+                        axes = axes[None, :]
+                    for i, k in enumerate(ks):
+                        axes[i, 0].plot(d_epochs, [d[k]["median"] for d in d_vals if k in d], color="blue")
+                        axes[i, 0].set_title(f"k={k} Median Delta")
+                        axes[i, 1].plot(d_epochs, [d[k]["min"] for d in d_vals if k in d], color="red")
+                        axes[i, 1].set_title(f"k={k} Min Delta")
+                        axes[i, 2].plot(d_epochs, [d[k]["viol"] for d in d_vals if k in d], color="orange")
+                        axes[i, 2].set_title(f"k={k} Viol Rate")
+                        axes[i, 2].set_ylim(-0.1, 1.1)
+                        axes[i, 3].plot(d_epochs, [d[k]["neg"] for d in d_vals if k in d], color="purple")
+                        axes[i, 3].set_title(f"k={k} Mean NEG")
+                    plt.tight_layout()
+                    plt.savefig(root_dir / "deltas_stats.png")
+                    plt.close()
+        except Exception:
+            plt.close("all")
+
+        # delta scale ema
+        try:
+            valid_scales = [(ep, s) for ep, s in zip(epochs, delta_scale_ema_list) if s is not None]
+            if valid_scales:
+                s_epochs, s_vals = zip(*valid_scales)
+                scales_arr = np.array(s_vals)
+                ep_list = list(s_epochs)
+
+                def _pair_label(i):
+                    if i < len(self.all_pairs):
+                        a, b = self.all_pairs[i]
+                        return f"{a}→{b}"
+                    return f"pair_{i}"
+
+                if scales_arr.ndim == 2:
+                    num_p = scales_arr.shape[1]
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    for i in range(num_p):
+                        ax.plot(ep_list, scales_arr[:, i], label=_pair_label(i))
+                    ax.set_title(f"{self.__class__.__name__} – Delta Scale EMA per pair")
+                    ax.set_yscale("log")
+                    ax.set_xlabel("Epoch")
+                    ax.grid(True, alpha=0.3)
+                    if best_epoch is not None:
+                        ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
+                    ax.legend(fontsize=6, ncol=max(1, num_p // 8))
+                    plt.tight_layout()
+                    plt.savefig(root_dir / "delta_scale_ema_evolution.png")
+                    plt.close()
+        except Exception:
+            plt.close("all")
+
+        # mu prior
+        try:
+            valid_mu_priors = [(ep, m) for ep, m in zip(epochs, mu_prior_list) if m is not None]
+            if valid_mu_priors:
+                m_epochs, m_vals = zip(*valid_mu_priors)
+                mu_arr = np.array(m_vals)
+                if mu_arr.ndim == 3:
+                    mu_arr_mean = np.nanmean(mu_arr, axis=1)
+                else:
+                    mu_arr_mean = mu_arr
+
+                fig, ax = plt.subplots(figsize=(8, 6))
+                for i in range(mu_arr_mean.shape[1]):
+                    ax.plot(list(m_epochs), mu_arr_mean[:, i], label=f"mu_prior_avg_c={i}", alpha=0.4)
+
+                valid_globals = [(ep_g, mg) for ep_g, mg in zip(epochs, mu_prior_global_list) if mg is not None]
+                if valid_globals:
+                    eg, m_vals_g = zip(*valid_globals)
+                    mu_g_arr = np.array(m_vals_g)
+                    for i in range(mu_g_arr.shape[1]):
+                        ax.plot(list(eg), mu_g_arr[:, i], label=f"mu_prior_global_c={i}", linewidth=2, linestyle="--")
+
+                ax.set_title("Mu Prior Evolution (Global vs Avg-Cluster)")
+                ax.legend(fontsize="x-small", ncol=2)
+                plt.tight_layout()
+                plt.savefig(root_dir / "mu_prior_evolution.png")
+                plt.close()
+        except Exception:
+            plt.close("all")
+
+        # mu
+        try:
+            valid_mu = [(ep, m) for ep, m in zip(epochs, mu_list) if m is not None]
+            if valid_mu:
+                m_epochs, m_vals = zip(*valid_mu)
+                mu_arr = np.stack(m_vals)
+                fig, ax = plt.subplots(figsize=(10, 6))
+                for c in range(mu_arr.shape[1]):
+                    ax.plot(list(m_epochs), mu_arr[:, c], label=f"mu(class {c})")
+                ax.set_title("Mu evolution per class")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
+                plt.tight_layout()
+                plt.savefig(root_dir / "mu_s.png")
+                plt.close()
+        except Exception:
+            plt.close("all")
+
+        # loss components
+        try:
+            tr_list, f_list, mu0_list, ep_list = [], [], [], []
+            for ep, entry in iterator:
+                if "ordinal_params" not in entry:
+                    continue
+                p = entry["ordinal_params"].d if hasattr(entry["ordinal_params"], "d") else entry["ordinal_params"]
+                if not isinstance(p, dict):
+                    continue
+                if "transition" in p and "focal" in p:
+                    ep_list.append(ep)
+                    tr_list.append(np.mean(p["transition"]))
+                    f_list.append(np.mean(p["focal"]))
+                    mu0_list.append(np.mean(p["mu0_term"])) if "mu0_term" in p else mu0_list.append(np.nan)
+
+            if ep_list:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(ep_list, tr_list, label="transition")
+                ax.plot(ep_list, f_list, label="focal", linestyle="--")
+                if np.isfinite(np.asarray(mu0_list)).any():
+                    ax.plot(ep_list, mu0_list, label="mu0", linestyle=":")
+                ax.set_title(f"{self.__class__.__name__} – Loss components")
+                ax.grid(True, alpha=0.3)
+                if best_epoch is not None:
+                    ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
+                ax.legend()
+                plt.tight_layout()
+                plt.savefig(root_dir / "loss_components.png")
+                plt.close()
+        except Exception:
+            plt.close("all")
