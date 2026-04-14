@@ -3699,7 +3699,7 @@ class Scoring:
             'f1_macro': f1_macro, 'prec_macro': prec_macro, 'rec_macro': rec_macro,
             'ent': ent,
         }
-
+        
         try:
             if dates is not None and zones is not None:
                 score_high, score_low, coverage_k, score_adj_k, score_min_class, mu, mu_dense = \

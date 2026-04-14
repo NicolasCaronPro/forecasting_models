@@ -8286,7 +8286,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
         p = p * gate
-
+        
         gamma = getattr(self, "gamma", 1.0)
         if gamma != 1.0:
             p = p.clamp_min(self.eps).pow(gamma)
@@ -8312,9 +8312,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         lambda_c = self.mu_lambda_c
         lambda_d = self.mu_lambda_d
         
-        print('global', lambda_g)
-        print('cluster', lambda_c)
-        print('departement', lambda_d)
+        #print('global', lambda_g)
+        #print('cluster', lambda_c)
+        #print('departement', lambda_d)
         
         min_mass_update = self.massupdate * self.taugate
 
@@ -9246,24 +9246,99 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         thresholds_arr = np.array(thresholds_list)
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        alphatype = getattr(self, "alphatype", "global")
+
         if thresholds_arr.ndim == 2:
+            # Global alphatype: one threshold set, shape (epochs, C-1)
+            fig, ax = plt.subplots(figsize=(8, 6))
             for i in range(thresholds_arr.shape[1]):
                 ax.plot(epochs, thresholds_arr[:, i], label=f"theta_{i}")
+            ax.set_title(f"{self.__class__.__name__} Thresholds Evolution (global)")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Threshold Value")
+            ax.grid(True, alpha=0.3)
+            if best_epoch is not None:
+                ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
+            ax.legend()
+            plt.tight_layout()
+            plt.savefig(root_dir / "thresholds_evolution.png")
+            plt.close()
         else:
-            th_mean = thresholds_arr.mean(axis=1)
-            for i in range(th_mean.shape[1]):
-                ax.plot(epochs, th_mean[:, i], label=f"theta_{i}")
-        ax.set_title(f"{self.__class__.__name__} Thresholds Evolution")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Threshold Value")
-        ax.grid(True, alpha=0.3)
-        if best_epoch is not None:
-            ax.axvline(best_epoch, color="r", linestyle="--", label="Best Epoch")
-        ax.legend()
-        plt.tight_layout()
-        plt.savefig(root_dir / "thresholds_evolution.png")
-        plt.close()
+            # Per-group alphatype: shape (epochs, n_groups, C-1)
+            # Determine the slot→raw ID map for labelling
+            if alphatype == "cluster":
+                slot_maps = [np.asarray(x) if x is not None else None for x in cluster_slot_to_raw_list]
+                group_label = "cluster"
+            elif alphatype == "department":
+                slot_maps = [np.asarray(x) if x is not None else None for x in departement_slot_to_raw_list]
+                group_label = "dept"
+            else:
+                slot_maps = [None] * len(epochs)
+                group_label = "group"
+
+            last_slot_map = slot_maps[-1] if slot_maps else None
+            n_groups = thresholds_arr.shape[1]
+            n_thresholds = thresholds_arr.shape[2]
+
+            # Filter groups that have at least one finite value
+            active_groups = [
+                g for g in range(n_groups)
+                if np.isfinite(thresholds_arr[:, g, :]).any()
+            ]
+            n_plot = len(active_groups)
+
+            if n_plot == 0:
+                plt.close("all")
+            else:
+                cols = min(4, n_plot)
+                rows = (n_plot + cols - 1) // cols
+                fig, axes = plt.subplots(
+                    rows, cols,
+                    figsize=(5 * cols, 3.5 * rows),
+                    sharex=True, sharey=False,
+                    squeeze=False,
+                )
+                axes_flat = axes.flatten()
+                cmap = plt.cm.tab10
+
+                for plot_idx, g in enumerate(active_groups):
+                    ax = axes_flat[plot_idx]
+                    for i in range(n_thresholds):
+                        ax.plot(
+                            epochs,
+                            thresholds_arr[:, g, i],
+                            color=cmap(i / max(n_thresholds - 1, 1)),
+                            label=f"theta_{i}",
+                        )
+                    if best_epoch is not None:
+                        ax.axvline(best_epoch, color="r", linestyle="--", linewidth=0.8)
+                    ax.grid(True, alpha=0.3)
+                    ax.set_xlabel("Epoch")
+                    ax.set_ylabel("Threshold")
+
+                    # Build meaningful title using slot→raw map
+                    if (
+                        last_slot_map is not None
+                        and g < len(last_slot_map)
+                        and last_slot_map[g] >= 0
+                    ):
+                        ax.set_title(f"{group_label} slot {g} / raw {int(last_slot_map[g])}")
+                    else:
+                        ax.set_title(f"{group_label} slot {g}")
+
+                for j in range(n_plot, len(axes_flat)):
+                    axes_flat[j].set_visible(False)
+
+                axes_flat[min(n_plot - 1, len(axes_flat) - 1)].legend(
+                    fontsize=7, loc="best"
+                )
+                fig.suptitle(
+                    f"{self.__class__.__name__} Thresholds Evolution (per {group_label})",
+                    fontsize=12,
+                )
+                plt.tight_layout()
+                plt.savefig(root_dir / "thresholds_evolution.png")
+                plt.close()
 
         try:
             valid_gains = [(ep, g) for ep, g in zip(epochs, gains_list) if g is not None]
