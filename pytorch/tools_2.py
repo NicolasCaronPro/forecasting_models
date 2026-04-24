@@ -178,6 +178,9 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     Returns:
     - Tuple (modèle, paramètres) où 'modèle' est le modèle spécifié et 'paramètres' est un dictionnaire des paramètres utilisés.
     """
+    if task_type == 'uclassification':
+        out_channels += 1
+
     if graph is not None:
         scale = graph.scale
         graph_or_node = graph.graph_method

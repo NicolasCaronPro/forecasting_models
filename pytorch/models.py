@@ -258,6 +258,11 @@ class SpatialContextSet(nn.Module):
         return c, w_mean
     
 import torch
+
+class UClassificationActivation(torch.nn.Module):
+    def forward(self, logits):
+        probs = torch.softmax(logits[..., :-1], dim=-1)
+        return torch.cat([probs, logits[..., -1:]], dim=-1)
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -386,6 +391,9 @@ class NetMLP(nn.Module):
             output = self.soft(logits)
         elif self.task_type == "corn":
             output = corn_class_probs(logits)
+        elif self.task_type == "uclassification":
+            probs = torch.softmax(logits[..., :-1], dim=-1)
+            output = torch.cat([probs, logits[..., -1:]], dim=-1)
         else:
             output = logits
 
@@ -470,6 +478,9 @@ class GRU(torch.nn.Module):
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
             self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        elif task_type == "uclassification":
+
+            self.output_activation = UClassificationActivation()
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
             
@@ -547,6 +558,11 @@ class GRU(torch.nn.Module):
             return X_spa
 
 import torch
+
+class UClassificationActivation(torch.nn.Module):
+    def forward(self, logits):
+        probs = torch.softmax(logits[..., :-1], dim=-1)
+        return torch.cat([probs, logits[..., -1:]], dim=-1)
 
 class LSTM(torch.nn.Module):
     def __init__(
@@ -790,6 +806,9 @@ class LSTM(torch.nn.Module):
             self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
             self.output_activation = nn.Softmax(dim=-1).to(device)
+        elif task_type == "uclassification":
+
+            self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
 
@@ -934,6 +953,11 @@ class LSTM(torch.nn.Module):
         return output, logits, hidden
         
 import torch
+
+class UClassificationActivation(torch.nn.Module):
+    def forward(self, logits):
+        probs = torch.softmax(logits[..., :-1], dim=-1)
+        return torch.cat([probs, logits[..., -1:]], dim=-1)
 import torch.nn as nn
 
 
@@ -1251,6 +1275,9 @@ class DilatedCNN(torch.nn.Module):
             self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == "binary":
             self.output_activation = nn.Softmax(dim=-1).to(device)
+        elif task_type == "uclassification":
+
+            self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
 
@@ -1486,6 +1513,9 @@ class GraphCastGRU(torch.nn.Module):
             self.output_activation = torch.nn.Softmax(dim=-1)
         elif task_type == "binary":
             self.output_activation = torch.nn.Sigmoid()
+        elif task_type == "uclassification":
+
+            self.output_activation = UClassificationActivation()
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
 
@@ -1656,6 +1686,9 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.output_activation = torch.nn.Softmax(dim=-1)
         elif task_type == "binary":
             self.output_activation = torch.nn.Sigmoid()
+        elif task_type == "uclassification":
+
+            self.output_activation = UClassificationActivation()
         else:  # regression or custom
             self.output_activation = torch.nn.Identity()
 
