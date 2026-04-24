@@ -2748,14 +2748,26 @@ def fit_spline_mu(
 
     avec :
     - f(score) : B-spline de faible rang
-    - FE_zone, FE_date : one-hot sparse
+    - FE_zone, FE_date : one-hot sparse si informatifs
     - pénalisation de courbure sur les coeffs spline
     - résolution sparse via LSQR
+
+    Règle importante
+    ----------------
+    Un effet fixe n'est inclus que s'il est informatif, c.-à-d. :
+      - il existe plusieurs modalités,
+      - mais pas une modalité différente pour chaque observation.
+
+    Donc :
+      - si zone est constante -> pas de FE_zone
+      - si chaque zone apparaît une seule fois -> pas de FE_zone
+      - si date est constante -> pas de FE_date
+      - si chaque date apparaît une seule fois -> pas de FE_date
 
     Paramètres
     ----------
     df : DataFrame avec colonnes ['score', 'Y', 'zone', 'date']
-    df_spline : nombre de knots internes/total pour la spline (faible rang recommandé: 5-8)
+    df_spline : nombre de knots pour la spline
     spline_degree : degré de la spline
     lambda_curv : pénalité sur la dérivée seconde discrète des coeffs spline
     dense_points : nb de points pour mu_dense
@@ -2766,6 +2778,12 @@ def fit_spline_mu(
     mu_dense : np.ndarray
     fit : dict utile pour debug / prédiction
     """
+    import numpy as np
+    import pandas as pd
+    from scipy import sparse
+    from scipy.sparse.linalg import lsqr
+    from sklearn.preprocessing import OneHotEncoder, SplineTransformer
+
     req = {"score", "Y", "zone", "date"}
     missing = req - set(df.columns)
     if missing:
@@ -2776,16 +2794,15 @@ def fit_spline_mu(
 
     x = work["score"].to_numpy(dtype=np.float64).reshape(-1, 1)
     y = work["Y"].to_numpy(dtype=np.float64)
-    n = len(work)
+    n = work.shape[0]
 
     if n == 0:
         mu = {k: np.nan for k in range(5)}
         return mu, np.full(dense_points, np.nan), {"error": "empty dataframe"}
 
     # ------------------------------------------------------------------
-    # 1) Spline basis (faible rang)
+    # 1) Base spline
     # ------------------------------------------------------------------
-    # Score borné sur [0, 4] pour rester cohérent avec le scoring ordinal
     x_clip = np.clip(x, 0.0, 4.0)
 
     try:
@@ -2798,7 +2815,6 @@ def fit_spline_mu(
             sparse_output=True,
         )
     except TypeError:
-        # Compatibilité versions sklearn plus anciennes
         spline = SplineTransformer(
             n_knots=df_spline,
             degree=spline_degree,
@@ -2808,15 +2824,11 @@ def fit_spline_mu(
         )
 
     B = spline.fit_transform(x_clip)
-    if not sparse.issparse(B):
-        B = sparse.csr_matrix(B)
-    else:
-        B = B.tocsr()
-
+    B = B.tocsr() if sparse.issparse(B) else sparse.csr_matrix(B)
     n_basis = B.shape[1]
 
     # ------------------------------------------------------------------
-    # 2) Effets fixes sparse zone/date
+    # 2) Effets fixes conditionnels
     # ------------------------------------------------------------------
     def make_ohe():
         try:
@@ -2824,22 +2836,30 @@ def fit_spline_mu(
         except TypeError:
             return OneHotEncoder(drop="first", handle_unknown="ignore", sparse=True)
 
-    enc_zone = make_ohe()
-    enc_date = make_ohe()
+    n_zone_unique = int(work["zone"].nunique())
+    n_date_unique = int(work["date"].nunique())
 
-    Z = enc_zone.fit_transform(work[["zone"]])
-    D = enc_date.fit_transform(work[["date"]])
+    # FE informatif <=> plusieurs modalités, mais pas une modalité par observation
+    use_zone_fe = (1 < n_zone_unique < n)
+    use_date_fe = (1 < n_date_unique < n)
 
-    if not sparse.issparse(Z):
-        Z = sparse.csr_matrix(Z)
+    enc_zone = None
+    enc_date = None
+
+    if use_zone_fe:
+        enc_zone = make_ohe()
+        Z = enc_zone.fit_transform(work[["zone"]])
+        Z = Z.tocsr() if sparse.issparse(Z) else sparse.csr_matrix(Z)
     else:
-        Z = Z.tocsr()
+        Z = sparse.csr_matrix((n, 0), dtype=np.float64)
 
-    if not sparse.issparse(D):
-        D = sparse.csr_matrix(D)
+    if use_date_fe:
+        enc_date = make_ohe()
+        D = enc_date.fit_transform(work[["date"]])
+        D = D.tocsr() if sparse.issparse(D) else sparse.csr_matrix(D)
     else:
-        D = D.tocsr()
-
+        D = sparse.csr_matrix((n, 0), dtype=np.float64)
+        
     # Intercept sparse
     I = sparse.csr_matrix(np.ones((n, 1), dtype=np.float64))
 
@@ -2848,17 +2868,15 @@ def fit_spline_mu(
 
     # ------------------------------------------------------------------
     # 3) Pénalité de courbure sur les coeffs spline
-    #    pénalise les secondes différences des coeffs de spline
     # ------------------------------------------------------------------
     if n_basis >= 3 and lambda_curv > 0:
-        D2 = np.diff(np.eye(n_basis), n=2, axis=0)  # (n_basis-2, n_basis)
+        D2 = np.diff(np.eye(n_basis), n=2, axis=0)
         n_pen = D2.shape[0]
 
-        # matrice de pénalité alignée avec X = [intercept | spline | zone | date]
-        P_left = sparse.csr_matrix((n_pen, 1))                 # intercept non pénalisé
-        P_mid = sparse.csr_matrix(D2) * np.sqrt(lambda_curv)   # spline pénalisée
-        P_zone = sparse.csr_matrix((n_pen, Z.shape[1]))        # FE non pénalisés
-        P_date = sparse.csr_matrix((n_pen, D.shape[1]))        # FE non pénalisés
+        P_left = sparse.csr_matrix((n_pen, 1))
+        P_mid = sparse.csr_matrix(D2) * np.sqrt(lambda_curv)
+        P_zone = sparse.csr_matrix((n_pen, Z.shape[1]))
+        P_date = sparse.csr_matrix((n_pen, D.shape[1]))
 
         P = sparse.hstack([P_left, P_mid, P_zone, P_date], format="csr")
 
@@ -2876,13 +2894,11 @@ def fit_spline_mu(
 
     intercept = float(beta[0])
     beta_spline = beta[1:1 + n_basis]
-    beta_zone = beta[1 + n_basis:1 + n_basis + Z.shape[1]]
+    beta_zone = beta[1:1 + n_basis + Z.shape[1]][n_basis:]
     beta_date = beta[1 + n_basis + Z.shape[1]:]
 
     # ------------------------------------------------------------------
     # 5) Construire mu(k) et mu_dense
-    #    Ici on fixe les FE à leur catégorie de référence (0 après drop='first').
-    #    Pour les deltas mu[b]-mu[a], cette constante de référence s'annule.
     # ------------------------------------------------------------------
     x_levels = np.arange(5, dtype=np.float64).reshape(-1, 1)
     x_levels_clip = np.clip(x_levels, 0.0, 4.0)
@@ -2901,7 +2917,7 @@ def fit_spline_mu(
     mu_dense = intercept + B_dense @ beta_spline
 
     # ------------------------------------------------------------------
-    # 6) Quelques infos utiles
+    # 6) Infos utiles
     # ------------------------------------------------------------------
     fit = {
         "intercept": intercept,
@@ -2913,6 +2929,10 @@ def fit_spline_mu(
         "date_encoder": enc_date,
         "n_obs": int(n),
         "n_basis": int(n_basis),
+        "n_zone_unique": int(n_zone_unique),
+        "n_date_unique": int(n_date_unique),
+        "use_zone_fe": bool(use_zone_fe),
+        "use_date_fe": bool(use_date_fe),
         "n_zone_fe": int(Z.shape[1]),
         "n_date_fe": int(D.shape[1]),
         "lambda_curv": float(lambda_curv),
@@ -2945,7 +2965,8 @@ def compute_score_for_k(mu, sigma, k, lvl_counts,
         if n_a >= min_n and n_b >= min_n:
             delta = mu[b] - (mu[a] + min_gain)
             deltas.append(delta)
-            coverage += 1.0
+            #coverage += 1.0
+            coverage += min(n_a, n_b)
             
     # Filter based on min_k
     if coverage < min_k:
@@ -3065,7 +3086,7 @@ def evaluate_metrics(y_true, y_pred, dates=None, zones=None, y_pred_probas=None)
     f1_macro = f1_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
     prec_macro = precision_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
     rec_macro = recall_score((y_true).astype(int), (y_pred).astype(int), zero_division=0, average='macro')
-    
+     
     if y_pred_probas is not None:
         ent = entropy(y_pred_probas)
     else:
@@ -3726,5 +3747,427 @@ class Scoring:
             print(f"Warning: monotonic scoring failed in Scoring.evaluate_metrics: {e}")
             for key in ('score_high', 'score_low', 'score', 'score_min_class'):
                 results[key] = np.nan
-
+                
         return results
+    
+    def _plot_matrice(
+        self,
+        ypred,
+        ytrue,
+        dates,
+        zones,
+        title=None,
+        dir_output=None,
+        df_spline=None,
+        min_n=None,
+        min_gain=None,
+        normalize_with_reference=True,
+        show_effective_coverage=True,
+        annotate=True,
+        figsize=(8, 6),
+        vmax_abs=None,
+    ):
+        """
+        Affiche la matrice des transitions Delta_{a->b} pour a < b.
+
+        Chaque case (a, b) de la matrice contient :
+        - le delta brut : mu[b] - (mu[a] + min_gain_k)
+        - ou le delta normalisé par la référence si normalize_with_reference=True
+        - la couverture effective min(n_a, n_b) entre crochets
+
+        Les cases non évaluables (n_a < min_n ou n_b < min_n) sont grisées.
+
+        Paramètres
+        ----------
+        ypred, ytrue, dates, zones : array-like
+            Données nécessaires au calcul monotone.
+        title : str or None
+            Titre de la figure. Si None, aucun titre n'est affiché.
+        dir_output : str or Path or None
+            Dossier de sortie pour sauvegarder la figure.
+        df_spline, min_n, min_gain :
+            Surcharges optionnelles des hyperparamètres de la classe.
+        normalize_with_reference : bool
+            Si True et si self.pair_mean_deltas est renseigné, chaque delta est divisé
+            par la valeur de référence associée à la paire (a, b).
+        show_effective_coverage : bool
+            Si True, ajoute [min(n_a, n_b)] dans les annotations.
+        annotate : bool
+            Si True, écrit les valeurs dans les cellules.
+        figsize : tuple
+            Taille de la figure.
+        vmax_abs : float or None
+            Borne absolue de la colorbar. Si None, calculée automatiquement.
+
+        Retour
+        ------
+        fig, ax, delta_plot_mat, delta_raw_mat, coverage_eff_mat, valid_mat
+        """
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import TwoSlopeNorm
+        from pathlib import Path
+
+        _df_spline = df_spline if df_spline is not None else self.df_spline
+        _min_n = min_n if min_n is not None else self.min_n
+        _min_gain = min_gain if min_gain is not None else self.min_gain
+
+        # ------------------------------------------------------------------
+        # 1) Calcul des mu(s) via le pipeline existant
+        # ------------------------------------------------------------------
+        _, _, coverage_k, score_adj_k, _, mu, _ = self.evaluation_scoring(
+            ypred, ytrue, dates, zones,
+            df_spline=_df_spline,
+            min_n=_min_n,
+            min_gain=_min_gain,
+            reference=False
+        )
+
+        if mu is None or len(mu) == 0 or all(np.isnan(list(mu.values()))):
+            raise ValueError("Impossible de calculer mu : la spline a échoué ou n'a renvoyé que des NaN.")
+
+        # ------------------------------------------------------------------
+        # 2) Comptages par niveau prédit
+        # ------------------------------------------------------------------
+        ypred = np.asarray(ypred)
+        lvl = np.clip(np.round(ypred), 0, 4).astype(int)
+        lvl_counts = pd.Series(lvl).value_counts().to_dict()
+
+        n_levels = 5
+        delta_raw_mat = np.full((n_levels, n_levels), np.nan, dtype=float)
+        delta_plot_mat = np.full((n_levels, n_levels), np.nan, dtype=float)
+        coverage_eff_mat = np.full((n_levels, n_levels), np.nan, dtype=float)
+        valid_mat = np.zeros((n_levels, n_levels), dtype=bool)
+
+        # ------------------------------------------------------------------
+        # 3) Construction des matrices
+        # ------------------------------------------------------------------
+        for k, pairs in PASSAGES.items():
+            min_g = _min_gain if isinstance(_min_gain, (int, float)) else _min_gain[k - 1]
+
+            for (a, b) in pairs:
+                n_a = lvl_counts.get(a, 0)
+                n_b = lvl_counts.get(b, 0)
+                coverage_eff = min(n_a, n_b)
+
+                coverage_eff_mat[a, b] = coverage_eff
+
+                # Paire non évaluable
+                if n_a < _min_n or n_b < _min_n:
+                    continue
+
+                if a not in mu or b not in mu or np.isnan(mu[a]) or np.isnan(mu[b]):
+                    continue
+
+                delta_raw = mu[b] - (mu[a] + min_g)
+                delta_raw_mat[a, b] = delta_raw
+                valid_mat[a, b] = True
+
+                if normalize_with_reference and getattr(self, "pair_mean_deltas", None):
+                    denom = abs(self.pair_mean_deltas.get((a, b), 1.0)) or 1.0
+                    delta_plot = delta_raw / denom
+                else:
+                    delta_plot = delta_raw
+
+                delta_plot_mat[a, b] = delta_plot
+
+        # ------------------------------------------------------------------
+        # 4) Préparation du heatmap
+        # ------------------------------------------------------------------
+        cmap = plt.cm.RdYlGn.copy()
+        cmap.set_bad(color="lightgrey")
+
+        valid_values = delta_plot_mat[np.isfinite(delta_plot_mat)]
+        if valid_values.size == 0:
+            vmax_abs = 1.0 if vmax_abs is None else vmax_abs
+        elif vmax_abs is None:
+            vmax_abs = float(np.max(np.abs(valid_values)))
+            vmax_abs = 1.0 if vmax_abs < 1e-12 else vmax_abs
+
+        norm = TwoSlopeNorm(vmin=-vmax_abs, vcenter=0.0, vmax=vmax_abs)
+
+        masked = np.ma.masked_invalid(delta_plot_mat)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        im = ax.imshow(masked, cmap=cmap, norm=norm)
+
+        # ------------------------------------------------------------------
+        # 5) Axes
+        # ------------------------------------------------------------------
+        ax.set_xticks(range(n_levels))
+        ax.set_yticks(range(n_levels))
+        ax.set_xticklabels([str(i) for i in range(n_levels)])
+        ax.set_yticklabels([str(i) for i in range(n_levels)])
+        ax.set_xlabel("To level $b$")
+        ax.set_ylabel("From level $a$")
+
+        if title is not None:
+            ax.set_title(title)
+
+        # Grille visuelle
+        ax.set_xticks(np.arange(-0.5, n_levels, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, n_levels, 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1.2)
+        ax.tick_params(which="minor", bottom=False, left=False)
+
+        # Masquer visuellement la diagonale et le triangle inférieur
+        for i in range(n_levels):
+            for j in range(n_levels):
+                if j <= i:
+                    ax.add_patch(
+                        plt.Rectangle(
+                            (j - 0.5, i - 0.5),
+                            1, 1,
+                            facecolor="white",
+                            edgecolor="white",
+                            linewidth=1.0,
+                            zorder=3,
+                        )
+                    )
+
+        # ------------------------------------------------------------------
+        # 6) Annotations
+        # ------------------------------------------------------------------
+        if annotate:
+            for a in range(n_levels):
+                for b in range(n_levels):
+                    if b <= a:
+                        continue
+
+                    n_a = lvl_counts.get(a, 0)
+                    n_b = lvl_counts.get(b, 0)
+                    cov_eff = int(min(n_a, n_b))
+
+                    if valid_mat[a, b]:
+                        val = delta_plot_mat[a, b]
+                        txt = f"{val:.2f}"
+                        if show_effective_coverage:
+                            txt += f"\n[{cov_eff}]"
+
+                        # Couleur de texte adaptée au contraste
+                        txt_color = "black" if abs(val) < 0.55 * vmax_abs else "white"
+
+                    else:
+                        txt = "NA"
+                        if show_effective_coverage:
+                            txt += f"\n[{cov_eff}]"
+                        txt_color = "black"
+
+                    ax.text(
+                        b, a, txt,
+                        ha="center", va="center",
+                        fontsize=10, color=txt_color, zorder=4
+                    )
+
+        # ------------------------------------------------------------------
+        # 7) Colorbar
+        # ------------------------------------------------------------------
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if normalize_with_reference and getattr(self, "pair_mean_deltas", None):
+            cbar.set_label(r"Normalized transition effect $\Delta_{a\to b}$")
+        else:
+            cbar.set_label(r"Transition effect $\Delta_{a\to b}$")
+
+        # ------------------------------------------------------------------
+        # 8) Petit résumé en bas
+        # ------------------------------------------------------------------
+        txt_mode = "normalized by reference" if (normalize_with_reference and getattr(self, "pair_mean_deltas", None)) else "raw"
+        extra = (
+            f"Mode: {txt_mode}\n"
+            f"min_n = {_min_n}\n"
+            f"k-scores: "
+            + ", ".join([f"k={k}: {score_adj_k.get(k, np.nan):.2f}" for k in [1, 2, 3, 4]])
+        )
+        """ax.text(
+            1.02, 0.02, extra,
+            transform=ax.transAxes,
+            fontsize=9, va="bottom",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85)
+        )"""
+
+        fig.tight_layout()
+
+        # ------------------------------------------------------------------
+        # 9) Sauvegarde
+        # ------------------------------------------------------------------
+        if dir_output is not None:
+            out_path = Path(dir_output) / f"{(title or 'transition_matrix').lower().replace(' ', '_')}.png"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out_path, dpi=150, bbox_inches="tight")
+            print(f"Transition matrix saved to {out_path}")
+
+        plt.show()
+
+        return fig, ax, delta_plot_mat, delta_raw_mat, coverage_eff_mat, valid_mat
+    
+    def _plot_fixed_effects(
+        self,
+        ypred,
+        ytrue,
+        dates,
+        zones,
+        df_spline=None,
+        top_n_zone=None,
+        figsize=None,
+        title=None,
+        dir_output=None,
+    ):
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from pathlib import Path
+
+        _df_spline = df_spline if df_spline is not None else self.df_spline
+
+        ypred = np.asarray(ypred)
+        ytrue = np.asarray(ytrue)
+        dates = np.asarray(dates)
+        zones = np.asarray(zones)
+
+        if ypred.ndim > 1:
+            ypred = ypred[:, 0]
+
+        if not (len(ypred) == len(ytrue) == len(dates) == len(zones)):
+            raise ValueError("ypred, ytrue, dates et zones doivent avoir la même longueur.")
+
+        df = pd.DataFrame({
+            "score": ypred,
+            "Y": ytrue,
+            "date": dates,
+            "zone": zones,
+        }).dropna(subset=["score", "Y", "date", "zone"]).reset_index(drop=True)
+
+        if len(df) == 0:
+            raise ValueError("Aucune observation valide après suppression des NaN.")
+
+        if hasattr(self, "sigma") and self.sigma not in [None, 0]:
+            df["Y"] = df["Y"] / self.sigma
+            ylabel = "Estimated fixed effect (in sigma units)"
+        else:
+            ylabel = "Estimated fixed effect"
+
+        mu, mu_dense, fit = self.fit_spline_mu(df, df_spline=_df_spline)
+
+        use_zone_fe = bool(fit.get("use_zone_fe", False))
+        use_date_fe = bool(fit.get("use_date_fe", False))
+
+        zone_encoder = fit.get("zone_encoder", None)
+        date_encoder = fit.get("date_encoder", None)
+
+        beta_zone = np.asarray(fit.get("beta_zone", []), dtype=float)
+        beta_date = np.asarray(fit.get("beta_date", []), dtype=float)
+
+        df_zone = pd.DataFrame(columns=["zone", "effect"])
+        if use_zone_fe and zone_encoder is not None:
+            zone_cats = list(zone_encoder.categories_[0])
+            zone_effects = np.concatenate([[0.0], beta_zone])
+
+            df_zone = pd.DataFrame({
+                "zone": zone_cats,
+                "effect": zone_effects
+            }).sort_values("effect", ascending=True)
+
+            if top_n_zone is not None and top_n_zone < len(df_zone):
+                idx = np.argsort(np.abs(df_zone["effect"].values))[-top_n_zone:]
+                df_zone = df_zone.iloc[np.sort(idx)].sort_values("effect", ascending=True)
+
+        df_date = pd.DataFrame(columns=["date", "effect"])
+        if use_date_fe and date_encoder is not None:
+            date_cats = list(date_encoder.categories_[0])
+            date_effects = np.concatenate([[0.0], beta_date])
+
+            df_date = pd.DataFrame({
+                "date": date_cats,
+                "effect": date_effects
+            })
+
+            try:
+                df_date["date"] = pd.to_datetime(df_date["date"])
+                df_date = df_date.sort_values("date")
+            except Exception:
+                df_date = df_date.sort_values("date")
+
+        n_panels = int(use_zone_fe) + int(use_date_fe)
+
+        if n_panels == 0:
+            fig, ax = plt.subplots(figsize=(7, 3))
+            ax.axis("off")
+            ax.text(
+                0.5, 0.5,
+                "No fixed effect was retained:\n"
+                "- either a single zone/date is present,\n"
+                "- or one zone/date per observation.",
+                ha="center", va="center", fontsize=12
+            )
+            if title is not None:
+                ax.set_title(title)
+
+            fig.tight_layout()
+            plt.show()
+            return fig, [ax], df_zone, df_date, fit
+
+        # Taille dynamique
+        n_zone_labels = len(df_zone) if use_zone_fe else 0
+        base_height = 5
+        zone_height = max(base_height, 0.38 * max(n_zone_labels, 1))
+        final_height = zone_height if use_zone_fe else 5
+        final_width = 8 if n_panels == 1 else 15
+
+        if figsize is None:
+            figsize = (final_width, final_height)
+
+        fig, axes = plt.subplots(1, n_panels, figsize=figsize, squeeze=False)
+        axes = axes.ravel()
+
+        ax_id = 0
+
+        if use_zone_fe:
+            ax = axes[ax_id]
+            ax.barh(df_zone["zone"].astype(str), df_zone["effect"].values)
+            ax.axvline(0.0, linestyle="--", linewidth=1)
+            ax.set_xlabel(ylabel)
+            ax.set_ylabel("Zone")
+            ax.grid(axis="x", linestyle="--", alpha=0.4)
+
+            # Réduit légèrement la taille des labels si beaucoup de zones
+            if len(df_zone) > 20:
+                ax.tick_params(axis="y", labelsize=9)
+            if len(df_zone) > 35:
+                ax.tick_params(axis="y", labelsize=8)
+
+            ax_id += 1
+
+        if use_date_fe:
+            ax = axes[ax_id]
+            x = df_date["date"]
+            y = df_date["effect"].values
+
+            ax.plot(x, y, linewidth=1.8)
+            ax.axhline(0.0, linestyle="--", linewidth=1)
+            ax.set_xlabel("Date")
+            ax.set_ylabel(ylabel)
+            ax.grid(axis="y", linestyle="--", alpha=0.4)
+
+            if len(df_date) > 20:
+                for label in ax.get_xticklabels():
+                    label.set_rotation(45)
+                    label.set_ha("right")
+
+        if title is not None:
+            fig.suptitle(title)
+
+        # Marge gauche élargie pour les noms de zones
+        if use_zone_fe:
+            fig.subplots_adjust(left=0.28, wspace=0.30)
+        else:
+            fig.tight_layout()
+
+        if dir_output is not None:
+            out_path = Path(dir_output) / f"{(title or 'fixed_effects').lower().replace(' ', '_')}.png"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out_path, dpi=150, bbox_inches="tight")
+            print(f"Fixed-effects plot saved to {out_path}")
+
+        plt.show()
+        return fig, axes, df_zone, df_date, fit

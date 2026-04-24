@@ -2022,6 +2022,40 @@ class PredictdEGPDLossTruncMostProbable(nn.Module):
             self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='mean')
             self.plot_final(sigma, kappa, xi, dir_output, which_sigmas='max')
         return y_hat
+    
+    def pmf_all(self, inputs: torch.Tensor, from_logits: bool = True) -> torch.Tensor:
+        """
+        Retourne la PMF tronquée complète de shape (..., y_max+1)
+        """
+        if inputs.size(-1) < 3:
+            raise ValueError("inputs must have at least 3 channels: sigma, kappa, xi")
+
+        sigma_raw = inputs[..., 0]
+        kappa_raw = inputs[..., 1]
+        xi_raw    = inputs[..., 2]
+
+        sigma = self._decode_sigma(sigma_raw, from_logits, None)
+        kappa, xi = self._decode_kappa_xi(kappa_raw, xi_raw)
+
+        y_vals = torch.arange(
+            0, self.y_max + 1,
+            device=inputs.device,
+            dtype=sigma.dtype
+        )
+
+        # broadcast pour obtenir (..., y_max+1)
+        sigma_e = sigma.unsqueeze(-1)
+        kappa_e = kappa.unsqueeze(-1)
+        xi_e    = xi.unsqueeze(-1)
+
+        pmf = self._pmf_trunc(
+            y_vals.view(*([1] * sigma.ndim), -1),
+            sigma_e, kappa_e, xi_e
+        )
+
+        # normalisation de sécurité
+        pmf = pmf / pmf.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        return pmf
 
     # ---------- Plots: PMF/CDF/PPF (tronqués) ----------
     @torch.no_grad()

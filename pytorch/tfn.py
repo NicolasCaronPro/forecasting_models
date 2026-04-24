@@ -90,7 +90,6 @@ class PositionalEncoding(nn.Module):
         T = x.size(1)
         return x + self.pe[:, :T, :]
 
-
 class VariableSelectionNetwork(nn.Module):
     """
     Paper-aligned VSN:

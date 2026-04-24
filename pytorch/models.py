@@ -11,8 +11,44 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from forecasting_models.pytorch.gnns import *
-from forecasting_models.pytorch import itransformer
+try:
+    from forecasting_models.pytorch import itransformer
+except ImportError:
+    itransformer = None
+    print("Warning: itransformer module could not be loaded due to missing dependencies (e.g., reformer_pytorch).")
 from forecasting_models.pytorch.utils import corn_class_probs
+
+def _make_activation(name: str) -> nn.Module:
+    name = name.lower()
+    if name == "relu":
+        return nn.ReLU()
+    elif name == "gelu":
+        return nn.GELU()
+    elif name == "elu":
+        return nn.ELU()
+    elif name == "silu":
+        return nn.SiLU()
+    elif name == "leakyrelu":
+        return nn.LeakyReLU()
+    else:
+        raise ValueError(f"Unsupported activation: {name}")
+
+
+class TemporalAttentionPooling(nn.Module):
+    def __init__(self, in_dim: int, device):
+        super().__init__()
+        self.score = nn.Linear(in_dim, 1).to(device)
+
+    def forward(self, x):
+        """
+        x: (B, T, H)
+        returns:
+            pooled: (B, H)
+            attn  : (B, T)
+        """
+        attn = torch.softmax(self.score(x).squeeze(-1), dim=1)
+        pooled = torch.sum(x * attn.unsqueeze(-1), dim=1)
+        return pooled, attn
 
 class SpatialContext(nn.Module):
     """
@@ -219,56 +255,136 @@ class SpatialContextSet(nn.Module):
 
         if self.return_tokens:
             return c, w_mean, z_tokens_head
-        return c, w_mean    
-
-class MLPLayer(torch.nn.Module):
-    def __init__(self, in_feats, hidden_dim, device):
-        super(MLPLayer, self).__init__()
-        self.mlp = nn.Linear(in_feats, hidden_dim, weight_initializer='glorot', bias=True, bias_initializer='zeros').to(device)
-        #self.mlp = torch.nn.Linear(in_feats, hidden_dim).to(device)
-    def forward(self, x):
-        return self.mlp(x)
+        return c, w_mean
     
-class NetMLP(torch.nn.Module):
-    def __init__(self, in_dim, hidden_dim, end_channels, output_channels, n_sequences, device, task_type, return_hidden=False, horizon=0, **kwargs):
-        super(NetMLP, self).__init__()
-        self.layer1 = MLPLayer(in_dim * n_sequences + end_channels, hidden_dim[0], device) if horizon > 0 else MLPLayer(in_dim * n_sequences, hidden_dim[0], device)
-        self.layer3 = MLPLayer(hidden_dim[0], hidden_dim[1], device)
-        self.layer4 = MLPLayer(hidden_dim[1], end_channels, device)
-        self.layer2 = MLPLayer(end_channels, output_channels, device)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MLPLayer(nn.Module):
+    def __init__(
+        self,
+        in_feats: int,
+        out_feats: int,
+        device,
+        activation: str = "relu",
+        dropout: float = 0.0,
+        use_bn: bool = True,
+    ):
+        super().__init__()
+
+        self.linear = nn.Linear(in_feats, out_feats).to(device)
+        self.bn = nn.BatchNorm1d(out_feats).to(device) if use_bn else nn.Identity()
+
+        if activation.lower() == "relu":
+            self.act = nn.ReLU()
+        elif activation.lower() == "gelu":
+            self.act = nn.GELU()
+        elif activation.lower() == "elu":
+            self.act = nn.ELU()
+        elif activation.lower() == "silu":
+            self.act = nn.SiLU()
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.linear(x)
+        x = self.bn(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        return x
+
+
+class NetMLP(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        hidden_dim,
+        end_channels,
+        output_channels,
+        n_sequences,
+        device,
+        task_type,
+        return_hidden=False,
+        horizon=0,
+        activation="relu",
+        dropout=0.1,
+        use_bn=True,
+        **kwargs
+    ):
+        super().__init__()
+
+        self.horizon = horizon
         self.task_type = task_type
         self.n_sequences = n_sequences
-        self.soft = torch.nn.Softmax(dim=1)
         self.return_hidden = return_hidden
         self.device = device
         self.end_channels = end_channels
         self.output_channels = output_channels
         self.in_dim = in_dim
-        self.n_sequences = self.n_sequences
-        
-        #if self.horizon > 0:
-        #    self.define_horizon_decodeur()
+
+        input_dim = in_dim * n_sequences + end_channels if horizon > 0 else in_dim * n_sequences
+
+        self.layer1 = MLPLayer(
+            input_dim,
+            hidden_dim[0],
+            device=device,
+            activation=activation,
+            dropout=dropout,
+            use_bn=use_bn,
+        )
+        self.layer3 = MLPLayer(
+            hidden_dim[0],
+            hidden_dim[1],
+            device=device,
+            activation=activation,
+            dropout=dropout,
+            use_bn=use_bn,
+        )
+        self.layer4 = MLPLayer(
+            hidden_dim[1],
+            end_channels,
+            device=device,
+            activation=activation,
+            dropout=dropout,
+            use_bn=use_bn,
+        )
+
+        self.layer2 = nn.Linear(end_channels, output_channels).to(device)
+        self.soft = nn.Softmax(dim=1)
 
     def forward(self, features, z_prev=None, edges=None):
         if features.device != self.device:
             features = features.to(self.device)
+
         if self.horizon > 0:
             if z_prev is None:
-                z_prev = torch.zeros((features.shape[0], self.end_channels * self.n_sequences))
+                z_prev = torch.zeros(
+                    (features.shape[0], self.end_channels),
+                    device=self.device,
+                    dtype=features.dtype,
+                )
+            elif z_prev.device != self.device:
+                z_prev = z_prev.to(self.device)
 
         features = features.view(features.shape[0], features.shape[1] * self.n_sequences)
-        
+
         if self.horizon > 0:
             features = torch.cat((features, z_prev), dim=1)
 
-        x = F.relu(self.layer1(features))
-        x = F.relu(self.layer3(x))
-        x = F.relu(self.layer4(x))
+        x = self.layer1(features)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
         hidden = x
         logits = self.layer2(x)
-        if self.task_type == 'classification':
+
+        if self.task_type == "classification":
             output = self.soft(logits)
-        elif self.task_type == 'corn':
+        elif self.task_type == "corn":
             output = corn_class_probs(logits)
         else:
             output = logits
@@ -428,22 +544,51 @@ class GRU(torch.nn.Module):
             x = self.act_func(self.linear1(x))
             hidden = self.act_func(self.linear2(x))
             logits = self.output_layer(hidden)
-            if self.task_type == 'corn':
-                output = corn_class_probs(logits)
-            else:
-                output = self.output_activation(logits)
-            
-        return output, logits, hidden
+            return X_spa
+
+import torch
 
 class LSTM(torch.nn.Module):
-    def __init__(self, in_channels, lstm_size, hidden_channels, end_channels, n_sequences, device,
-                 act_func='ReLU', task_type='regression', dropout=0.03, num_layers=1,
-                 return_hidden=False, out_channels=None, use_layernorm=False, horizon=0,
-                 temporal_idx=None, static_idx=None, spatialContext=False, d_channels=16
-                 ):
-        
+    def __init__(
+        self,
+        in_channels,
+        lstm_size,               # gardé exprès pour compatibilité API avec GRU
+        hidden_channels,
+        end_channels,
+        n_sequences,
+        device,
+        act_func='ReLU',
+        task_type='regression',
+        dropout=0.0,
+        num_layers=1,
+        return_hidden=False,
+        out_channels=None,
+        use_layernorm=False,
+        horizon=0,
+        temporal_idx=None,
+        static_idx=None,
+        spatialContext=False,
+        d_channels=16,
+
+        # ---- New optional improvements (matching BetterGRU) ----
+        use_temporal_conv=False,
+        conv_channels=None,
+        conv_kernel_size=3,
+        conv_layers=1,
+
+        use_full_sequence=True,
+        temporal_pool="last",   # {"last", "mean", "max", "meanmax", "attn"}
+
+        use_spatial_mlp=True,
+        spatial_hidden_channels=None,
+        spatial_mlp_layers=2,
+        spatial_mlp_use_bn=True,
+    ):
         super(LSTM, self).__init__()
 
+        # ----------------------------
+        # Keep original public API fields
+        # ----------------------------
         self.device = device
         self.return_hidden = return_hidden
         self.num_layers = num_layers
@@ -456,52 +601,237 @@ class LSTM(torch.nn.Module):
         self.decoder = None
         self._decoder_input = None
         self.horizon = horizon
+        if out_channels is None:
+            raise ValueError("out_channels must be provided and not None.")
         self.out_channels = out_channels
-        self.temporal_idx = temporal_idx
-        self.spatial_idx = static_idx
         self.spatialContext = spatialContext
-        
-        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
-            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx)).to(device)
-        
-        g_cha = len(self.temporal_idx)
 
-        # LSTM block
-        self.lstm = torch.nn.LSTM(
-            input_size=g_cha + end_channels if horizon > 0 else g_cha,
-            hidden_size=self.lstm_size,
+        # Safer defaults
+        self.temporal_idx = list(range(in_channels)) if temporal_idx is None else list(temporal_idx)
+        self.spatial_idx = [] if static_idx is None else list(static_idx)
+
+        # New switches
+        self.use_temporal_conv = use_temporal_conv
+        self.use_full_sequence = use_full_sequence
+        self.temporal_pool = temporal_pool.lower()
+        self.use_spatial_mlp = use_spatial_mlp
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+            raise ValueError(
+                f"Unsupported temporal_pool='{temporal_pool}'. "
+                f"Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+            )
+
+        if self.use_temporal_conv and conv_kernel_size % 2 == 0:
+            raise ValueError(
+                "conv_kernel_size must be odd if you want to preserve temporal length cleanly."
+            )
+
+        # ----------------------------
+        # Dimensions
+        # ----------------------------
+        g_cha = len(self.temporal_idx)
+        self.has_spatial = len(self.spatial_idx) > 0
+
+        temporal_in_channels = g_cha + self.end_channels if horizon > 0 else g_cha
+
+        # ----------------------------
+        # Optional temporal Conv1d encoder
+        # ----------------------------
+        if self.use_temporal_conv:
+            conv_channels = temporal_in_channels if conv_channels is None else conv_channels
+            conv_blocks = []
+            c_in = temporal_in_channels
+            c_out = conv_channels
+
+            for _ in range(conv_layers):
+                conv_blocks.append(
+                    nn.Conv1d(
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        kernel_size=conv_kernel_size,
+                        padding=conv_kernel_size // 2,
+                    ).to(device)
+                )
+                conv_blocks.append(nn.BatchNorm1d(c_out).to(device))
+                conv_blocks.append(_make_activation(act_func))
+                conv_blocks.append(nn.Dropout(dropout))
+                c_in = c_out
+
+            self.temporal_encoder = nn.Sequential(*conv_blocks)
+            lstm_input_size = c_out
+        else:
+            self.temporal_encoder = nn.Identity()
+            lstm_input_size = temporal_in_channels
+
+        # ----------------------------
+        # LSTM layer
+        # ----------------------------
+        self.lstm = nn.LSTM(
+            input_size=lstm_input_size,
+            hidden_size=lstm_size,
             num_layers=num_layers,
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True
         ).to(device)
 
-        # Optional normalization layer
+        # ----------------------------
+        # Temporal pooling over full sequence
+        # ----------------------------
+        if not self.use_full_sequence:
+            self.temporal_pool = "last"
+
+        if self.temporal_pool == "meanmax":
+            self.temporal_repr_dim = 2 * lstm_size
+        else:
+            self.temporal_repr_dim = lstm_size
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(lstm_size, device=device)
+        else:
+            self.temporal_pool_layer = None
+
+        # ----------------------------
+        # Normalization after temporal readout
+        # ----------------------------
         if use_layernorm:
-            self.norm = torch.nn.LayerNorm(self.lstm_size).to(device)
+            self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
         else:
-            self.norm = torch.nn.BatchNorm1d(self.lstm_size).to(device)
+            self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
 
-        # Dropout after LSTM
-        self.dropout = torch.nn.Dropout(p=dropout).to(device)
-        
-        if self.spatialContext:
-            self.context_layer = SpatialContext(d_channels, self.lstm_size, 1, n_heads=4, dropout=dropout)
-            
-        # Activation function
-        self.act_func = getattr(torch.nn, act_func)()
+        self.dropout = nn.Dropout(p=dropout).to(device)
 
-        # Output layer
-        self.linear1 = torch.nn.Linear(d_channels if self.spatialContext else self.lstm_size + len(self.spatial_idx), hidden_channels).to(device)
-        self.linear2 = torch.nn.Linear(hidden_channels, end_channels).to(device)
-        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
+        # ----------------------------
+        # Spatial branch
+        # ----------------------------
+        self.last_attention_coef = None          # spatial attention coeffs
+        self.last_temporal_attention_coef = None # temporal attention coeffs
 
-        # Task-dependent activation
+        if self.has_spatial:
+            spatial_in_dim = len(self.spatial_idx)
+            spatial_hidden_channels = (
+                spatial_in_dim if spatial_hidden_channels is None else spatial_hidden_channels
+            )
+
+            if self.use_spatial_mlp:
+                spatial_layers = []
+                d_in = spatial_in_dim
+                for _ in range(max(1, spatial_mlp_layers)):
+                    spatial_layers.append(
+                        MLPLayer(
+                            in_feats=d_in,
+                            out_feats=spatial_hidden_channels,
+                            device=device,
+                            activation=act_func,
+                            dropout=dropout,
+                            use_bn=spatial_mlp_use_bn,
+                        )
+                    )
+                    d_in = spatial_hidden_channels
+
+                self.spatial_mlp = nn.Sequential(*spatial_layers)
+                self.spatial_out_dim = d_in
+                self.encoder_spatial = None
+                self.spa_norm = None
+            else:
+                self.spatial_mlp = None
+                self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
+                self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
+                self.spatial_out_dim = spatial_in_dim
+        else:
+            self.spatial_mlp = None
+            self.encoder_spatial = None
+            self.spa_norm = None
+            self.spatial_out_dim = 0
+
+        # ----------------------------
+        # Optional spatial context fusion
+        # ----------------------------
+        if self.spatialContext and self.has_spatial:
+            self.context_layer = SpatialContextSet(
+                d_channels,
+                self.temporal_repr_dim,
+                1,
+                n_heads=4,
+                dropout=dropout,
+                use_sigmoid_gating=True,
+                renorm_gates=True,
+            )
+            fusion_dim = d_channels
+        else:
+            self.context_layer = None
+            fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
+
+        # Optional norm after concat / fusion
+        if use_layernorm:
+            self.norm_after_concat = nn.LayerNorm(fusion_dim).to(device)
+        else:
+            self.norm_after_concat = nn.BatchNorm1d(fusion_dim).to(device)
+
+        # ----------------------------
+        # Head
+        # ----------------------------
+        self.linear1 = nn.Linear(fusion_dim, hidden_channels).to(device)
+        self.linear2 = nn.Linear(hidden_channels, end_channels).to(device)
+        self.output_layer = nn.Linear(end_channels, out_channels).to(device)
+
+        # Neutral init on final output layer
+        print("Applying custom neutral initialization to LSTM output layer.")
+        torch.nn.init.normal_(self.output_layer.weight, mean=0.0, std=0.001)
+        if self.output_layer.bias is not None:
+            torch.nn.init.zeros_(self.output_layer.bias)
+
+        # Separate activation instances
+        self.act_func1 = _make_activation(act_func)
+        self.act_func2 = _make_activation(act_func)
+
+        # Keep original output behavior unchanged
         if task_type == 'classification':
-            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+            self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
-            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+            self.output_activation = nn.Softmax(dim=-1).to(device)
         else:
-            self.output_activation = torch.nn.Identity().to(device)
+            self.output_activation = nn.Identity().to(device)
+
+    def _pool_temporal_sequence(self, seq_out):
+        """
+        seq_out: (B, T, H)
+        returns x: (B, H') depending on pooling mode
+        """
+        self.last_temporal_attention_coef = None
+
+        if self.temporal_pool == "last":
+            x = seq_out[:, -1, :]
+        elif self.temporal_pool == "mean":
+            x = seq_out.mean(dim=1)
+        elif self.temporal_pool == "max":
+            x = seq_out.max(dim=1).values
+        elif self.temporal_pool == "meanmax":
+            x_mean = seq_out.mean(dim=1)
+            x_max = seq_out.max(dim=1).values
+            x = torch.cat((x_mean, x_max), dim=1)
+        elif self.temporal_pool == "attn":
+            x, a_t = self.temporal_pool_layer(seq_out)
+            self.last_temporal_attention_coef = a_t
+        else:
+            raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
+
+        return x
+
+    def _process_spatial(self, X_spa):
+        """
+        X_spa: (B, S)
+        returns spatial representation
+        """
+        if not self.has_spatial:
+            return None
+
+        if self.use_spatial_mlp:
+            return self.spatial_mlp(X_spa)
+        else:
+            X_spa = self.encoder_spatial(X_spa)
+            X_spa = self.spa_norm(X_spa)
+            return X_spa
 
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
@@ -509,179 +839,545 @@ class LSTM(torch.nn.Module):
             X: Tensor of shape (batch_size, features, sequence_length)
 
         Returns:
-            output: Final prediction tensor
-            (optionally) hidden_repr: The hidden state before final layer
+            output, logits, hidden
         """
-        
         X = X.to(self.device) if X.device != self.device else X
-        
-        if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
-            X_spa = X[:, self.spatial_idx, -1][:, :, None]
-            if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
-                X_spa = self.spa_norm(X_spa)
-            X = X[:, self.temporal_idx, :]
-            
-        batch_size = X.size(0)
 
+        # Spatial features from last time step
+        X_spa = None
+        if self.has_spatial:
+            X_spa = X[:, self.spatial_idx, -1]
+
+        # Temporal features
+        X_temp = X[:, self.temporal_idx, :]
+
+        batch_size = X_temp.size(0)
+
+        # Previous decoded state for autoregressive horizon input
         if z_prev is None:
-            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
+            z_prev = torch.zeros(
+                (batch_size, self.end_channels, self.n_sequences),
+                device=X_temp.device,
+                dtype=X_temp.dtype
+            )
         else:
-            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
-        
+            z_prev = z_prev.view(batch_size, self.end_channels, self.n_sequences)
+
         if self.horizon > 0:
-            X = torch.cat((X, z_prev), dim=1)
+            X_temp = torch.cat((X_temp, z_prev), dim=1)
 
-        # (batch_size, seq_len, features)
-        x = X.permute(0, 2, 1)
+        # Optional temporal convolution
+        # X_temp: (B, C, T)
+        X_temp = self.temporal_encoder(X_temp)
 
-        # Initial hidden and cell states
-        h0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
-        c0 = torch.zeros(self.num_layers, batch_size, self.lstm_size).to(self.device)
+        # To LSTM format: (B, T, F)
+        x = X_temp.permute(0, 2, 1)
 
-        # LSTM forward
-        x, _ = self.lstm(x, (h0, c0))
+        # Initial hidden states
+        h0 = torch.zeros(
+            self.num_layers,
+            batch_size,
+            self.lstm_size,
+            device=self.device,
+            dtype=x.dtype
+        )
+        c0 = torch.zeros(
+            self.num_layers,
+            batch_size,
+            self.lstm_size,
+            device=self.device,
+            dtype=x.dtype
+        )
 
-        # Last time step output
-        x = x[:, -1, :]  # shape: (batch_size, hidden_size)
+        # LSTM over full sequence
+        seq_out, _ = self.lstm(x, (h0, c0))
 
-        # Normalization and dropout
-        x = self.norm(x)
+        # Temporal readout
+        x = self._pool_temporal_sequence(seq_out)
+
+        # Norm + dropout
+        x = self.temporal_norm(x)
         x = self.dropout(x)
 
-        # Activation and output
-        #x = self.act_func(x)
+        # Spatial branch / context branch
+        if self.has_spatial:
+            X_spa = X[:, self.spatial_idx, -1]
+            spa_repr = self._process_spatial(X_spa)
 
-        if hasattr(self, 'spatialContext') and self.spatialContext:
-            x, _ = self.context_layer(x, X_spa)
-        elif hasattr(self, 'spatialContext'):
-            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
-            
-        x = self.act_func(self.linear1(x))
-        #x = self.dropout(x)
-        hidden = self.act_func(self.linear2(x))
-        #x = self.dropout(x)
+            if self.spatialContext and self.context_layer is not None:
+                # SpatialContextSet expects (B, K, D_stat). 
+                # Since d_stat is 1, each feature is a variable of dim 1.
+                if spa_repr.dim() == 2:
+                    spa_repr = spa_repr.unsqueeze(-1)
+                x, a_s = self.context_layer(x, spa_repr)
+                self.last_attention_coef = a_s
+            else:
+                x = torch.cat((x, spa_repr), dim=1)
+                self.last_attention_coef = None
+        else:
+            self.last_attention_coef = None
+
+        # Optional norm after fusion
+        x = self.norm_after_concat(x)
+
+        # Head
+        x = self.act_func1(self.linear1(x))
+        hidden = self.act_func2(self.linear2(x))
         logits = self.output_layer(hidden)
+
+        # Output behavior unchanged
         if self.task_type == 'corn':
             output = corn_class_probs(logits)
         else:
             output = self.output_activation(logits)
+
         return output, logits, hidden
         
+import torch
+import torch.nn as nn
+
+
+def _make_activation(act_func: str):
+    if isinstance(act_func, str):
+        return getattr(nn, act_func)()
+    return act_func
+
+
+def _apply_temporal_norm(x, norm):
+    """
+    x: (B, C, T)
+    BatchNorm1d expects (B, C, T).
+    LayerNorm(C) expects the normalized dimension last, so we use (B, T, C).
+    """
+    if isinstance(norm, nn.LayerNorm):
+        return norm(x.transpose(1, 2)).transpose(1, 2)
+    return norm(x)
+
+
+def _build_mlp_block(
+    in_dim,
+    out_dim,
+    device,
+    activation="ReLU",
+    dropout=0.0,
+    use_bn=True,
+):
+    """
+    Compatible fallback if your MLPLayer class does not have the same signature
+    as the one used in BetterGRU/LSTM.
+    """
+    layers = [nn.Linear(in_dim, out_dim).to(device)]
+
+    if use_bn:
+        layers.append(nn.BatchNorm1d(out_dim).to(device))
+
+    layers.append(_make_activation(activation))
+    layers.append(nn.Dropout(dropout).to(device))
+
+    return nn.Sequential(*layers)
+
+
 class DilatedCNN(torch.nn.Module):
-    def __init__(self, channels, dilations, lin_channels, end_channels, n_sequences, device, act_func,
-                 dropout, out_channels, task_type, use_layernorm=False, return_hidden=False, horizon=0,
-                 temporal_idx=None, static_idx=None, spatialContext=False, d_channels=16):
+    def __init__(
+        self,
+        channels,
+        dilations,
+        lin_channels,
+        end_channels,
+        n_sequences,
+        device,
+        act_func,
+        dropout,
+        out_channels,
+        task_type,
+        use_layernorm=False,
+        return_hidden=False,
+        horizon=0,
+        temporal_idx=None,
+        static_idx=None,
+        spatialContext=False,
+        d_channels=16,
+
+        # ---- Encodeur Conv1d temporel optionnel ----
+        use_temporal_conv=False,
+        conv_channels=None,
+        conv_kernel_size=3,
+        conv_layers=1,
+
+        # ---- Pooling sur toute la séquence CNN ----
+        use_full_sequence=True,
+        temporal_pool="attn",  # "last" | "mean" | "max" | "meanmax" | "attn"
+
+        # ---- Branche spatiale ----
+        use_spatial_mlp=True,
+        spatial_hidden_channels=128,
+        spatial_mlp_layers=3,
+        spatial_mlp_use_bn=True,
+    ):
         super(DilatedCNN, self).__init__()
 
-        # Initialisation des listes pour les convolutions et les BatchNorm
-        self.cnn_layer_list = []
-        self.batch_norm_list = []
-        self.num_layer = len(channels) - 1
-        
-        self.temporal_idx = temporal_idx
-        self.spatial_idx = static_idx
-        
-        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
-            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx)).to(device)
-
-        channels[0] = len(self.temporal_idx)
-
-        # Initialisation des couches convolutives et BatchNorm
-        for i in range(self.num_layer):
-            if i == 0:
-                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i] + end_channels if horizon > 0 else channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
-            else:
-                self.cnn_layer_list.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, padding='same', dilation=dilations[i], padding_mode='replicate').to(device))
-            if use_layernorm:
-                self.batch_norm_list.append(torch.nn.LayerNorm(channels[i + 1]).to(device))
-            else:
-                self.batch_norm_list.append(torch.nn.BatchNorm1d(channels[i + 1]).to(device))
-
-        self.dropout = torch.nn.Dropout(dropout)
-        
-        # Convertir les listes en ModuleList pour être compatible avec PyTorch
-        self.cnn_layer_list = torch.nn.ModuleList(self.cnn_layer_list)
-        self.batch_norm_list = torch.nn.ModuleList(self.batch_norm_list)
-        
-        # Dropout after GRU
-        self.dropout = torch.nn.Dropout(p=dropout).to(device)
-        
-        if spatialContext:
-            self.context_layer = SpatialContext(d_channels, channels[-1], 1, n_heads=4, dropout=dropout)
-
-        # Output layer
-        self.linear1 = torch.nn.Linear(d_channels if spatialContext else channels[-1] + len(static_idx), lin_channels).to(device)
-        self.linear2 = torch.nn.Linear(lin_channels, end_channels).to(device)
-        self.output_layer = torch.nn.Linear(end_channels, out_channels).to(device)
-
-        # Activation function
-        self.act_func = getattr(torch.nn, act_func)()
-
-        self.return_hidden = return_hidden
         self.device = device
+        self.task_type = task_type
+        self.return_hidden = return_hidden
         self.end_channels = end_channels
         self.horizon = horizon
         self.out_channels = out_channels
         self.n_sequences = n_sequences
-        self.temporal_idx = temporal_idx
-        self.spatial_idx = static_idx
         self.spatialContext = spatialContext
 
-        # Output activation depending on task
-        if task_type == 'classification':
-            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
-        elif task_type == 'binary':
-            self.output_activation = torch.nn.Softmax(dim=-1).to(device)
+        self.use_temporal_conv = use_temporal_conv
+        self.use_full_sequence = use_full_sequence
+        self.temporal_pool = temporal_pool.lower()
+        self.use_spatial_mlp = use_spatial_mlp
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+            raise ValueError(
+                f"Unsupported temporal_pool='{temporal_pool}'. "
+                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+            )
+
+        if self.use_temporal_conv and conv_kernel_size % 2 == 0:
+            raise ValueError(
+                "conv_kernel_size must be odd to preserve temporal length cleanly."
+            )
+
+        # Avoid mutating the input list outside the class.
+        channels = list(channels)
+        dilations = list(dilations)
+
+        self.temporal_idx = (
+            list(range(channels[0])) if temporal_idx is None else list(temporal_idx)
+        )
+        self.spatial_idx = [] if static_idx is None else list(static_idx)
+        self.has_spatial = len(self.spatial_idx) > 0
+
+        g_cha = len(self.temporal_idx)
+        temporal_in_channels = g_cha + end_channels if horizon > 0 else g_cha
+
+        # ============================================================
+        # Optional temporal Conv1d encoder before dilated CNN
+        # ============================================================
+        if self.use_temporal_conv:
+            conv_channels = temporal_in_channels if conv_channels is None else conv_channels
+
+            conv_blocks = []
+            c_in = temporal_in_channels
+            c_out = conv_channels
+
+            for _ in range(conv_layers):
+                conv_blocks.append(
+                    nn.Conv1d(
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        kernel_size=conv_kernel_size,
+                        padding=conv_kernel_size // 2,
+                    ).to(device)
+                )
+                conv_blocks.append(nn.BatchNorm1d(c_out).to(device))
+                conv_blocks.append(_make_activation(act_func))
+                conv_blocks.append(nn.Dropout(dropout).to(device))
+                c_in = c_out
+
+            self.temporal_encoder = nn.Sequential(*conv_blocks)
+            first_cnn_in_channels = c_out
         else:
-            self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
+            self.temporal_encoder = nn.Identity()
+            first_cnn_in_channels = temporal_in_channels
+
+        # ============================================================
+        # Dilated CNN stack
+        # ============================================================
+        self.num_layer = len(channels) - 1
+        if len(dilations) < self.num_layer:
+            raise ValueError(
+                f"Expected at least {self.num_layer} dilation values, got {len(dilations)}."
+            )
+
+        self.cnn_layer_list = nn.ModuleList()
+        self.norm_layer_list = nn.ModuleList()
+
+        for i in range(self.num_layer):
+            c_in = first_cnn_in_channels if i == 0 else channels[i]
+            c_out = channels[i + 1]
+
+            self.cnn_layer_list.append(
+                nn.Conv1d(
+                    in_channels=c_in,
+                    out_channels=c_out,
+                    kernel_size=3,
+                    padding="same",
+                    dilation=dilations[i],
+                    padding_mode="replicate",
+                ).to(device)
+            )
+
+            if use_layernorm:
+                self.norm_layer_list.append(nn.LayerNorm(c_out).to(device))
+            else:
+                self.norm_layer_list.append(nn.BatchNorm1d(c_out).to(device))
+
+        self.act_func = _make_activation(act_func)
+        self.dropout = nn.Dropout(p=dropout).to(device)
+
+        # ============================================================
+        # Temporal pooling over CNN output sequence
+        # ============================================================
+        if not self.use_full_sequence:
+            self.temporal_pool = "last"
+
+        cnn_out_channels = channels[-1]
+
+        if self.temporal_pool == "meanmax":
+            self.temporal_repr_dim = 2 * cnn_out_channels
+        else:
+            self.temporal_repr_dim = cnn_out_channels
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(
+                cnn_out_channels,
+                device=device,
+            )
+        else:
+            self.temporal_pool_layer = None
+
+        if use_layernorm:
+            self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+        else:
+            self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+
+        self.last_temporal_attention_coef = None
+        self.last_attention_coef = None
+
+        # ============================================================
+        # Spatial branch
+        # ============================================================
+        if self.has_spatial:
+            spatial_in_dim = len(self.spatial_idx)
+
+            if spatial_hidden_channels is None:
+                spatial_hidden_channels = spatial_in_dim
+
+            if self.use_spatial_mlp:
+                spatial_layers = []
+                d_in = spatial_in_dim
+
+                for _ in range(max(1, spatial_mlp_layers)):
+                    try:
+                        # If your MLPLayer has the same API as in BetterGRU/LSTM.
+                        spatial_layers.append(
+                            MLPLayer(
+                                in_feats=d_in,
+                                out_feats=spatial_hidden_channels,
+                                device=device,
+                                activation=act_func,
+                                dropout=dropout,
+                                use_bn=spatial_mlp_use_bn,
+                            )
+                        )
+                    except TypeError:
+                        # Fallback if MLPLayer has an older signature.
+                        spatial_layers.append(
+                            _build_mlp_block(
+                                in_dim=d_in,
+                                out_dim=spatial_hidden_channels,
+                                device=device,
+                                activation=act_func,
+                                dropout=dropout,
+                                use_bn=spatial_mlp_use_bn,
+                            )
+                        )
+
+                    d_in = spatial_hidden_channels
+
+                self.spatial_mlp = nn.Sequential(*spatial_layers)
+                self.encoder_spatial = None
+                self.spa_norm = None
+                self.spatial_out_dim = d_in
+            else:
+                self.spatial_mlp = None
+                self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
+                self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
+                self.spatial_out_dim = spatial_in_dim
+        else:
+            self.spatial_mlp = None
+            self.encoder_spatial = None
+            self.spa_norm = None
+            self.spatial_out_dim = 0
+
+        # ============================================================
+        # Optional spatial context fusion
+        # ============================================================
+        if self.spatialContext and self.has_spatial:
+            # Prefer the same class as your LSTM if available.
+            if "SpatialContextSet" in globals():
+                self.context_layer = SpatialContextSet(
+                    d_channels,
+                    self.temporal_repr_dim,
+                    1,
+                    n_heads=4,
+                    dropout=dropout,
+                    use_sigmoid_gating=True,
+                    renorm_gates=True,
+                )
+            else:
+                self.context_layer = SpatialContext(
+                    d_channels,
+                    self.temporal_repr_dim,
+                    1,
+                    n_heads=4,
+                    dropout=dropout,
+                )
+
+            self.context_layer = self.context_layer.to(device)
+            fusion_dim = d_channels
+        else:
+            self.context_layer = None
+            fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
+
+        if use_layernorm:
+            self.norm_after_concat = nn.LayerNorm(fusion_dim).to(device)
+        else:
+            self.norm_after_concat = nn.BatchNorm1d(fusion_dim).to(device)
+
+        # ============================================================
+        # Head
+        # ============================================================
+        self.linear1 = nn.Linear(fusion_dim, lin_channels).to(device)
+        self.linear2 = nn.Linear(lin_channels, end_channels).to(device)
+        self.output_layer = nn.Linear(end_channels, out_channels).to(device)
+
+        # Same output behavior as before.
+        if task_type == "classification":
+            self.output_activation = nn.Softmax(dim=-1).to(device)
+        elif task_type == "binary":
+            self.output_activation = nn.Softmax(dim=-1).to(device)
+        else:
+            self.output_activation = nn.Identity().to(device)
+
+    def _temporal_pooling(self, x):
+        """
+        x: (B, C, T)
+        returns: (B, D)
+        """
+        if self.temporal_pool == "last":
+            pooled = x[:, :, -1]
+
+        elif self.temporal_pool == "mean":
+            pooled = x.mean(dim=-1)
+
+        elif self.temporal_pool == "max":
+            pooled = x.amax(dim=-1)
+
+        elif self.temporal_pool == "meanmax":
+            pooled = torch.cat(
+                [
+                    x.mean(dim=-1),
+                    x.amax(dim=-1),
+                ],
+                dim=1,
+            )
+
+        elif self.temporal_pool == "attn":
+            # TemporalAttentionPooling expects (B, T, C).
+            x_seq = x.transpose(1, 2)
+            pooled, attn = self.temporal_pool_layer(x_seq)
+            self.last_temporal_attention_coef = attn
+
+        else:
+            raise RuntimeError(f"Unsupported temporal_pool={self.temporal_pool}")
+
+        return pooled
 
     def forward(self, x, edges=None, z_prev=None):
-        # Couche d'entrée
-        
         x = x.to(self.device) if x.device != self.device else x
 
-        if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
-            X_spa = x[:, self.spatial_idx, -1][:, :, None]
-            if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
-                X_spa = self.spa_norm(X_spa)
+        # ------------------------------------------------------------
+        # Split temporal and static variables
+        # x expected shape: (B, F, T)
+        # ------------------------------------------------------------
+        if self.temporal_idx is not None:
             X = x[:, self.temporal_idx, :]
-            x = X
-
-        if z_prev is None:
-            z_prev = torch.zeros((x.shape[0], self.end_channels, self.n_sequences), device=x.device, dtype=x.dtype)
         else:
-            z_prev = z_prev.view(x.shape[0], self.end_channels, self.n_sequences)
-        
+            X = x
+
+        if self.has_spatial:
+            X_spa_vec = x[:, self.spatial_idx, -1]  # (B, S)
+            X_spa_ctx = X_spa_vec[:, :, None]       # (B, S, 1)
+        else:
+            X_spa_vec = None
+            X_spa_ctx = None
+
+        x = X
+
+        # ------------------------------------------------------------
+        # Horizon conditioning
+        # ------------------------------------------------------------
+        if z_prev is None:
+            z_prev = torch.zeros(
+                (x.shape[0], self.end_channels, x.shape[-1]),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        else:
+            z_prev = z_prev.to(x.device)
+            z_prev = z_prev.view(x.shape[0], self.end_channels, x.shape[-1])
+
         if self.horizon > 0:
             x = torch.cat((x, z_prev), dim=1)
 
-        # Couches convolutives dilatées avec BatchNorm, activation et dropout
-        for cnn_layer, batch_norm in zip(self.cnn_layer_list, self.batch_norm_list):
+        # ------------------------------------------------------------
+        # Optional temporal Conv1d encoder
+        # ------------------------------------------------------------
+        x = self.temporal_encoder(x)
+
+        # ------------------------------------------------------------
+        # Dilated CNN stack
+        # ------------------------------------------------------------
+        for cnn_layer, norm_layer in zip(self.cnn_layer_list, self.norm_layer_list):
             x = cnn_layer(x)
-            x = batch_norm(x)  # Batch Normalization
+            x = _apply_temporal_norm(x, norm_layer)
             x = self.act_func(x)
             x = self.dropout(x)
-        
-        # Garder uniquement le dernier élément des séquences
-        x = x[:, :, -1]
 
-        # Activation and output
-        #x = self.act_func(x)
+        # ------------------------------------------------------------
+        # Temporal readout
+        # ------------------------------------------------------------
+        x = self._temporal_pooling(x)  # (B, temporal_repr_dim)
+        x = self.temporal_norm(x)
+        x = self.dropout(x)
 
-        if hasattr(self, 'spatialContext') and self.spatialContext:
-            x, _ = self.context_layer(x, X_spa)
+        # ------------------------------------------------------------
+        # Spatial branch and fusion
+        # ------------------------------------------------------------
+        if self.context_layer is not None:
+            x, attn_coef = self.context_layer(x, X_spa_ctx)
+            self.last_attention_coef = attn_coef
+
         else:
-            x = torch.concat((x, X_spa[:, :, 0]), dim=1)
-            
+            if self.has_spatial:
+                if self.use_spatial_mlp:
+                    x_spa = self.spatial_mlp(X_spa_vec)
+                else:
+                    x_spa = self.encoder_spatial(X_spa_vec)
+                    x_spa = self.spa_norm(x_spa)
+                    x_spa = self.act_func(x_spa)
+
+                x = torch.cat((x, x_spa), dim=1)
+
+            x = self.norm_after_concat(x)
+
+        # ------------------------------------------------------------
+        # Prediction head
+        # ------------------------------------------------------------
         x = self.act_func(self.linear1(x))
-        #x = self.dropout(x)
         hidden = self.act_func(self.linear2(x))
-        #x = self.dropout(x)
         logits = self.output_layer(hidden)
-        if self.task_type == 'corn':
+
+        if self.task_type == "corn":
             output = corn_class_probs(logits)
         else:
             output = self.output_activation(logits)
+
         return output, logits, hidden
 
 class GraphCastGRU(torch.nn.Module):
@@ -740,6 +1436,7 @@ class GraphCastGRU(torch.nn.Module):
         )
         self.gru_size = input_dim_grid_nodes
         self.num_gru_layers = num_gru_layers
+        self.spatial_idx = static_idx
         self.norm = torch.nn.BatchNorm1d(self.gru_size)
         if self.spatial_idx is not None and len(self.spatial_idx) > 0:
             self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx))
@@ -747,7 +1444,6 @@ class GraphCastGRU(torch.nn.Module):
         self.task_type = task_type
         
         self.temporal_idx = temporal_idx
-        self.spatial_idx = static_idx
         self.spatialContext = spatialContext
         
         if self.spatialContext:

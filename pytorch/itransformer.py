@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 # import officiel THUML
 # adapte ce chemin selon ton projet
-from GNN.forecasting_models.pytorch.iTransformer.model.iTransformer import Model as OfficialITransformer
+try:
+    from GNN.forecasting_models.pytorch.iTransformer.model.iTransformer import Model as OfficialITransformer
+except ImportError:
+    OfficialITransformer = None
+    print("Warning: OfficialITransformer could not be loaded due to missing dependencies.")
 
 
 class StaticMLP(nn.Module):

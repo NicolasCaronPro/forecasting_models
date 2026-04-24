@@ -7,6 +7,7 @@ import math
 import numpy as np
 #import shap
 from forecasting_models.pytorch.models import *
+from forecasting_models.pytorch.models_better import *
 from forecasting_models.pytorch.itransformer import *
 from forecasting_models.pytorch.models_2D import *
 from forecasting_models.pytorch.kan import *
@@ -279,10 +280,11 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     elif model_name == 'LSTM':
         print(f'num_lstm_layers -> {num_lstm_layers}')
         default_params = {
+            # ---- Paramètres hérités de LSTM (maintenant "Better") ----
             'in_channels': in_dim,
-            'lstm_size': 128,
             'hidden_channels': 256,
-            'out_channels' : out_channels,
+            'lstm_size': 128,
+            'out_channels': out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
             'num_layers': num_lstm_layers,
@@ -291,7 +293,28 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type': task_type,
             'return_hidden': False,
             'dropout': dropout,
-            'horizon': horizon
+            'use_layernorm': True,
+            'horizon': horizon,
+            'temporal_idx': None,   # sera fourni via custom_model_params
+            'static_idx': None,     # sera fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,   # Ajoute un Conv1d avant le LSTM
+            'conv_channels': None,       # = temporal_in_channels si None
+            'conv_kernel_size': 3,       # Doit être impair
+            'conv_layers': 1,
+
+            # ---- Pooling sur toute la séquence de sortie LSTM ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+
+            # ---- Branche spatiale (MLP vs linear simple) ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -300,10 +323,11 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
     elif model_name == 'GRU':
         default_params = {
+            # ---- Paramètres hérités de GRU ----
             'in_channels': in_dim,
             'hidden_channels': 256,
             'gru_size': 128,
-            'out_channels' : out_channels,
+            'out_channels': out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
             'num_layers': 2,
@@ -312,13 +336,32 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'task_type': task_type,
             'return_hidden': False,
             'dropout': dropout,
+            'use_layernorm': True,
             'horizon': horizon,
-            'spatialContext' : False,
-            'd_channels' : 64
+            'temporal_idx': None,   # sera fourni via custom_model_params
+            'static_idx': None,     # sera fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,   # Ajoute un Conv1d avant le GRU
+            'conv_channels': None,       # = temporal_in_channels si None
+            'conv_kernel_size': 3,       # Doit être impair
+            'conv_layers': 1,
+
+            # ---- Pooling sur toute la séquence de sortie GRU ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+
+            # ---- Branche spatiale (MLP vs linear simple) ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
-        model = GRU(**default_params)
+        model = BetterGRU(**default_params)
         model_params.update(default_params)
         
     elif model_name == 'GRUAtt':
@@ -344,7 +387,50 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             
         model = GRU(**default_params)
         model_params.update(default_params)
-        
+
+    elif model_name == 'BetterGRU':
+        default_params = {
+            # ---- Paramètres hérités de GRU ----
+            'in_channels': in_dim,
+            'hidden_channels': 256,
+            'gru_size': 128,
+            'out_channels': out_channels,
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'num_layers': 2,
+            'device': device,
+            'act_func': act_func,
+            'task_type': task_type,
+            'return_hidden': False,
+            'dropout': dropout,
+            'use_layernorm': True,
+            'horizon': horizon,
+            'temporal_idx': None,   # sera fourni via custom_model_params
+            'static_idx': None,     # sera fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,   # Ajoute un Conv1d avant le GRU
+            'conv_channels': None,       # = temporal_in_channels si None
+            'conv_kernel_size': 3,       # Doit être impair
+            'conv_layers': 1,
+
+            # ---- Pooling sur toute la séquence de sortie GRU ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+
+            # ---- Branche spatiale (MLP vs linear simple) ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
+        }
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+        model = BetterGRU(**default_params)
+        model_params.update(default_params)
+
     elif model_name == 'ESN':
         default_params = {
             'in_channels': in_dim,

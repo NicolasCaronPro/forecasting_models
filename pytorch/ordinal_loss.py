@@ -8439,7 +8439,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                                 self.mu_momentum * old_val
                                 + (1.0 - self.mu_momentum) * mu_hat_c[li].detach()
                             )
-
+                            
             if cluster_to_dept_local is not None and prior_dept_k is not None:
                 dept_prior_for_cluster = prior_dept_k.index_select(0, cluster_to_dept_local)
             else:
@@ -8605,7 +8605,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             )
 
         target_mid = 0.5 * (mu_ref[:, :-1] + mu_ref[:, 1:])
-        target_mid = target_mid.detach()
+        target_mid = target_mid.clone().detach()
 
         # Important: detach mu so Lmid mainly calibrates thresholds/bins
         if getattr(self, "mid_detach_mu", True):
