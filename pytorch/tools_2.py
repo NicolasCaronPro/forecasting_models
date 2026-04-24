@@ -598,8 +598,29 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'dropout': dropout,
             'out_channels': out_channels,
             'task_type': task_type,
+            'use_layernorm': False,
             'return_hidden': False,
-            'horizon': horizon
+            'horizon': horizon,
+            'temporal_idx': None,   # sera fourni via custom_model_params
+            'static_idx': None,     # sera fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+
+            # ---- Encodeur Conv1d temporel optionnel ----
+            'use_temporal_conv': False,   # Ajoute un Conv1d
+            'conv_channels': None,
+            'conv_kernel_size': 3,
+            'conv_layers': 1,
+
+            # ---- Pooling sur toute la séquence CNN ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+
+            # ---- Branche spatiale ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
