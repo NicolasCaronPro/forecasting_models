@@ -604,9 +604,9 @@ class LSTM(torch.nn.Module):
         conv_kernel_size=3,
         conv_layers=1,
 
-        use_full_sequence=True,
-        temporal_pool="last",   # {"last", "mean", "max", "meanmax", "attn"}
-
+        use_full_sequence: bool = True,
+        temporal_pool: str = "attn",   # {"last", "mean", "max", "meanmax", "attn"}
+        
         use_spatial_mlp=True,
         spatial_hidden_channels=None,
         spatial_mlp_layers=2,
@@ -881,12 +881,15 @@ class LSTM(torch.nn.Module):
         if not self.has_spatial:
             return None
 
-        if self.use_spatial_mlp:
-            return self.spatial_mlp(X_spa)
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
         else:
-            X_spa = self.encoder_spatial(X_spa)
-            X_spa = self.spa_norm(X_spa)
-            return X_spa
+            return None
+
+        y = self.spatial_norm(y)
+        return y
 
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
@@ -963,23 +966,21 @@ class LSTM(torch.nn.Module):
         if self.has_spatial:
             X_spa = X[:, self.spatial_idx, -1]
             spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
 
-            if self.spatialContext and self.context_layer is not None:
+            if self.spatialContext and self.context_layer is not None and spa_repr is not None:
                 # SpatialContextSet expects (B, K, D_stat). 
                 # Since d_stat is 1, each feature is a variable of dim 1.
                 if spa_repr.dim() == 2:
                     spa_repr = spa_repr.unsqueeze(-1)
                 x, a_s = self.context_layer(x, spa_repr)
                 self.last_attention_coef = a_s
-            else:
+            elif spa_repr is not None:
                 x = torch.cat((x, spa_repr), dim=1)
                 self.last_attention_coef = None
         else:
             self.last_attention_coef = None
 
-        # Optional norm after fusion (Identity par défaut)
-        x = self.norm_after_concat(x)
+        # Prediction head
 
         # Head
         x = self.act_func1(self.linear1(x))
@@ -1092,7 +1093,7 @@ class DilatedCNN(torch.nn.Module):
         spatial_mlp_use_bn=True,
 
         # ---- Normalization refinement parameters ----
-        use_temporal_norm=True,
+        use_temporal_norm=False,
         temporal_norm_type="batchnorm",
         use_spatial_norm=True,
         spatial_norm_type="batchnorm",
@@ -1223,7 +1224,8 @@ class DilatedCNN(torch.nn.Module):
             )
         else:
             self.temporal_pool_layer = None
-
+ 
+        self.temporal_norm_type = temporal_norm_type
         if use_temporal_norm:
             if temporal_norm_type == "layernorm":
                 self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
@@ -1446,39 +1448,48 @@ class DilatedCNN(torch.nn.Module):
         # ------------------------------------------------------------
         # Temporal readout & Normalization ordering
         if self.temporal_pool == "attn":
-            # CNN output x is (B, C, L) -> LayerNorm(C) -> attention pooling -> Dropout
-            x_seq = x.transpose(1, 2)
+            # sequence → LayerNorm → attention pooling → Dropout
+            x_seq = x.transpose(1, 2)            # (B, T, C)
             x_seq = self.temporal_norm(x_seq)
-            x = x_seq.transpose(1, 2)
-            x = self._temporal_pooling(x)
+            x, attn = self.temporal_pool_layer(x_seq)
+            self.last_temporal_attention_coef = attn
             x = self.dropout(x)
         else:
-            # CNN output -> pooling -> LayerNorm -> Dropout
-            x = self._temporal_pooling(x)
+            # Sans attention : pooling → LayerNorm → Dropout
+            x = self._temporal_pooling(x)        # returns (B, C)
             x = self.temporal_norm(x)
             x = self.dropout(x)
-
+                
         # ------------------------------------------------------------
         # Spatial branch and fusion
         # ------------------------------------------------------------
-        if self.context_layer is not None:
-            x, attn_coef = self.context_layer(x, X_spa_ctx)
-            self.last_attention_coef = attn_coef
+        if self.has_spatial:
+            X_spa_vec = x[:, self.spatial_idx, -1]  # (B, S)
+            X_spa_ctx = X_spa_vec[:, :, None]       # (B, S, 1)
 
-        else:
-            if self.has_spatial:
-                if self.use_spatial_mlp:
-                    x_spa = self.spatial_mlp(X_spa_vec)
+            if self.context_layer is not None:
+                # If we have a context layer (SpatialContextSet), use it.
+                # However, our context_layer usually expects non-normalized raw spatial context.
+                # Or does it expect normalized? 
+                # BetterGRU uses spa_repr (normalized) in context_layer.
+                # Let's align on BetterGRU pattern.
+                spa_repr = self._process_spatial(X_spa_vec)
+                if spa_repr is not None:
+                    if spa_repr.dim() == 2:
+                        spa_repr = spa_repr.unsqueeze(-1)
+                    x, attn_coef = self.context_layer(x, spa_repr)
+                    self.last_attention_coef = attn_coef
                 else:
-                    x_spa = self.encoder_spatial(X_spa_vec)
-                    x_spa = self.spa_norm(x_spa)
-                    x_spa = self.act_func(x_spa)
-                
-                x_spa = self.spatial_norm(x_spa) # Application de la normalisation spatiale
-                x = torch.cat((x, x_spa), dim=1)
+                    self.last_attention_coef = None
+            else:
+                x_spa = self._process_spatial(X_spa_vec)
+                if x_spa is not None:
+                    x = torch.cat((x, x_spa), dim=1)
+                self.last_attention_coef = None
+        else:
+            self.last_attention_coef = None
 
-            x = self.norm_after_concat(x)
-
+        # Head
         # ------------------------------------------------------------
         # Prediction head
         # ------------------------------------------------------------
@@ -1807,11 +1818,16 @@ class GraphCastGRU(torch.nn.Module):
         """X_spa: (B, S) → (B, spatial_out_dim)"""
         if not self.has_spatial:
             return None
-        if self.use_spatial_mlp:
-            return self.spatial_mlp(X_spa)
-        X_spa = self.encoder_spatial(X_spa)
-        X_spa = self.spa_norm(X_spa)
-        return X_spa
+        
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
+        else:
+            return None
+
+        y = self.spatial_norm(y)
+        return y
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -1866,28 +1882,32 @@ class GraphCastGRU(torch.nn.Module):
             x = self.temporal_norm(x)
             x = self.dropout(x)
 
-        # Norm + dropout
-        x = self.temporal_norm(x)
-        x = self.dropout(x)
+        # OptionalNorm after pooling (if not already done)
+        if self.temporal_pool == "attn":
+            # Norm + dropout was already done before pooling for attn
+            pass
+        else:
+            # For non-attn, we already did pool -> norm -> dropout in blocks 1865-1867.
+            # No need for extra norm/dropout here unless we want it after fusion.
+            pass
 
         # Spatial branch + fusion (before GraphCast)
-        if self.context_layer is not None and X_spa is not None:
+        if self.has_spatial and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
-
+            
             if spa_repr is not None and spa_repr.dim() == 2:
                 spa_repr = spa_repr.unsqueeze(-1)        # (B, S, 1)
-            x, a_s = self.context_layer(x, spa_repr)
-            self.last_attention_coef = a_s
-        elif self.has_spatial and X_spa is not None:
-            spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
 
-            x = torch.cat((x, spa_repr), dim=1)
+            if self.context_layer is not None and spa_repr is not None:
+                x, a_s = self.context_layer(x, spa_repr)
+                self.last_attention_coef = a_s
+            elif spa_repr is not None:
+                x = torch.cat((x, spa_repr), dim=1)
+                self.last_attention_coef = None
+        else:
             self.last_attention_coef = None
 
-        # Optional norm after fusion
-        x = self.norm_after_concat(x)
+        # Head
 
         # GraphCast input: (1, B, dim)
         X_graphcast = x[None, :, :]
@@ -2219,11 +2239,16 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         """X_spa: (B, S) → (B, spatial_out_dim)"""
         if not self.has_spatial:
             return None
-        if self.use_spatial_mlp:
-            return self.spatial_mlp(X_spa)
-        X_spa = self.encoder_spatial(X_spa)
-        X_spa = self.spa_norm(X_spa)
-        return X_spa
+            
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
+        else:
+            return None
+            
+        y = self.spatial_norm(y)
+        return y
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -2286,23 +2311,22 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]   # (B, output_dim_grid_nodes)
 
         # Spatial branch + fusion (AFTER GraphCast)
-        if self.context_layer is not None and X_spa is not None:
+        if self.has_spatial and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
-
+            
             if spa_repr is not None and spa_repr.dim() == 2:
                 spa_repr = spa_repr.unsqueeze(-1)        # (B, S, 1)
-            x, a_s = self.context_layer(x, spa_repr)
-            self.last_attention_coef = a_s
-        elif self.has_spatial and X_spa is not None:
-            spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
-
-            x = torch.cat((x, spa_repr), dim=1)
+                
+            if self.context_layer is not None and spa_repr is not None:
+                x, a_s = self.context_layer(x, spa_repr)
+                self.last_attention_coef = a_s
+            elif spa_repr is not None:
+                x = torch.cat((x, spa_repr), dim=1)
+                self.last_attention_coef = None
+        else:
             self.last_attention_coef = None
 
-        # Optional fusion norm
-        x = self.norm_after_concat(x)
+        # Prediction head
 
         # Prediction head
         x = self.act_func(self.linear1(x))

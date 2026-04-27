@@ -86,7 +86,7 @@ class BetterGRU(nn.Module):
         d_channels: int = 16,
 
         # ---- New optional improvements (all removable) ----
-        use_temporal_conv: bool = True,
+        use_temporal_conv: bool = False,
         conv_channels: int | None = None,
         conv_kernel_size: int = 3,
         conv_layers: int = 1,
@@ -369,8 +369,6 @@ class BetterGRU(nn.Module):
             y = self.spatial_mlp(X_spa)
         elif not self.use_spatial_mlp and self.encoder_spatial is not None:
             y = self.encoder_spatial(X_spa)
-            if self.spa_norm is not None:
-                y = self.spa_norm(y)
         else:
             return None
 
@@ -445,7 +443,6 @@ class BetterGRU(nn.Module):
         # Spatial branch / context branch
         if self.has_spatial:
             spa_repr = self._process_spatial(X_spa)
-            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
 
             if self.spatialContext and self.context_layer is not None:
                 x, a_s = self.context_layer(x, spa_repr)
@@ -457,7 +454,7 @@ class BetterGRU(nn.Module):
             self.last_attention_coef = None
 
         # Optional norm after fusion (Identity par défaut)
-        x = self.norm_after_concat(x)
+        # Head
 
         # Head
         x = self.act_func1(self.linear1(x))
