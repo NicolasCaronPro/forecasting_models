@@ -1665,25 +1665,24 @@ class ContextualOrdinalUncertaintyFocalWKLoss(OrdinalUncertaintyFocalWKLoss):
         u_col = f"{self.context_prefix}_u_star"
         mod_col = f"{self.context_prefix}_modified"
 
-        for row in df[
-            [self.graph_col, self.date_col, target_col]
-            + prob_cols
-            + [arg_col, u_col, mod_col]
-        ].itertuples(index=False):
+        cols = [self.graph_col, self.date_col, target_col] + prob_cols + [arg_col, u_col, mod_col]
+        n_probs = len(prob_cols)
 
-            graph_id = getattr(row, self.graph_col)
-            date = getattr(row, self.date_col)
-            y = int(getattr(row, target_col))
+        for row in df[cols].itertuples(index=False, name=None):
+
+            graph_id = row[0]
+            date = row[1]
+            y = int(row[2])
 
             probs = np.array(
-                [float(getattr(row, col)) for col in prob_cols],
+                [float(v) for v in row[3 : 3 + n_probs]],
                 dtype=np.float64,
             )
             probs = probs / max(probs.sum(), self.eps)
 
-            argmax = int(getattr(row, arg_col))
-            u_star = float(getattr(row, u_col))
-            modified = bool(getattr(row, mod_col))
+            argmax = int(row[3 + n_probs])
+            u_star = float(row[4 + n_probs])
+            modified = bool(row[5 + n_probs])
 
             # Sécurité : si prevent_downgrade est actif, on ne stocke pas
             # une distribution incohérente.
@@ -1835,20 +1834,21 @@ class ContextualOrdinalUncertaintyFocalWKLoss(OrdinalUncertaintyFocalWKLoss):
         #   m_i = r_i pour samples modifiés, onehot sinon
         effective_targets = []
 
-        for row in d_cov[
-            [target_col] + prob_cols + [u_col, mod_col]
-        ].itertuples(index=False):
+        cols = [target_col] + prob_cols + [u_col, mod_col]
+        n_probs = len(prob_cols)
 
-            y = int(getattr(row, target_col))
+        for row in d_cov[cols].itertuples(index=False, name=None):
+
+            y = int(row[0])
 
             r = np.array(
-                [float(getattr(row, col)) for col in prob_cols],
+                [float(v) for v in row[1 : 1 + n_probs]],
                 dtype=np.float64,
             )
             r = r / max(r.sum(), self.eps)
 
-            u_star = float(getattr(row, u_col))
-            modified = bool(getattr(row, mod_col))
+            u_star = float(row[1 + n_probs])
+            modified = bool(row[2 + n_probs])
 
             e = self._one_hot_np(y)
 
@@ -2627,3 +2627,91 @@ class ContextualOrdinalUncertaintyFocalWKLoss(OrdinalUncertaintyFocalWKLoss):
                 dtype=torch.long,
             ),
         }
+        
+    def _save_heatmap(
+        self,
+        matrix,
+        x_labels,
+        y_labels,
+        xlabel: str,
+        ylabel: str,
+        title: str,
+        path: str,
+        fmt: str = ".2f",
+    ) -> None:
+        """
+        Sauvegarde une heatmap simple avec annotations.
+        """
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        matrix = np.asarray(matrix)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.imshow(matrix, aspect="auto")
+
+        plt.colorbar(im, ax=ax)
+
+        ax.set_xticks(np.arange(len(x_labels)))
+        ax.set_yticks(np.arange(len(y_labels)))
+
+        ax.set_xticklabels(x_labels)
+        ax.set_yticklabels(y_labels)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                val = matrix[i, j]
+                ax.text(
+                    j,
+                    i,
+                    format(val, fmt),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                )
+
+        plt.tight_layout()
+        plt.savefig(path, dpi=200)
+        plt.close()
+
+
+    def _save_barplot_from_dataframe(
+        self,
+        data,
+        x_col: str,
+        y_col: str,
+        title: str,
+        ylabel: str,
+        path: str,
+        top_k: Optional[int] = None,
+    ) -> None:
+        """
+        Sauvegarde un barplot depuis un dataframe.
+
+        Si top_k est donné, garde les top_k plus grandes valeurs de y_col.
+        """
+
+        import matplotlib.pyplot as plt
+
+        d = data.copy()
+
+        if top_k is not None and len(d) > top_k:
+            d = d.sort_values(y_col, ascending=False).head(top_k)
+
+        d = d.copy()
+        d[x_col] = d[x_col].astype(str)
+
+        plt.figure(figsize=(max(10, 0.35 * len(d)), 5))
+        plt.bar(d[x_col].values, d[y_col].values)
+        plt.xlabel(x_col)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        plt.savefig(path, dpi=200)
+        plt.close()

@@ -940,29 +940,49 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     
     elif model_name == 'graphCastGRU':
         default_params = {
-            'num_gru_layers' : 2,
-            'in_channels' : in_dim,
+            # ---- GRU temporel ----
+            'num_gru_layers': 2,
+            'in_channels': in_dim,
+            # ---- GraphCast core ----
             'input_dim_grid_nodes': 128,
             'input_dim_mesh_nodes': 3,
-            'input_dim_edges':4,
-            'output_dim_grid_nodes' : 128,
-            'processor_layers' : 6,
-            'hidden_layers' : 1,
-            'hidden_dim' : 128,
-            'lin_channels' : 256,
-            'end_channels' : 64,
-            'aggregation' : 'sum',
-            'norm_type' : 'LayerNorm',
-            'do_concat_trick' : False,
-            'out_channels' : out_channels,
-            'act_func' : act_func,
-            'task_type' : task_type,
-            'has_time_dim' : True,
-            'graph_or_node':graph_or_node,
-            'n_sequences' : k_days + 1,
+            'input_dim_edges': 4,
+            'output_dim_grid_nodes': 128,
+            'processor_layers': 6,
+            'hidden_layers': 1,
+            'hidden_dim': 128,
+            'lin_channels': 256,
+            'end_channels': 64,
+            'aggregation': 'sum',
+            'norm_type': 'LayerNorm',
+            'do_concat_trick': False,
+            'out_channels': out_channels,
+            'act_func': act_func,
+            'task_type': task_type,
+            'has_time_dim': True,
+            'graph_or_node': graph_or_node,
+            'n_sequences': k_days + 1,
             'return_hidden': False,
             'horizon': horizon,
-            'spatialContext' : False
+            'dropout': dropout,
+            # ---- Indices temporels / spatiaux ----
+            'temporal_idx': None,   # fourni via custom_model_params
+            'static_idx': None,     # fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,
+            'conv_channels': None,
+            'conv_kernel_size': 3,
+            'conv_layers': 1,
+            # ---- Pooling sur la séquence GRU ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            # ---- Branche spatiale ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -972,61 +992,103 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
     elif model_name == 'graphCastGRUWithAttentionTrans':
         default_params = {
-            'num_gru_layers' : 2,
-            'in_channels' : in_dim,
+            # ---- GRU temporel ----
+            'num_gru_layers': 2,
+            'in_channels': in_dim,
+            # ---- GraphCast core (avec attention Transformer) ----
             'input_dim_grid_nodes': 128,
             'input_dim_mesh_nodes': 3,
-            'input_dim_edges':4,
-            'output_dim_grid_nodes' : 128,
-            'processor_layers' : 6,
-            'hidden_layers' : 1,
-            'hidden_dim' : 128,
-            'lin_channels' : 256,
-            'end_channels' : 64,
-            'aggregation' : 'sum',
-            'norm_type' : 'LayerNorm',
-            'do_concat_trick' : False,
-            'out_channels' : out_channels,
-            'act_func' : act_func,
-            'task_type' : task_type,
-            'has_time_dim' : True,
-            'graph_or_node':graph_or_node,
-            'n_sequences' : k_days + 1,
+            'input_dim_edges': 4,
+            'output_dim_grid_nodes': 128,
+            'processor_layers': 6,
+            'hidden_layers': 1,
+            'hidden_dim': 128,
+            'lin_channels': 256,
+            'end_channels': 64,
+            'aggregation': 'sum',
+            'norm_type': 'LayerNorm',
+            'do_concat_trick': False,
+            'out_channels': out_channels,
+            'act_func': act_func,
+            'task_type': task_type,
+            'has_time_dim': True,
+            'graph_or_node': graph_or_node,
+            'n_sequences': k_days + 1,
             'return_hidden': False,
-            'attention' : "Transformer",
-            'horizon': horizon
+            'attention': True,
+            'horizon': horizon,
+            'dropout': dropout,
+            # ---- Indices temporels / spatiaux ----
+            'temporal_idx': None,   # fourni via custom_model_params
+            'static_idx': None,     # fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,
+            'conv_channels': None,
+            'conv_kernel_size': 3,
+            'conv_layers': 1,
+            # ---- Pooling sur la séquence GRU ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            # ---- Branche spatiale ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
         default_params['is_graph_or_node'] = default_params.pop('graph_or_node')
         model = GraphCastGRUWithAttention(**default_params)
         model_params.update(default_params)
-    
+
     elif model_name == 'graphCastGRUWithAttentionGAT':
         default_params = {
-            'num_gru_layers' : 2,
-            'in_channels' : in_dim,
+            # ---- GRU temporel ----
+            'num_gru_layers': 2,
+            'in_channels': in_dim,
+            # ---- GraphCast core (avec attention GAT) ----
             'input_dim_grid_nodes': 128,
             'input_dim_mesh_nodes': 3,
-            'input_dim_edges':4,
-            'output_dim_grid_nodes' : 128,
-            'processor_layers' : 6,
-            'hidden_layers' : 1,
-            'hidden_dim' : 128,
-            'lin_channels' : 256,
-            'end_channels' : 64,
-            'aggregation' : 'sum',
-            'norm_type' : 'LayerNorm',
-            'do_concat_trick' : False,
-            'out_channels' : out_channels,
-            'act_func' : act_func,
-            'task_type' : task_type,
-            'has_time_dim' : True,
-            'graph_or_node':graph_or_node,
-            'n_sequences' : k_days + 1,
+            'input_dim_edges': 4,
+            'output_dim_grid_nodes': 128,
+            'processor_layers': 6,
+            'hidden_layers': 1,
+            'hidden_dim': 128,
+            'lin_channels': 256,
+            'end_channels': 64,
+            'aggregation': 'sum',
+            'norm_type': 'LayerNorm',
+            'do_concat_trick': False,
+            'out_channels': out_channels,
+            'act_func': act_func,
+            'task_type': task_type,
+            'has_time_dim': True,
+            'graph_or_node': graph_or_node,
+            'n_sequences': k_days + 1,
             'return_hidden': False,
-            'attention' : "GAT",
-            'horizon': horizon
+            'attention': True,
+            'horizon': horizon,
+            'dropout': dropout,
+            # ---- Indices temporels / spatiaux ----
+            'temporal_idx': None,   # fourni via custom_model_params
+            'static_idx': None,     # fourni via custom_model_params
+            'spatialContext': False,
+            'd_channels': 64,
+            # ---- Encodeur Conv1d temporel (optionnel) ----
+            'use_temporal_conv': False,
+            'conv_channels': None,
+            'conv_kernel_size': 3,
+            'conv_layers': 1,
+            # ---- Pooling sur la séquence GRU ----
+            'use_full_sequence': True,
+            'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            # ---- Branche spatiale ----
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 128,
+            'spatial_mlp_layers': 3,
+            'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
