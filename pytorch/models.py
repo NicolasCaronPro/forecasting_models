@@ -565,6 +565,18 @@ class UClassificationActivation(torch.nn.Module):
         return torch.cat([probs, logits[..., -1:]], dim=-1)
 
 class LSTM(torch.nn.Module):
+    # --- Type annotations ---
+    temporal_norm: nn.Module
+    spatial_norm: nn.Module
+    norm_after_concat: nn.Module
+    spatial_mlp: nn.Module | None
+    encoder_spatial: nn.Module | None
+    spa_norm: nn.Module | None
+    context_layer: nn.Module | None
+    linear1: nn.Module
+    linear2: nn.Module
+    output_layer: nn.Module
+    output_activation: nn.Module
     def __init__(
         self,
         in_channels,
@@ -599,6 +611,13 @@ class LSTM(torch.nn.Module):
         spatial_hidden_channels=None,
         spatial_mlp_layers=2,
         spatial_mlp_use_bn=True,
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm=True,
+        temporal_norm_type="layernorm",
+        use_spatial_norm=True,
+        spatial_norm_type="batchnorm",
+        use_fusion_norm=False,
     ):
         super(LSTM, self).__init__()
 
@@ -710,10 +729,15 @@ class LSTM(torch.nn.Module):
         # ----------------------------
         # Normalization after temporal readout
         # ----------------------------
-        if use_layernorm:
-            self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
         else:
-            self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            self.temporal_norm = nn.Identity().to(device)
 
         self.dropout = nn.Dropout(p=dropout).to(device)
 
@@ -754,11 +778,23 @@ class LSTM(torch.nn.Module):
                 self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
                 self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
                 self.spatial_out_dim = spatial_in_dim
+
+            # Define spatial_norm
+            if use_spatial_norm:
+                if spatial_norm_type == "batchnorm":
+                    self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+                elif spatial_norm_type == "layernorm":
+                    self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+                else:
+                    raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+            else:
+                self.spatial_norm = nn.Identity().to(device)
         else:
             self.spatial_mlp = None
             self.encoder_spatial = None
             self.spa_norm = None
             self.spatial_out_dim = 0
+            self.spatial_norm = nn.Identity().to(device)
 
         # ----------------------------
         # Optional spatial context fusion
@@ -772,17 +808,17 @@ class LSTM(torch.nn.Module):
                 dropout=dropout,
                 use_sigmoid_gating=True,
                 renorm_gates=True,
-            )
+            ).to(device)
             fusion_dim = d_channels
         else:
             self.context_layer = None
             fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
 
         # Optional norm after concat / fusion
-        if use_layernorm:
+        if use_fusion_norm:
             self.norm_after_concat = nn.LayerNorm(fusion_dim).to(device)
         else:
-            self.norm_after_concat = nn.BatchNorm1d(fusion_dim).to(device)
+            self.norm_after_concat = nn.Identity().to(device)
 
         # ----------------------------
         # Head
@@ -911,17 +947,23 @@ class LSTM(torch.nn.Module):
         # LSTM over full sequence
         seq_out, _ = self.lstm(x, (h0, c0))
 
-        # Temporal readout
-        x = self._pool_temporal_sequence(seq_out)
-
-        # Norm + dropout
-        x = self.temporal_norm(x)
-        x = self.dropout(x)
+        # Temporal readout & Normalization ordering
+        if self.temporal_pool == "attn":
+            # Recurrent output -> LayerNorm -> attention pooling -> Dropout
+            seq_out = self.temporal_norm(seq_out)
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.dropout(x)
+        else:
+            # Recurrent sequence -> pooling -> LayerNorm -> Dropout
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.temporal_norm(x)
+            x = self.dropout(x)
 
         # Spatial branch / context branch
         if self.has_spatial:
             X_spa = X[:, self.spatial_idx, -1]
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
 
             if self.spatialContext and self.context_layer is not None:
                 # SpatialContextSet expects (B, K, D_stat). 
@@ -936,7 +978,7 @@ class LSTM(torch.nn.Module):
         else:
             self.last_attention_coef = None
 
-        # Optional norm after fusion
+        # Optional norm after fusion (Identity par défaut)
         x = self.norm_after_concat(x)
 
         # Head
@@ -965,7 +1007,6 @@ def _make_activation(act_func: str):
     if isinstance(act_func, str):
         return getattr(nn, act_func)()
     return act_func
-
 
 def _apply_temporal_norm(x, norm):
     """
@@ -1002,6 +1043,18 @@ def _build_mlp_block(
 
 
 class DilatedCNN(torch.nn.Module):
+    # --- Type annotations ---
+    temporal_norm: nn.Module
+    spatial_norm: nn.Module
+    norm_after_concat: nn.Module
+    spatial_mlp: nn.Module | None
+    encoder_spatial: nn.Module | None
+    spa_norm: nn.Module | None
+    context_layer: nn.Module | None
+    linear1: nn.Module
+    linear2: nn.Module
+    output_layer: nn.Module
+    output_activation: nn.Module
     def __init__(
         self,
         channels,
@@ -1037,6 +1090,13 @@ class DilatedCNN(torch.nn.Module):
         spatial_hidden_channels=128,
         spatial_mlp_layers=3,
         spatial_mlp_use_bn=True,
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm=True,
+        temporal_norm_type="batchnorm",
+        use_spatial_norm=True,
+        spatial_norm_type="batchnorm",
+        use_fusion_norm=False,
     ):
         super(DilatedCNN, self).__init__()
 
@@ -1164,10 +1224,15 @@ class DilatedCNN(torch.nn.Module):
         else:
             self.temporal_pool_layer = None
 
-        if use_layernorm:
-            self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
         else:
-            self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            self.temporal_norm = nn.Identity().to(device)
 
         self.last_temporal_attention_coef = None
         self.last_attention_coef = None
@@ -1222,11 +1287,23 @@ class DilatedCNN(torch.nn.Module):
                 self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
                 self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
                 self.spatial_out_dim = spatial_in_dim
+
+            # Define spatial_norm
+            if use_spatial_norm:
+                if spatial_norm_type == "batchnorm":
+                    self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+                elif spatial_norm_type == "layernorm":
+                    self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+                else:
+                    raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+            else:
+                self.spatial_norm = nn.Identity().to(device)
         else:
             self.spatial_mlp = None
             self.encoder_spatial = None
             self.spa_norm = None
             self.spatial_out_dim = 0
+            self.spatial_norm = nn.Identity().to(device)
 
         # ============================================================
         # Optional spatial context fusion
@@ -1258,10 +1335,10 @@ class DilatedCNN(torch.nn.Module):
             self.context_layer = None
             fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
 
-        if use_layernorm:
+        if use_fusion_norm:
             self.norm_after_concat = nn.LayerNorm(fusion_dim).to(device)
         else:
-            self.norm_after_concat = nn.BatchNorm1d(fusion_dim).to(device)
+            self.norm_after_concat = nn.Identity().to(device)
 
         # ============================================================
         # Head
@@ -1367,11 +1444,19 @@ class DilatedCNN(torch.nn.Module):
             x = self.dropout(x)
 
         # ------------------------------------------------------------
-        # Temporal readout
-        # ------------------------------------------------------------
-        x = self._temporal_pooling(x)  # (B, temporal_repr_dim)
-        x = self.temporal_norm(x)
-        x = self.dropout(x)
+        # Temporal readout & Normalization ordering
+        if self.temporal_pool == "attn":
+            # CNN output x is (B, C, L) -> LayerNorm(C) -> attention pooling -> Dropout
+            x_seq = x.transpose(1, 2)
+            x_seq = self.temporal_norm(x_seq)
+            x = x_seq.transpose(1, 2)
+            x = self._temporal_pooling(x)
+            x = self.dropout(x)
+        else:
+            # CNN output -> pooling -> LayerNorm -> Dropout
+            x = self._temporal_pooling(x)
+            x = self.temporal_norm(x)
+            x = self.dropout(x)
 
         # ------------------------------------------------------------
         # Spatial branch and fusion
@@ -1388,7 +1473,8 @@ class DilatedCNN(torch.nn.Module):
                     x_spa = self.encoder_spatial(X_spa_vec)
                     x_spa = self.spa_norm(x_spa)
                     x_spa = self.act_func(x_spa)
-
+                
+                x_spa = self.spatial_norm(x_spa) # Application de la normalisation spatiale
                 x = torch.cat((x, x_spa), dim=1)
 
             x = self.norm_after_concat(x)
@@ -1408,9 +1494,22 @@ class DilatedCNN(torch.nn.Module):
         return output, logits, hidden
 
 class GraphCastGRU(torch.nn.Module):
+    # --- Type annotations ---
+    temporal_norm: nn.Module
+    spatial_norm: nn.Module
+    norm_after_concat: nn.Module
+    spatial_mlp: nn.Module | None
+    encoder_spatial: nn.Module | None
+    spa_norm: nn.Module | None
+    context_layer: nn.Module | None
+    linear1: nn.Module
+    linear2: nn.Module
+    output_layer: nn.Module
+    output_activation: nn.Module
     def __init__(
         self,
         *,
+        device,
         # --- GRU specific parameters ---
         in_channels: int = 16,
         num_gru_layers: int = 1,
@@ -1456,6 +1555,13 @@ class GraphCastGRU(torch.nn.Module):
         spatial_hidden_channels: int = 128,
         spatial_mlp_layers: int = 3,
         spatial_mlp_use_bn: bool = True,
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm: bool = True,
+        temporal_norm_type: str = "layernorm",
+        use_spatial_norm: bool = True,
+        spatial_norm_type: str = "batchnorm",
+        use_fusion_norm: bool = False,
     ):
         """GraphCast-based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1464,6 +1570,7 @@ class GraphCastGRU(torch.nn.Module):
         the GraphCastNet (self.net).
         """
         super().__init__()
+        self.device = device
 
         # ------------------------------------------------------------------
         # Bookkeeping
@@ -1546,12 +1653,22 @@ class GraphCastGRU(torch.nn.Module):
             self.temporal_repr_dim = input_dim_grid_nodes
 
         if self.temporal_pool == "attn":
-            self.temporal_pool_layer = TemporalAttentionPooling(input_dim_grid_nodes)
+            self.temporal_pool_layer = TemporalAttentionPooling(input_dim_grid_nodes, device=device)
         else:
             self.temporal_pool_layer = None
 
-        self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim)
-        self.dropout = nn.Dropout(dropout)
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity()
+
+        self.temporal_norm = self.temporal_norm.to(device)
+        self.dropout = nn.Dropout(dropout).to(device)
 
         self.last_temporal_attention_coef = None
         self.last_attention_coef = None
@@ -1559,6 +1676,7 @@ class GraphCastGRU(torch.nn.Module):
         # ------------------------------------------------------------------
         # Spatial branch
         # ------------------------------------------------------------------
+        # Define spatial_norm
         if self.has_spatial:
             spatial_in_dim = len(self.spatial_idx)
             if spatial_hidden_channels is None:
@@ -1572,7 +1690,7 @@ class GraphCastGRU(torch.nn.Module):
                         MLPLayer(
                             in_feats=d_in,
                             out_feats=spatial_hidden_channels,
-                            device="cpu",  # will be moved via .to() later
+                            device=device,
                             activation=act_func,
                             dropout=dropout,
                             use_bn=spatial_mlp_use_bn,
@@ -1585,26 +1703,50 @@ class GraphCastGRU(torch.nn.Module):
                 self.spatial_out_dim = d_in
             else:
                 self.spatial_mlp   = None
-                self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim)
-                self.spa_norm        = nn.BatchNorm1d(spatial_in_dim)
+                self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
+                self.spa_norm        = nn.BatchNorm1d(spatial_in_dim).to(device)
                 self.spatial_out_dim = spatial_in_dim
+
+            # Define spatial_norm
+            if use_spatial_norm:
+                if spatial_norm_type == "batchnorm":
+                    self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+                elif spatial_norm_type == "layernorm":
+                    self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+                else:
+                    raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+            else:
+                self.spatial_norm = nn.Identity().to(device)
         else:
             self.spatial_mlp   = None
             self.encoder_spatial = None
             self.spa_norm        = None
             self.spatial_out_dim = 0
+            self.spatial_norm = nn.Identity().to(device)
 
         # ------------------------------------------------------------------
         # Optional spatial context fusion (before GraphCast)
         # ------------------------------------------------------------------
         if spatialContext and self.has_spatial:
-            self.context_layer = SpatialContext(
-                d_channels, self.temporal_repr_dim, 1, n_heads=4, dropout=dropout
-            )
+            self.context_layer = SpatialContextSet(
+                d_channels,
+                self.temporal_repr_dim,
+                1,
+                n_heads=4,
+                dropout=dropout,
+                use_sigmoid_gating=True,
+                renorm_gates=True,
+            ).to(device)
             net_input_dim = d_channels
         else:
             self.context_layer = None
             net_input_dim = self.temporal_repr_dim + self.spatial_out_dim
+
+        # Optional norm after fusion
+        if use_fusion_norm:
+            self.norm_after_concat = nn.LayerNorm(net_input_dim).to(device)
+        else:
+            self.norm_after_concat = nn.Identity().to(device)
 
         # ------------------------------------------------------------------
         # GraphCast core network
@@ -1712,8 +1854,17 @@ class GraphCastGRU(torch.nn.Module):
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size, device=_dev, dtype=x_gru.dtype)
         seq_out, _ = self.gru(x_gru, h0)                # (B, T, gru_size)
 
-        # Temporal pooling
-        x = self._pool_temporal_sequence(seq_out)        # (B, temporal_repr_dim)
+        # Temporal pooling & Normalization ordering
+        if self.temporal_pool == "attn":
+            # Recurrent output -> LayerNorm -> attention pooling -> Dropout
+            seq_out = self.temporal_norm(seq_out)
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.dropout(x)
+        else:
+            # Recurrent sequence -> pooling -> LayerNorm -> Dropout
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.temporal_norm(x)
+            x = self.dropout(x)
 
         # Norm + dropout
         x = self.temporal_norm(x)
@@ -1722,14 +1873,21 @@ class GraphCastGRU(torch.nn.Module):
         # Spatial branch + fusion (before GraphCast)
         if self.context_layer is not None and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
+
             if spa_repr is not None and spa_repr.dim() == 2:
                 spa_repr = spa_repr.unsqueeze(-1)        # (B, S, 1)
             x, a_s = self.context_layer(x, spa_repr)
             self.last_attention_coef = a_s
         elif self.has_spatial and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
+
             x = torch.cat((x, spa_repr), dim=1)
             self.last_attention_coef = None
+
+        # Optional norm after fusion
+        x = self.norm_after_concat(x)
 
         # GraphCast input: (1, B, dim)
         X_graphcast = x[None, :, :]
@@ -1749,150 +1907,23 @@ class GraphCastGRU(torch.nn.Module):
 
         return output, logits, hidden
 
-
-        """GraphCast‐based model preceded by a GRU that encodes the temporal dimension.
-
-        Args:
-            in_channels: Dimension of the temporal features fed to the GRU (== input_size).
-            num_gru_layers: Number of stacked GRU layers.
-            input_dim_grid_nodes: Size of the embedding produced by the GRU for each node.  Must
-                match *hidden_size* of the GRU.
-            All other parameters are identical to the original GraphCastGRU.
-        """
-        super().__init__()
-
-        # ------------------------------------------------------------------
-        # GRU — encodes the temporal axis and outputs an embedding per node
-        # ------------------------------------------------------------------
-        
-        g_cha = len(temporal_idx)
-        
-        self.gru = torch.nn.GRU(
-            input_size=g_cha + end_channels if horizon > 0 else g_cha,
-            hidden_size=input_dim_grid_nodes,
-            num_layers=num_gru_layers,
-            dropout=0.03 if num_gru_layers > 1 else 0.0,
-            batch_first=True,
-        )
-        self.gru_size = input_dim_grid_nodes
-        self.num_gru_layers = num_gru_layers
-        self.spatial_idx = static_idx
-        self.norm = torch.nn.BatchNorm1d(self.gru_size)
-        if self.spatial_idx is not None and len(self.spatial_idx) > 0:
-            self.spa_norm = torch.nn.BatchNorm1d(len(self.spatial_idx))
-        self.dropout = torch.nn.Dropout(0.03)
-        self.task_type = task_type
-        
-        self.temporal_idx = temporal_idx
-        self.spatialContext = spatialContext
-        
-        if self.spatialContext:
-            self.context_layer = SpatialContext(input_dim_grid_nodes, input_dim_grid_nodes, 1, n_heads=4, dropout=0.03)
-        
-        # ------------------------------------------------------------------
-        # GraphCast core network (unchanged)
-        # ------------------------------------------------------------------
-        self.net = GraphCastNet(
-            input_dim_grid_nodes if self.spatialContext else input_dim_grid_nodes + len(self.spatial_idx),
-            input_dim_mesh_nodes,
-            input_dim_edges,
-            output_dim_grid_nodes,
-            processor_layers,
-            hidden_layers,
-            hidden_dim,
-            aggregation,
-            norm_type,
-            do_concat_trick,
-            has_time_dim,
-        )
-
-        # ------------------------------------------------------------------
-        # Output head
-        # ------------------------------------------------------------------
-        self.linear1 = torch.nn.Linear(output_dim_grid_nodes, lin_channels)
-        self.linear2 = torch.nn.Linear(lin_channels, end_channels)
-        self.output_layer = torch.nn.Linear(end_channels, out_channels)
-
-        self.is_graph_or_node = is_graph_or_node == "graph"
-
-        self.act_func = getattr(torch.nn, act_func)()
-        self.return_hidden = return_hidden
-        self.end_channels = end_channels
-        self.horizon = horizon
-        self.out_channels = out_channels
-        self.n_sequences = n_sequences
-
-        if task_type == "classification":
-            self.output_activation = torch.nn.Softmax(dim=-1)
-        elif task_type == "binary":
-            self.output_activation = torch.nn.Sigmoid()
-        elif task_type == "uclassification":
-
-            self.output_activation = UClassificationActivation()
-        else:  # regression or custom
-            self.output_activation = torch.nn.Identity()
-
-    # Forward pass
-    # ----------------------------------------------------------------------
-    def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
-        """Args:
-            X: Tensor shaped (batch, seq_len, in_channels, n_nodes).
-        """
-        _dev = next(self.parameters()).device
-        if X.device != _dev:
-            X = X.to(_dev)
-
-        # Bring node dimension next to batch for GRU: (batch * n_nodes, seq_len, in_channels)
-        B, C_in, T = X.shape
-        
-        if hasattr(self, 'temporal_idx') and self.temporal_idx is not None and hasattr(self, 'spatial_idx'):
-            X_spa = X[:, self.spatial_idx, -1][:, :, None]
-            X = X[:, self.temporal_idx, :]
-            C_in = len(self.temporal_idx)
-            
-        if z_prev is None:
-            z_prev = torch.zeros((X.shape[0], self.end_channels, self.n_sequences), device=X.device, dtype=X.dtype)
-        else:
-            z_prev = z_prev.view(X.shape[0], self.end_channels, self.n_sequences)
-
-        if self.horizon > 0:
-            X = torch.cat((X, z_prev), dim=1)
-
-        X_for_gru = X.permute(0, 2, 1)
-        
-        h0 = torch.zeros(self.num_gru_layers, B, self.gru_size).to(X.device)
-
-        gru_out, _ = self.gru(X_for_gru, h0)  # shape: (B*N, T, hidden)
-        # Keep the last hidden state for each sequence
-        gru_last = self.norm(gru_out[:, -1, :])
-        gru_last = self.dropout(gru_last)  # (B*N, hidden == input_dim_grid_nodes)
-
-        # Head
-        if hasattr(self, 'spa_norm') and self.spatial_idx is not None and len(self.spatial_idx) > 0:
-            X_spa = self.spa_norm(X_spa)
-        if hasattr(self, 'spatialContext') and self.spatialContext:
-            X_graphcast, _ = self.context_layer(gru_last, X_spa)
-        else:
-            X_graphcast = torch.concat((gru_last, X_spa[:, :, 0]), dim=1)
-        
-        X_graphcast = X_graphcast[None, : ,:]
-            
-        # GraphCast processing
-        x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
-            
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
-        logits = self.output_layer(hidden)
-        if self.task_type == 'corn':
-            output = corn_class_probs(logits)
-        else:
-            output = self.output_activation(logits)
-        return output, logits, hidden
-
 class GraphCastGRUWithAttention(torch.nn.Module):
+    # --- Type annotations ---
+    temporal_norm: nn.Module
+    spatial_norm: nn.Module
+    norm_after_concat: nn.Module
+    spatial_mlp: nn.Module | None
+    encoder_spatial: nn.Module | None
+    spa_norm: nn.Module | None
+    context_layer: nn.Module | None
+    linear1: nn.Module
+    linear2: nn.Module
+    output_layer: nn.Module
+    output_activation: nn.Module
     def __init__(
         self,
         *,
+        device,
         # --- GRU specific parameters ---
         in_channels: int = 16,
         num_gru_layers: int = 1,
@@ -1939,6 +1970,13 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         spatial_hidden_channels: int = 128,
         spatial_mlp_layers: int = 3,
         spatial_mlp_use_bn: bool = True,
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm: bool = True,
+        temporal_norm_type: str = "layernorm",
+        use_spatial_norm: bool = True,
+        spatial_norm_type: str = "batchnorm",
+        use_fusion_norm: bool = False,
     ):
         """GraphCast-based model with attention, preceded by a GRU encoder.
 
@@ -1962,6 +2000,7 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.spatialContext = spatialContext
         self.decoder = None
         self._decoder_input = None
+        self.device = device
 
         self.temporal_idx = list(temporal_idx) if temporal_idx is not None else None
         self.spatial_idx  = list(static_idx)   if static_idx  is not None else []
@@ -2032,12 +2071,21 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.temporal_repr_dim = input_dim_grid_nodes
 
         if self.temporal_pool == "attn":
-            self.temporal_pool_layer = TemporalAttentionPooling(input_dim_grid_nodes)
+            self.temporal_pool_layer = TemporalAttentionPooling(input_dim_grid_nodes, device=device)
         else:
             self.temporal_pool_layer = None
 
-        self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim)
-        self.dropout = nn.Dropout(dropout)
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity().to(device)
+
+        self.dropout = nn.Dropout(dropout).to(device)
 
         self.last_temporal_attention_coef = None
         self.last_attention_coef = None
@@ -2080,6 +2128,17 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             self.spa_norm        = None
             self.spatial_out_dim = 0
 
+        # Define spatial_norm
+        if use_spatial_norm:
+            if spatial_norm_type == "batchnorm":
+                self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+            elif spatial_norm_type == "layernorm":
+                self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+        else:
+            self.spatial_norm = nn.Identity().to(device)
+
         # ------------------------------------------------------------------
         # GraphCast core network
         # The GRU temporal embedding (temporal_repr_dim) feeds into GraphCast.
@@ -2103,13 +2162,20 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # Optional spatial context fusion AFTER GraphCast
         # ------------------------------------------------------------------
         if spatialContext and self.has_spatial:
-            self.context_layer = SpatialContext(
-                d_channels, output_dim_grid_nodes, 1, n_heads=4, dropout=dropout
-            )
+            self.context_layer = SpatialContextSet(
+                d_channels, output_dim_grid_nodes, 1, n_heads=4, dropout=dropout,
+                use_sigmoid_gating=True, renorm_gates=True
+            ).to(device)
             head_input_dim = d_channels
         else:
             self.context_layer = None
             head_input_dim = output_dim_grid_nodes + self.spatial_out_dim
+
+        # Optional norm after fusion
+        if use_fusion_norm:
+            self.norm_after_concat = nn.LayerNorm(head_input_dim).to(device)
+        else:
+            self.norm_after_concat = nn.Identity().to(device)
 
         # ------------------------------------------------------------------
         # Output head
@@ -2200,12 +2266,18 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         h0 = torch.zeros(self.num_gru_layers, B, self.gru_size, device=_dev, dtype=x_gru.dtype)
         seq_out, _ = self.gru(x_gru, h0)                # (B, T, gru_size)
 
-        # Temporal pooling
-        x = self._pool_temporal_sequence(seq_out)        # (B, temporal_repr_dim)
+        # Temporal pooling & Normalization ordering
+        if self.temporal_pool == "attn":
+            # Recurrent output -> LayerNorm -> attention pooling -> Dropout
+            seq_out = self.temporal_norm(seq_out)
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.dropout(x)
+        else:
+            # Recurrent sequence -> pooling -> LayerNorm -> Dropout
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.temporal_norm(x)
+            x = self.dropout(x)
 
-        # Norm + dropout
-        x = self.temporal_norm(x)
-        x = self.dropout(x)
 
         # GraphCast input: (1, B, temporal_repr_dim)
         X_graphcast = x[None, :, :]
@@ -2216,14 +2288,21 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # Spatial branch + fusion (AFTER GraphCast)
         if self.context_layer is not None and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
+
             if spa_repr is not None and spa_repr.dim() == 2:
                 spa_repr = spa_repr.unsqueeze(-1)        # (B, S, 1)
             x, a_s = self.context_layer(x, spa_repr)
             self.last_attention_coef = a_s
         elif self.has_spatial and X_spa is not None:
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
+
             x = torch.cat((x, spa_repr), dim=1)
             self.last_attention_coef = None
+
+        # Optional fusion norm
+        x = self.norm_after_concat(x)
 
         # Prediction head
         x = self.act_func(self.linear1(x))

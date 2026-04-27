@@ -1028,6 +1028,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'conv_channels': None,
             'conv_kernel_size': 3,
             'conv_layers': 1,
+            
             # ---- Pooling sur la séquence GRU ----
             'use_full_sequence': True,
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Any
 import torch.nn.functional as F
 from forecasting_models.pytorch.utils import corn_class_probs
 # Import shared components from models.py
@@ -22,56 +23,88 @@ def _make_activation(name: str) -> nn.Module:
 
 
 class TemporalAttentionPooling(nn.Module):
-    def __init__(self, in_dim: int, device):
+    score: nn.Linear
+
+    def __init__(self, in_dim: int, device: Any):
         super().__init__()
         self.score = nn.Linear(in_dim, 1).to(device)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         x: (B, T, H)
         returns:
             pooled: (B, H)
             attn  : (B, T)
         """
-        attn = torch.softmax(self.score(x).squeeze(-1), dim=1)
-        pooled = torch.sum(x * attn.unsqueeze(-1), dim=1)
+        attn = F.softmax(self.score(x).squeeze(-1), dim=1)
+        pooled = (x * attn.unsqueeze(-1)).sum(dim=1)
         return pooled, attn
 
 class BetterGRU(nn.Module):
+    # --- Attributes with type hints ---
+    temporal_norm: nn.Module
+    spatial_norm: nn.Module
+    norm_after_concat: nn.Module
+    context_layer: nn.Module | None
+    spatial_mlp: nn.Module | None
+    temporal_encoder: nn.Module
+    gru: nn.Module
+    temporal_pool_layer: nn.Module
+    dropout: nn.Module
+    linear1: nn.Module
+    linear2: nn.Module
+    output_layer: nn.Module
+    output_activation: nn.Module
+    last_attention_coef: torch.Tensor | None
+    last_temporal_attention_coef: torch.Tensor | None
+    temporal_repr_dim: int
+    spatial_out_dim: int
+    encoder_spatial: nn.Module | None
+    spa_norm: nn.Module | None
+    act_func1: nn.Module
+    act_func2: nn.Module
+
     def __init__(
         self,
-        in_channels,
-        gru_size,
-        hidden_channels,
-        end_channels,
-        n_sequences,
-        device,
-        act_func='ReLU',
-        task_type='regression',
-        dropout=0.0,
-        num_layers=1,
-        return_hidden=False,
-        out_channels=None,
-        use_layernorm=False,
-        horizon=0,
-        temporal_idx=None,
-        static_idx=None,
-        spatialContext=False,
-        d_channels=16,
+        in_channels: int,
+        gru_size: int,
+        hidden_channels: int,
+        end_channels: int,
+        n_sequences: int,
+        device: str | torch.device,
+        act_func: str = 'ReLU',
+        task_type: str = 'regression',
+        dropout: float = 0.0,
+        num_layers: int = 1,
+        return_hidden: bool = False,
+        out_channels: int | None = None,
+        use_layernorm: bool = False,
+        horizon: int = 0,
+        temporal_idx: list[int] | None = None,
+        static_idx: list[int] | None = None,
+        spatialContext: bool = False,
+        d_channels: int = 16,
 
         # ---- New optional improvements (all removable) ----
-        use_temporal_conv=True,
-        conv_channels=None,
-        conv_kernel_size=3,
-        conv_layers=1,
+        use_temporal_conv: bool = True,
+        conv_channels: int | None = None,
+        conv_kernel_size: int = 3,
+        conv_layers: int = 1,
 
-        use_full_sequence=True,
-        temporal_pool="attn",   # {"last", "mean", "max", "meanmax", "attn"}
+        use_full_sequence: bool = True,
+        temporal_pool: str = "attn",   # {"last", "mean", "max", "meanmax", "attn"}
 
-        use_spatial_mlp=True,
-        spatial_hidden_channels=None,
-        spatial_mlp_layers=2,
-        spatial_mlp_use_bn=True,
+        use_spatial_mlp: bool = True,
+        spatial_hidden_channels: int | None = None,
+        spatial_mlp_layers: int = 2,
+        spatial_mlp_use_bn: bool = True,
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm: bool = True,
+        temporal_norm_type: str = "layernorm",
+        use_spatial_norm: bool = True,
+        spatial_norm_type: str = "batchnorm",
+        use_fusion_norm: bool = False,
     ):
         super(BetterGRU, self).__init__()
 
@@ -179,15 +212,20 @@ class BetterGRU(nn.Module):
         if self.temporal_pool == "attn":
             self.temporal_pool_layer = TemporalAttentionPooling(gru_size, device=device)
         else:
-            self.temporal_pool_layer = None
+            self.temporal_pool_layer = nn.Identity()
 
         # ----------------------------
         # Normalization after temporal readout
         # ----------------------------
-        if use_layernorm:
-            self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
         else:
-            self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            self.temporal_norm = nn.Identity().to(device)
 
         self.dropout = nn.Dropout(p=dropout).to(device)
 
@@ -228,11 +266,23 @@ class BetterGRU(nn.Module):
                 self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
                 self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
                 self.spatial_out_dim = spatial_in_dim
+
+            # Define spatial_norm
+            if use_spatial_norm:
+                if spatial_norm_type == "batchnorm":
+                    self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+                elif spatial_norm_type == "layernorm":
+                    self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+                else:
+                    raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+            else:
+                self.spatial_norm = nn.Identity().to(device)
         else:
             self.spatial_mlp = None
             self.encoder_spatial = None
             self.spa_norm = None
             self.spatial_out_dim = 0
+            self.spatial_norm = nn.Identity().to(device)
 
         # ----------------------------
         # Optional spatial context fusion
@@ -254,17 +304,19 @@ class BetterGRU(nn.Module):
             fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
 
         # Optional norm after concat / fusion
-        if use_layernorm:
+        if use_fusion_norm:
             self.norm_after_concat = nn.LayerNorm(fusion_dim).to(device)
         else:
-            self.norm_after_concat = nn.BatchNorm1d(fusion_dim).to(device)
+            self.norm_after_concat = nn.Identity().to(device)
 
         # ----------------------------
         # Head
         # ----------------------------
         self.linear1 = nn.Linear(fusion_dim, hidden_channels).to(device)
         self.linear2 = nn.Linear(hidden_channels, end_channels).to(device)
-        self.output_layer = nn.Linear(end_channels, out_channels).to(device)
+        # Handle out_channels fallback
+        final_out = out_channels if out_channels is not None else 1
+        self.output_layer = nn.Linear(end_channels, final_out).to(device)
 
         # Neutral init on final output layer
         print("Applying custom neutral initialization to BetterGRU output layer.")
@@ -309,20 +361,21 @@ class BetterGRU(nn.Module):
 
         return x
 
-    def _process_spatial(self, X_spa):
-        """
-        X_spa: (B, S)
-        returns spatial representation
-        """
+    def _process_spatial(self, X_spa: torch.Tensor) -> torch.Tensor | None:
         if not self.has_spatial:
             return None
 
-        if self.use_spatial_mlp:
-            return self.spatial_mlp(X_spa)
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
+            if self.spa_norm is not None:
+                y = self.spa_norm(y)
         else:
-            X_spa = self.encoder_spatial(X_spa)
-            X_spa = self.spa_norm(X_spa)
-            return X_spa
+            return None
+
+        y = self.spatial_norm(y)
+        return y
 
     def forward(self, X, edge_index=None, graphs=None, z_prev=None):
         """
@@ -376,16 +429,23 @@ class BetterGRU(nn.Module):
         # GRU over full sequence
         seq_out, _ = self.gru(x, h0)
 
-        # Temporal readout
-        x = self._pool_temporal_sequence(seq_out)
-
-        # Norm + dropout
-        x = self.temporal_norm(x)
-        x = self.dropout(x)
+        # Temporal readout & Normalization ordering
+        if self.temporal_pool == "attn":
+            # Recurrent sequence -> LayerNorm -> attention pooling -> Dropout
+            # Note: temporal_norm must be LayerNorm or Identity for sequence normalization
+            seq_out = self.temporal_norm(seq_out)
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.dropout(x)
+        else:
+            # Recurrent sequence -> pooling -> LayerNorm -> Dropout
+            x = self._pool_temporal_sequence(seq_out)
+            x = self.temporal_norm(x)
+            x = self.dropout(x)
 
         # Spatial branch / context branch
         if self.has_spatial:
             spa_repr = self._process_spatial(X_spa)
+            spa_repr = self.spatial_norm(spa_repr) # Application de la normalisation spatiale
 
             if self.spatialContext and self.context_layer is not None:
                 x, a_s = self.context_layer(x, spa_repr)
@@ -396,7 +456,7 @@ class BetterGRU(nn.Module):
         else:
             self.last_attention_coef = None
 
-        # Optional norm after fusion
+        # Optional norm after fusion (Identity par défaut)
         x = self.norm_after_concat(x)
 
         # Head
