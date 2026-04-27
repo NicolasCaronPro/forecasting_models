@@ -1228,4 +1228,10 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
     else:
         raise ValueError(f"Modèle '{model_name}' non reconnu.")
     
+    print(f'\n' + '='*50)
+    print(f'[MODEL CONFIG] {model_name}')
+    for k, v in model_params.items():
+        print(f'  {k}: {v}')
+    print('='*50 + '\n')
+
     return model, model_params
