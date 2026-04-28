@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Any
+from typing import Any, Union, Optional
 import torch.nn.functional as F
 from forecasting_models.pytorch.utils import corn_class_probs
 # Import shared components from models.py
@@ -20,6 +20,19 @@ def _make_activation(name: str) -> nn.Module:
         return nn.LeakyReLU()
     else:
         raise ValueError(f"Unsupported activation: {name}")
+
+
+def _make_head_norm(norm_type: str, dim: int, device):
+    norm_type = norm_type.lower()
+
+    if norm_type == "batchnorm":
+        return nn.BatchNorm1d(dim).to(device)
+    elif norm_type == "layernorm":
+        return nn.LayerNorm(dim).to(device)
+    elif norm_type in {"none", "identity"}:
+        return nn.Identity().to(device)
+    else:
+        raise ValueError(f"Unsupported head norm type: {norm_type}")
 
 
 class TemporalAttentionPooling(nn.Module):
@@ -45,8 +58,8 @@ class BetterGRU(nn.Module):
     temporal_norm: nn.Module
     spatial_norm: nn.Module
     norm_after_concat: nn.Module
-    context_layer: nn.Module | None
-    spatial_mlp: nn.Module | None
+    context_layer: Optional[nn.Module]
+    spatial_mlp: Optional[nn.Module]
     temporal_encoder: nn.Module
     gru: nn.Module
     temporal_pool_layer: nn.Module
@@ -55,14 +68,15 @@ class BetterGRU(nn.Module):
     linear2: nn.Module
     output_layer: nn.Module
     output_activation: nn.Module
-    last_attention_coef: torch.Tensor | None
-    last_temporal_attention_coef: torch.Tensor | None
+    last_attention_coef: Optional[torch.Tensor]
+    last_temporal_attention_coef: Optional[torch.Tensor]
     temporal_repr_dim: int
     spatial_out_dim: int
-    encoder_spatial: nn.Module | None
-    spa_norm: nn.Module | None
-    act_func1: nn.Module
-    act_func2: nn.Module
+    encoder_spatial: Optional[nn.Module]
+    spa_norm: Optional[nn.Module]
+    head_norm1: nn.Module
+    head_act1: nn.Module
+    head_dropout1: nn.Module
 
     def __init__(
         self,
@@ -71,23 +85,23 @@ class BetterGRU(nn.Module):
         hidden_channels: int,
         end_channels: int,
         n_sequences: int,
-        device: str | torch.device,
+        device: Union[str, torch.device],
         act_func: str = 'ReLU',
         task_type: str = 'regression',
         dropout: float = 0.0,
         num_layers: int = 1,
         return_hidden: bool = False,
-        out_channels: int | None = None,
+        out_channels: Optional[int] = None,
         use_layernorm: bool = False,
         horizon: int = 0,
-        temporal_idx: list[int] | None = None,
-        static_idx: list[int] | None = None,
+        temporal_idx: Optional[list[int]] = None,
+        static_idx: Optional[list[int]] = None,
         spatialContext: bool = False,
         d_channels: int = 16,
 
         # ---- New optional improvements (all removable) ----
         use_temporal_conv: bool = False,
-        conv_channels: int | None = None,
+        conv_channels: Optional[int] = None,
         conv_kernel_size: int = 3,
         conv_layers: int = 1,
 
@@ -95,7 +109,7 @@ class BetterGRU(nn.Module):
         temporal_pool: str = "attn",   # {"last", "mean", "max", "meanmax", "attn"}
 
         use_spatial_mlp: bool = True,
-        spatial_hidden_channels: int | None = None,
+        spatial_hidden_channels: Optional[int] = None,
         spatial_mlp_layers: int = 2,
         spatial_mlp_use_bn: bool = True,
 
@@ -105,6 +119,10 @@ class BetterGRU(nn.Module):
         use_spatial_norm: bool = True,
         spatial_norm_type: str = "batchnorm",
         use_fusion_norm: bool = False,
+
+        # ---- Head normalization ----
+        use_head_norm: bool = True,
+        head_norm_type: str = "batchnorm",
     ):
         super(BetterGRU, self).__init__()
 
@@ -313,6 +331,15 @@ class BetterGRU(nn.Module):
         # Head
         # ----------------------------
         self.linear1 = nn.Linear(fusion_dim, hidden_channels).to(device)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, hidden_channels, device)
+            if use_head_norm else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
         self.linear2 = nn.Linear(hidden_channels, end_channels).to(device)
         # Handle out_channels fallback
         final_out = out_channels if out_channels is not None else 1
@@ -323,10 +350,6 @@ class BetterGRU(nn.Module):
         torch.nn.init.normal_(self.output_layer.weight, mean=0.0, std=0.001)
         if self.output_layer.bias is not None:
             torch.nn.init.zeros_(self.output_layer.bias)
-
-        # Separate activation instances
-        self.act_func1 = _make_activation(act_func)
-        self.act_func2 = _make_activation(act_func)
 
         # Keep original output behavior unchanged
         if task_type == 'classification':
@@ -361,7 +384,7 @@ class BetterGRU(nn.Module):
 
         return x
 
-    def _process_spatial(self, X_spa: torch.Tensor) -> torch.Tensor | None:
+    def _process_spatial(self, X_spa: torch.Tensor) -> Optional[torch.Tensor]:
         if not self.has_spatial:
             return None
 
@@ -423,7 +446,7 @@ class BetterGRU(nn.Module):
             device=self.device,
             dtype=x.dtype
         )
-
+        
         # GRU over full sequence
         seq_out, _ = self.gru(x, h0)
 
@@ -453,12 +476,13 @@ class BetterGRU(nn.Module):
         else:
             self.last_attention_coef = None
 
-        # Optional norm after fusion (Identity par défaut)
         # Head
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
 
-        # Head
-        x = self.act_func1(self.linear1(x))
-        hidden = self.act_func2(self.linear2(x))
+        hidden = self.linear2(x)
         logits = self.output_layer(hidden)
 
         # Output behavior unchanged

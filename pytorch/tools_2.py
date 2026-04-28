@@ -315,8 +315,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
             # ---- Branche spatiale (MLP vs linear simple) ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -358,8 +358,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
             # ---- Branche spatiale (MLP vs linear simple) ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -425,8 +425,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
             # ---- Branche spatiale (MLP vs linear simple) ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,  # = spatial_in_dim si None
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,  # = spatial_in_dim si None
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -621,8 +621,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
             # ---- Branche spatiale ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -945,6 +945,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'in_channels': in_dim,
             # ---- GraphCast core ----
             'input_dim_grid_nodes': 128,
+            'device': device,
             'input_dim_mesh_nodes': 3,
             'input_dim_edges': 4,
             'output_dim_grid_nodes': 128,
@@ -980,8 +981,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -997,6 +998,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'in_channels': in_dim,
             # ---- GraphCast core (avec attention Transformer) ----
             'input_dim_grid_nodes': 128,
+            'device': device,
             'input_dim_mesh_nodes': 3,
             'input_dim_edges': 4,
             'output_dim_grid_nodes': 128,
@@ -1034,8 +1036,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:
@@ -1087,8 +1089,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
             'use_spatial_mlp': True,
-            'spatial_hidden_channels': 128,
-            'spatial_mlp_layers': 3,
+            'spatial_hidden_channels': 64,
+            'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
         }
         if custom_model_params is not None:

@@ -17,6 +17,7 @@ except ImportError:
     itransformer = None
     print("Warning: itransformer module could not be loaded due to missing dependencies (e.g., reformer_pytorch).")
 from forecasting_models.pytorch.utils import corn_class_probs
+from typing import Union, Optional
 
 def _make_activation(name: str) -> nn.Module:
     name = name.lower()
@@ -32,6 +33,19 @@ def _make_activation(name: str) -> nn.Module:
         return nn.LeakyReLU()
     else:
         raise ValueError(f"Unsupported activation: {name}")
+
+
+def _make_head_norm(norm_type: str, dim: int, device):
+    norm_type = norm_type.lower()
+
+    if norm_type == "batchnorm":
+        return nn.BatchNorm1d(dim).to(device)
+    elif norm_type == "layernorm":
+        return nn.LayerNorm(dim).to(device)
+    elif norm_type in {"none", "identity"}:
+        return nn.Identity().to(device)
+    else:
+        raise ValueError(f"Unsupported head norm type: {norm_type}")
 
 
 class TemporalAttentionPooling(nn.Module):
@@ -349,14 +363,7 @@ class NetMLP(nn.Module):
             dropout=dropout,
             use_bn=use_bn,
         )
-        self.layer4 = MLPLayer(
-            hidden_dim[1],
-            end_channels,
-            device=device,
-            activation=activation,
-            dropout=dropout,
-            use_bn=use_bn,
-        )
+        self.layer4 = nn.Linear(hidden_dim[1], end_channels).to(device)
 
         self.layer2 = nn.Linear(end_channels, output_channels).to(device)
         self.soft = nn.Softmax(dim=1)
@@ -569,10 +576,10 @@ class LSTM(torch.nn.Module):
     temporal_norm: nn.Module
     spatial_norm: nn.Module
     norm_after_concat: nn.Module
-    spatial_mlp: nn.Module | None
-    encoder_spatial: nn.Module | None
-    spa_norm: nn.Module | None
-    context_layer: nn.Module | None
+    spatial_mlp: nn.Module
+    encoder_spatial: nn.Module
+    spa_norm: nn.Module
+    context_layer: nn.Module
     linear1: nn.Module
     linear2: nn.Module
     output_layer: nn.Module
@@ -618,6 +625,10 @@ class LSTM(torch.nn.Module):
         use_spatial_norm=True,
         spatial_norm_type="batchnorm",
         use_fusion_norm=False,
+
+        # ---- Head normalization ----
+        use_head_norm=True,
+        head_norm_type="batchnorm",
     ):
         super(LSTM, self).__init__()
 
@@ -824,6 +835,15 @@ class LSTM(torch.nn.Module):
         # Head
         # ----------------------------
         self.linear1 = nn.Linear(fusion_dim, hidden_channels).to(device)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, hidden_channels, device)
+            if use_head_norm else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
         self.linear2 = nn.Linear(hidden_channels, end_channels).to(device)
         self.output_layer = nn.Linear(end_channels, out_channels).to(device)
 
@@ -832,10 +852,6 @@ class LSTM(torch.nn.Module):
         torch.nn.init.normal_(self.output_layer.weight, mean=0.0, std=0.001)
         if self.output_layer.bias is not None:
             torch.nn.init.zeros_(self.output_layer.bias)
-
-        # Separate activation instances
-        self.act_func1 = _make_activation(act_func)
-        self.act_func2 = _make_activation(act_func)
 
         # Keep original output behavior unchanged
         if task_type == 'classification':
@@ -983,8 +999,12 @@ class LSTM(torch.nn.Module):
         # Prediction head
 
         # Head
-        x = self.act_func1(self.linear1(x))
-        hidden = self.act_func2(self.linear2(x))
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
+
+        hidden = self.linear2(x)
         logits = self.output_layer(hidden)
 
         # Output behavior unchanged
@@ -1048,10 +1068,10 @@ class DilatedCNN(torch.nn.Module):
     temporal_norm: nn.Module
     spatial_norm: nn.Module
     norm_after_concat: nn.Module
-    spatial_mlp: nn.Module | None
-    encoder_spatial: nn.Module | None
-    spa_norm: nn.Module | None
-    context_layer: nn.Module | None
+    spatial_mlp: nn.Module 
+    encoder_spatial: nn.Module 
+    spa_norm: nn.Module 
+    context_layer: nn.Module 
     linear1: nn.Module
     linear2: nn.Module
     output_layer: nn.Module
@@ -1098,6 +1118,10 @@ class DilatedCNN(torch.nn.Module):
         use_spatial_norm=True,
         spatial_norm_type="batchnorm",
         use_fusion_norm=False,
+
+        # ---- Head normalization ----
+        use_head_norm=True,
+        head_norm_type="batchnorm",
     ):
         super(DilatedCNN, self).__init__()
 
@@ -1346,6 +1370,15 @@ class DilatedCNN(torch.nn.Module):
         # Head
         # ============================================================
         self.linear1 = nn.Linear(fusion_dim, lin_channels).to(device)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, lin_channels, device)
+            if use_head_norm else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
         self.linear2 = nn.Linear(lin_channels, end_channels).to(device)
         self.output_layer = nn.Linear(end_channels, out_channels).to(device)
 
@@ -1359,6 +1392,21 @@ class DilatedCNN(torch.nn.Module):
             self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
+            
+    def _process_spatial(self, X_spa):
+        """X_spa: (B, S) → (B, spatial_out_dim)"""
+        if not self.has_spatial:
+            return None
+        
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
+        else:
+            return None
+
+        y = self.spatial_norm(y)
+        return y
 
     def _temporal_pooling(self, x):
         """
@@ -1464,15 +1512,7 @@ class DilatedCNN(torch.nn.Module):
         # Spatial branch and fusion
         # ------------------------------------------------------------
         if self.has_spatial:
-            X_spa_vec = x[:, self.spatial_idx, -1]  # (B, S)
-            X_spa_ctx = X_spa_vec[:, :, None]       # (B, S, 1)
-
             if self.context_layer is not None:
-                # If we have a context layer (SpatialContextSet), use it.
-                # However, our context_layer usually expects non-normalized raw spatial context.
-                # Or does it expect normalized? 
-                # BetterGRU uses spa_repr (normalized) in context_layer.
-                # Let's align on BetterGRU pattern.
                 spa_repr = self._process_spatial(X_spa_vec)
                 if spa_repr is not None:
                     if spa_repr.dim() == 2:
@@ -1493,8 +1533,12 @@ class DilatedCNN(torch.nn.Module):
         # ------------------------------------------------------------
         # Prediction head
         # ------------------------------------------------------------
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
+
+        hidden = self.linear2(x)
         logits = self.output_layer(hidden)
 
         if self.task_type == "corn":
@@ -1509,10 +1553,10 @@ class GraphCastGRU(torch.nn.Module):
     temporal_norm: nn.Module
     spatial_norm: nn.Module
     norm_after_concat: nn.Module
-    spatial_mlp: nn.Module | None
-    encoder_spatial: nn.Module | None
-    spa_norm: nn.Module | None
-    context_layer: nn.Module | None
+    spatial_mlp: nn.Module 
+    encoder_spatial: nn.Module 
+    spa_norm: nn.Module 
+    context_layer: nn.Module 
     linear1: nn.Module
     linear2: nn.Module
     output_layer: nn.Module
@@ -1949,10 +1993,10 @@ class GraphCastGRUWithAttention(torch.nn.Module):
     temporal_norm: nn.Module
     spatial_norm: nn.Module
     norm_after_concat: nn.Module
-    spatial_mlp: nn.Module | None
-    encoder_spatial: nn.Module | None
-    spa_norm: nn.Module | None
-    context_layer: nn.Module | None
+    spatial_mlp: nn.Module 
+    encoder_spatial: nn.Module 
+    spa_norm: nn.Module 
+    context_layer: nn.Module 
     linear1: nn.Module
     linear2: nn.Module
     output_layer: nn.Module

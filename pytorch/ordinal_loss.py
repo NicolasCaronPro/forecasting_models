@@ -7896,37 +7896,77 @@ def check_finite(name, x):
 class ClusterCLMBinnedTransitionLoss(nn.Module):
     def __init__(
         self,
+
+        # ============================================================
+        # General
+        # ============================================================
         num_classes: int,
-        eps=1e-4,
+        sigma:float,
+        id: int = 0,
+        eps: float = 1e-4,
+
+        # ============================================================
+        # Group structure
+        # ============================================================
+        nclusters: int = 1,
+        ndepartements: int = 1,
+        clustersequaldept: bool = False,
+
+        # ============================================================
+        # Ordinal threshold model
+        # ============================================================
+        alphatype: str = "department",
+        learngains: bool = False,
+        gainsfloor: float = 2.5,
+
+        # ============================================================
+        # Monotonic transition loss
+        # ============================================================
         wk=None,
-        learngains=False,
-        gainsfloor=2.5,
-        wkdecay="None",
-        wkpower=2.06,
-        wklambda=0.3495008616795649,
-        gamma=5.0,
-        taugate=0.05,
-        gatetemp=0.11,
-        wfocal=1.76,
-        wmu0=1.94,
-        wmid=0.2,
-        wtrans=1.0,
-        fgamma=1.03,
-        falpha=0.89,
-        massupdate=0.5,
-        mumomentum=0.99,
-        mulambdag=0.18,
-        mulambdac=1.61,
-        mulambdad=0.75,
-        id=0,
-        nclusters=1,
-        ndepartements=1,
-        scaleagg="department",
-        alphatype="department",
-        clustersequaldept=False,
+        wkdecay: str = "None",
+        wkpower: float = 2.06,
+        wklambda: float = 0.35,
+        wtrans: float = 1.0,
+
+        # ============================================================
+        # Soft class-center estimation
+        # ============================================================
+        gamma: float = 5.0,
+        taugate: float = 0.05,
+        gatetemp: float = 0.11,
+        massupdate: float = 0.5,
+
+        # ============================================================
+        # EMA priors for class centers
+        # ============================================================
+        mumomentum: float = 0.95,
+        mulambdag: float = 0.18,
+        mulambdac: float = 1.61,
+        mulambdad: float = 0.75,
         muinit=None,
+
+        # ============================================================
+        # Delta scaling / normalization
+        # ============================================================
+        scaleagg: str = "department",
         scaleinit=None,
-    ):
+
+        # ============================================================
+        # Coverage loss
+        # ============================================================
+        coverageagg: str = "global",          # "cluster", "department", "global"
+        coveragedistance: str = "cdf_l2",     # "cdf_l2", "cdf_l1", "cdf_linf", "l2"
+        coveragewarmupupdates: int = 0,
+        wcoverage: float = 1.73,
+        shift: float = 0.0,
+
+        # ============================================================
+        # Auxiliary regularization
+        # ============================================================
+        wmu0: float = 1.94,
+        wmid: float = 0.2,
+
+        ):
         super().__init__()
 
         self.C = int(num_classes)
@@ -7940,12 +7980,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.t = 0.0
         self.eps = float(eps)
 
-        self.wfocal = float(wfocal)
+        self.wcoverage = float(wcoverage)
         self.wmu0 = float(wmu0)
         self.wtrans = float(wtrans)
-
-        self.fgamma = float(fgamma)
-        self.falpha = float(falpha)
 
         self.gamma = float(gamma)
         self.taugate = float(taugate)
@@ -7955,6 +7992,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.mu_lambda_g = float(mulambdag)
         self.mu_lambda_c = float(mulambdac)
         self.mu_lambda_d = float(mulambdad)
+        
+        self.sigma = sigma
         
         if clustersequaldept:
             self.mu_lambda_c = 0
@@ -8055,15 +8094,81 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                     f"scaleinit shape {tuple(_sc.shape)} != {tuple(self.delta_scale_ema.shape)}"
                 )
 
-        self.scale_momentum = 0.99
+        self.scale_momentum = mumomentum
         self.scale_min = 1e-3
         self.scale_max = 1e3
 
         self.tau_loss = 1.5
-        self.loss_ema_momentum = 0.99
+        self.loss_ema_momentum = mumomentum
         self.register_buffer(
             "loss_ema",
             torch.zeros(_buf_size, dtype=torch.float32)
+        )
+        
+        # --------------------------------------------------
+        # Coverage distributionnelle
+        # --------------------------------------------------
+        self.wcoverage = float(wcoverage) if wcoverage is not None else float(wfocal)
+        self.coverage_momentum = float(mumomentum)
+        self.coverage_warmup_updates = int(coveragewarmupupdates)
+        self.coverage_distance = str(coveragedistance)
+        self.coverageagg = str(coverageagg)
+        self.shift = shift
+
+        if self.coverage_distance not in {"cdf_l2", "cdf_l1", "cdf_linf", "l2"}:
+            raise ValueError(
+                "coveragedistance must be one of "
+                "{'cdf_l2', 'cdf_l1', 'cdf_linf', 'l2'}"
+            )
+
+        if self.coverageagg not in {"cluster", "department", "global"}:
+            raise ValueError(
+                "coverageagg must be one of {'cluster', 'department', 'global'}"
+            )
+
+        self.register_buffer(
+            "coverage_target_global",
+            torch.full((self.C,), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_target_cluster",
+            torch.full((_buf_size, self.C), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_target_departement",
+            torch.full((_dept_buf_size, self.C), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_pred_ema_cluster",
+            torch.full((_buf_size, self.C), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_pred_ema_departement",
+            torch.full((_dept_buf_size, self.C), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_pred_ema_global",
+            torch.full((self.C,), float("nan"), dtype=torch.float32),
+        )
+
+        self.register_buffer(
+            "coverage_update_count_cluster",
+            torch.zeros((_buf_size,), dtype=torch.long),
+        )
+
+        self.register_buffer(
+            "coverage_update_count_departement",
+            torch.zeros((_dept_buf_size,), dtype=torch.long),
+        )
+
+        self.register_buffer(
+            "coverage_update_count_global",
+            torch.zeros((), dtype=torch.long),
         )
 
     def _build_wk_monotone(self):
@@ -8621,6 +8726,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
     def forward(self, score, y_cont, clusters_ids, departement_ids, sample_weight=None):
         s = score.view(-1)
         y = y_cont.view(-1).to(device=s.device)
+        
+        s = s / self.sigma
+        y = y / self.sigma
 
         check_finite("score", s)
         check_finite("y_cont", y_cont)
@@ -8814,16 +8922,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             check_finite("deltas_after_scaling", deltas)
             check_finite("delta_scale_ema", self.delta_scale_ema)
             
-            #print(f'############### Analyse for pair k {pairs} ################')
-            #print('margins:', margins)
-            
-            #print('mu active:', mu_active)
-            
-            #print('Deltas stats')
-            #print(deltas)
-            #print(-deltas)
-            #print(F.softplus(-deltas))
-            
             MEDk = s.new_tensor(0.0)
             MINk = s.new_tensor(0.0)
 
@@ -8831,8 +8929,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             loss_min = 0.0
             
             loss_neg = F.softplus(-deltas).mean(dim=0)
-            
-            #print(f'Loss obtained : {loss_neg}')
 
             check_finite("loss_neg", loss_neg)
             check_finite("MEDk", MEDk)
@@ -8900,37 +8996,22 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.epoch_stats["mass_active"].append(ma_full.detach().cpu().numpy())
 
         transition_loss = loss / wsum.clamp_min(1e-6)
-        #print('wsum:', wsum.clamp_min(1e-6))
-        #print('transition_loss:', transition_loss)
-        target_bin = (y > 0).to(dtype=s.dtype)
-        prob_fire = (1.0 - probs[:, 0]).clamp(self.eps, 1.0 - self.eps)
-        p_t = torch.where(target_bin > 0.5, prob_fire, 1.0 - prob_fire)
-        alpha_t = torch.where(
-            target_bin > 0.5,
-            torch.full_like(p_t, self.falpha),
-            torch.full_like(p_t, 1.0 - self.falpha)
+        
+        # --------------------------------------------------
+        # Coverage loss à la place de la focal loss
+        # --------------------------------------------------
+        coverage_loss = self._coverage_loss(
+            probs=probs,
+            cluster_slot_ids=cluster_slot_ids,
+            dept_slot_ids=dept_slot_ids,
+            sample_weight=sw,
         )
 
-        focal_weight = alpha_t * (1.0 - p_t).pow(self.fgamma)
-        focal_ce = -torch.log(p_t)
-        
-        check_finite("prob_fire", prob_fire)
-        check_finite("p_t", p_t)
-        check_finite("focal_ce", focal_ce)
-        assert (p_t > 0).all(), "p_t contains zeros -> log instability"
-        
-        if sw is not None:
-            sw_norm = sw / sw.sum().clamp_min(1e-6) * sw.numel()
-            focal_loss = (focal_weight * focal_ce * sw_norm).mean()
-        else:
-            focal_loss = (focal_weight * focal_ce).mean()
-            
-        #focal_loss = F.mse_loss(score, y_cont)
+        check_finite("coverage_loss", coverage_loss)
 
-        if "focal" not in self.epoch_stats:
-            self.epoch_stats["focal"] = []
-        self.epoch_stats["focal"].append(focal_loss.item())
-
+        if "coverage" not in self.epoch_stats:
+            self.epoch_stats["coverage"] = []
+        self.epoch_stats["coverage"].append(float(coverage_loss.detach().cpu().item()))
         if "transition" not in self.epoch_stats:
             self.epoch_stats["transition"] = []
         self.epoch_stats["transition"].append(transition_loss.item())
@@ -8952,13 +9033,15 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.epoch_stats["mu0_term"].append(mu0_term.item())
 
         check_finite("transition_loss", transition_loss)
-        check_finite("focal_loss", focal_loss)
+        check_finite("focal_loss", coverage_loss)
         check_finite("mu0_term", mu0_term)
+        check_finite("lmid", Lmid)
 
         try:
+            
             total_loss = \
                 self.wtrans * transition_loss \
-                + self.wfocal * focal_loss \
+                + self.wcoverage * coverage_loss \
                 + self.wmu0 * mu0_term \
                 + self.wmid * Lmid
                 
@@ -8970,7 +9053,13 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             print("scale:", self.delta_scale_ema)
             raise e
 
-        return total_loss
+        return {
+                "total_loss": total_loss,
+                "trans": transition_loss,
+                "coverage": coverage_loss,
+                "mu0_term": mu0_term,
+                "lmid": Lmid,
+            }
 
     def get_learnable_parameters(self):
         params = {"alpha": self.alpha}
@@ -8985,6 +9074,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
     @torch.no_grad()
     def score_to_class(self, scores: torch.Tensor, clusters_ids: torch.Tensor = None, departement_ids: torch.Tensor = None) -> torch.Tensor:
         s = scores.detach().to(dtype=self.alpha.dtype).flatten().unsqueeze(1)
+        s = s / self.sigma
+        
         device = s.device
 
         thr = self._compute_thresholds().detach().to(device=device)
@@ -9050,7 +9141,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             payload["mu"] = np.mean(mu_stack, axis=0)
 
         if hasattr(self, "epoch_stats"):
-            for _lkey in ("transition", "focal"):
+            for _lkey in ("transition", "coverage"):
                 vals = self.epoch_stats.get(_lkey, [])
                 if vals:
                     payload[_lkey] = [float(np.mean(vals))]
@@ -9070,6 +9161,745 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             payload["mass_active"] = np.max(ma_stack, axis=0)
 
         return [("ordinal_params", DictWrapper(payload))]
+    
+        # ============================================================
+    # Coverage target computation
+    # ============================================================
+
+    @staticmethod
+    def _normalize_distribution_np(x, eps=1e-8):
+        x = np.asarray(x, dtype=np.float64)
+        x = np.clip(x, 0.0, None)
+        s = float(x.sum())
+        if s <= eps:
+            return np.ones_like(x, dtype=np.float64) / float(len(x))
+        return x / s
+
+
+    def _shift_distribution_np(self, dist, shift: float):
+        """
+        Décale une distribution ordinale vers la droite ou vers la gauche.
+
+        shift > 0 : pousse la masse vers les classes plus hautes.
+        shift < 0 : pousse la masse vers les classes plus basses.
+
+        Exemple :
+            shift=0.25 : 75% reste sur la classe c, 25% va vers c+1.
+        """
+        dist = self._normalize_distribution_np(dist, eps=self.eps)
+
+        shifted = np.zeros_like(dist, dtype=np.float64)
+
+        for c in range(self.C):
+            mass = dist[c]
+            pos = float(c) + float(shift)
+
+            if pos <= 0.0:
+                shifted[0] += mass
+
+            elif pos >= float(self.C - 1):
+                shifted[self.C - 1] += mass
+
+            else:
+                low = int(math.floor(pos))
+                high = low + 1
+
+                w_high = pos - float(low)
+                w_low = 1.0 - w_high
+
+                shifted[low] += mass * w_low
+                shifted[high] += mass * w_high
+
+        return self._normalize_distribution_np(shifted, eps=self.eps)
+
+
+    def _shift_distribution_torch(self, dist: torch.Tensor, shift: float):
+        """
+        Version torch du shift ordinal, utilisée si besoin pendant le training.
+        """
+        dist = dist.clamp_min(0.0)
+        dist = dist / dist.sum().clamp_min(self.eps)
+
+        shifted = torch.zeros_like(dist)
+
+        for c in range(self.C):
+            mass = dist[c]
+            pos = float(c) + float(shift)
+
+            if pos <= 0.0:
+                shifted[0] = shifted[0] + mass
+
+            elif pos >= float(self.C - 1):
+                shifted[self.C - 1] = shifted[self.C - 1] + mass
+
+            else:
+                low = int(math.floor(pos))
+                high = low + 1
+
+                w_high = pos - float(low)
+                w_low = 1.0 - w_high
+
+                shifted[low] = shifted[low] + mass * w_low
+                shifted[high] = shifted[high] + mass * w_high
+
+        shifted = shifted.clamp_min(0.0)
+        shifted = shifted / shifted.sum().clamp_min(self.eps)
+
+        return shifted
+
+
+    def _register_cluster_slot_from_raw(self, raw_id: int) -> int:
+        """
+        Enregistre un cluster raw id dans les slots internes,
+        de manière cohérente avec _remap_ids.
+        """
+        raw_id = int(raw_id)
+
+        if raw_id in self.cluster_raw_to_slot:
+            return self.cluster_raw_to_slot[raw_id]
+
+        if self.cluster_next_free_slot >= self.nclusters:
+            raise ValueError(
+                f"No free cluster slot left for raw cluster id {raw_id}. "
+                f"nclusters={self.nclusters}"
+            )
+
+        slot = self.cluster_next_free_slot
+        self.cluster_raw_to_slot[raw_id] = slot
+        self.cluster_slot_to_raw[slot] = raw_id
+        self.cluster_next_free_slot += 1
+
+        return slot
+
+
+    def _register_departement_slot_from_raw(self, raw_id: int) -> int:
+        """
+        Enregistre un département raw id dans les slots internes,
+        de manière cohérente avec _remap_ids.
+        """
+        raw_id = int(raw_id)
+
+        if raw_id in self.departement_raw_to_slot:
+            return self.departement_raw_to_slot[raw_id]
+
+        if self.departement_next_free_slot >= self.ndepartements:
+            raise ValueError(
+                f"No free department slot left for raw department id {raw_id}. "
+                f"ndepartements={self.ndepartements}"
+            )
+
+        slot = self.departement_next_free_slot
+        self.departement_raw_to_slot[raw_id] = slot
+        self.departement_slot_to_raw[slot] = raw_id
+        self.departement_next_free_slot += 1
+
+        return slot
+
+
+    def calculate_class_coverage(
+        self,
+        df,
+        target_col: str,
+        cluster_col: str='cluster-encoder',
+        departement_col: Optional[str] = 'departement',
+        shrinkage: float = 30.0,
+        reset: bool = True,
+        dir_output=None,
+    ):
+        """
+        Calcule les distributions cibles de coverage.
+
+        Contrairement à ContextualOrdinalUncertaintyFocalWKLoss, cette fonction
+        ne crée pas de nouveaux samples. Elle calcule seulement les histogrammes
+        de classes cibles.
+
+        Pour chaque groupe g :
+
+            q_g(c) = P(y=c | g)
+
+        avec shrinkage vers la distribution globale :
+
+            q_g = (counts_g + shrinkage * q_global) / (n_g + shrinkage)
+
+        Puis un shift ordinal optionnel est appliqué :
+
+            shift > 0 : pousse la distribution vers les classes hautes.
+            shift < 0 : pousse la distribution vers les classes basses.
+
+        Paramètres
+        ----------
+        df:
+            DataFrame d'entraînement.
+
+        cluster_col:
+            Colonne des clusters.
+
+        target_col:
+            Colonne cible contenant les classes 0..C-1.
+
+        departement_col:
+            Colonne des départements. Nécessaire si coverageagg='department'
+            ou si tu veux aussi stocker les priors départementaux.
+
+        shrinkage:
+            Lissage vers la distribution globale.
+
+        reset:
+            Si True, réinitialise les buffers de coverage.
+
+        Retour
+        ------
+        self
+        """
+        
+        shift = self.shift
+
+        if cluster_col not in df.columns:
+            raise ValueError(f"Missing cluster_col={cluster_col}")
+
+        if target_col not in df.columns:
+            raise ValueError(f"Missing target_col={target_col}")
+
+        if departement_col is not None and departement_col not in df.columns:
+            raise ValueError(f"Missing departement_col={departement_col}")
+
+        if self.coverageagg == "department" and departement_col is None:
+            raise ValueError(
+                "departement_col is required when coverageagg='department'"
+            )
+
+        d = df.copy()
+        d = d[[c for c in [cluster_col, departement_col, target_col] if c is not None]].dropna()
+        d[target_col] = d[target_col].astype(int)
+
+        if reset:
+            with torch.no_grad():
+                self.coverage_target_global.fill_(float("nan"))
+                self.coverage_target_cluster.fill_(float("nan"))
+                self.coverage_target_departement.fill_(float("nan"))
+
+                self.coverage_pred_ema_cluster.fill_(float("nan"))
+                self.coverage_pred_ema_departement.fill_(float("nan"))
+                self.coverage_pred_ema_global.fill_(float("nan"))
+
+                self.coverage_update_count_cluster.zero_()
+                self.coverage_update_count_departement.zero_()
+                self.coverage_update_count_global.zero_()
+
+        # ---------------------------
+        # Global distribution
+        # ---------------------------
+        global_counts = (
+            d[target_col]
+            .value_counts()
+            .reindex(range(self.C), fill_value=0)
+            .sort_index()
+            .values
+            .astype(np.float64)
+        )
+
+        global_dist = self._normalize_distribution_np(global_counts, eps=self.eps)
+        global_dist = self._shift_distribution_np(global_dist, shift=shift)
+
+        with torch.no_grad():
+            self.coverage_target_global.copy_(
+                torch.tensor(
+                    global_dist,
+                    dtype=self.coverage_target_global.dtype,
+                    device=self.coverage_target_global.device,
+                )
+            )
+
+        # ---------------------------
+        # Cluster distributions
+        # ---------------------------
+        for raw_cluster, dfg in d.groupby(cluster_col):
+            slot = self._register_cluster_slot_from_raw(int(raw_cluster))
+
+            counts = (
+                dfg[target_col]
+                .value_counts()
+                .reindex(range(self.C), fill_value=0)
+                .sort_index()
+                .values
+                .astype(np.float64)
+            )
+
+            if shrinkage > 0.0:
+                q = (
+                    counts + float(shrinkage) * global_dist
+                ) / max(float(counts.sum()) + float(shrinkage), self.eps)
+            else:
+                q = self._normalize_distribution_np(counts, eps=self.eps)
+
+            q = self._normalize_distribution_np(q, eps=self.eps)
+            q = self._shift_distribution_np(q, shift=shift)
+
+            with torch.no_grad():
+                self.coverage_target_cluster[slot].copy_(
+                    torch.tensor(
+                        q,
+                        dtype=self.coverage_target_cluster.dtype,
+                        device=self.coverage_target_cluster.device,
+                    )
+                )
+
+        # ---------------------------
+        # Department distributions
+        # ---------------------------
+        if departement_col is not None:
+            for raw_dept, dfd in d.groupby(departement_col):
+                slot = self._register_departement_slot_from_raw(int(raw_dept))
+
+                counts = (
+                    dfd[target_col]
+                    .value_counts()
+                    .reindex(range(self.C), fill_value=0)
+                    .sort_index()
+                    .values
+                    .astype(np.float64)
+                )
+
+                if shrinkage > 0.0:
+                    q = (
+                        counts + float(shrinkage) * global_dist
+                    ) / max(float(counts.sum()) + float(shrinkage), self.eps)
+                else:
+                    q = self._normalize_distribution_np(counts, eps=self.eps)
+
+                q = self._normalize_distribution_np(q, eps=self.eps)
+                q = self._shift_distribution_np(q, shift=shift)
+
+                with torch.no_grad():
+                    self.coverage_target_departement[slot].copy_(
+                        torch.tensor(
+                            q,
+                            dtype=self.coverage_target_departement.dtype,
+                            device=self.coverage_target_departement.device,
+                        )
+                    )
+
+        # ---------------------------
+        # Optional CSV export
+        # ---------------------------
+        if dir_output is not None:
+            os.makedirs(dir_output, exist_ok=True)
+
+            with open(os.path.join(dir_output, "coverage_target_global.csv"), "w") as f:
+                f.write("class,probability\n")
+                for c, p in enumerate(global_dist):
+                    f.write(f"{c},{p:.8f}\n")
+
+            with open(os.path.join(dir_output, "coverage_target_cluster.csv"), "w") as f:
+                f.write("slot,raw_cluster,class,probability\n")
+                arr = self.coverage_target_cluster.detach().cpu().numpy()
+                raw = self.cluster_slot_to_raw.detach().cpu().numpy()
+                for slot in range(arr.shape[0]):
+                    if raw[slot] < 0 or not np.isfinite(arr[slot]).all():
+                        continue
+                    for c in range(self.C):
+                        f.write(f"{slot},{int(raw[slot])},{c},{arr[slot, c]:.8f}\n")
+
+            if departement_col is not None:
+                with open(os.path.join(dir_output, "coverage_target_departement.csv"), "w") as f:
+                    f.write("slot,raw_departement,class,probability\n")
+                    arr = self.coverage_target_departement.detach().cpu().numpy()
+                    raw = self.departement_slot_to_raw.detach().cpu().numpy()
+                    for slot in range(arr.shape[0]):
+                        if raw[slot] < 0 or not np.isfinite(arr[slot]).all():
+                            continue
+                        for c in range(self.C):
+                            f.write(f"{slot},{int(raw[slot])},{c},{arr[slot, c]:.8f}\n")
+                            
+            plot_dir = os.path.join(dir_output, "coverage_target_plots")
+            os.makedirs(plot_dir, exist_ok=True)
+
+            # ---------------------------
+            # Global distribution
+            # ---------------------------
+            plt.figure(figsize=(8, 5))
+            plt.bar(np.arange(self.C), global_dist)
+            plt.xlabel("Class")
+            plt.ylabel("Probability")
+            plt.title("Coverage target distribution — global")
+            plt.xticks(np.arange(self.C))
+            plt.ylim(0.0, max(1.0, float(np.max(global_dist)) * 1.1))
+            plt.tight_layout()
+            plt.savefig(os.path.join(plot_dir, "coverage_target_global.png"), dpi=200)
+            plt.close()
+
+            # ---------------------------
+            # Cluster distributions
+            # ---------------------------
+            arr = self.coverage_target_cluster.detach().cpu().numpy()
+            raw = self.cluster_slot_to_raw.detach().cpu().numpy()
+
+            valid_slots = [
+                slot for slot in range(arr.shape[0])
+                if raw[slot] >= 0 and np.isfinite(arr[slot]).all()
+            ]
+
+            if len(valid_slots) > 0:
+                cluster_plot_dir = os.path.join(plot_dir, "clusters")
+                os.makedirs(cluster_plot_dir, exist_ok=True)
+
+                # Heatmap cluster x class
+                mat = arr[valid_slots]
+                y_labels = [str(int(raw[slot])) for slot in valid_slots]
+
+                fig, ax = plt.subplots(
+                    figsize=(8, max(4, 0.35 * len(valid_slots)))
+                )
+                im = ax.imshow(mat, aspect="auto")
+                plt.colorbar(im, ax=ax, label="Probability")
+
+                ax.set_xticks(np.arange(self.C))
+                ax.set_xticklabels([str(c) for c in range(self.C)])
+                ax.set_yticks(np.arange(len(valid_slots)))
+                ax.set_yticklabels(y_labels)
+
+                ax.set_xlabel("Class")
+                ax.set_ylabel("Raw cluster")
+                ax.set_title("Coverage target distributions — clusters")
+
+                for i in range(mat.shape[0]):
+                    for j in range(mat.shape[1]):
+                        ax.text(
+                            j,
+                            i,
+                            f"{mat[i, j]:.2f}",
+                            ha="center",
+                            va="center",
+                            fontsize=7,
+                        )
+
+                plt.tight_layout()
+                plt.savefig(
+                    os.path.join(plot_dir, "coverage_target_cluster_heatmap.png"),
+                    dpi=200,
+                )
+                plt.close()
+
+                # One barplot per cluster
+                for slot in valid_slots:
+                    q = arr[slot]
+                    raw_cluster = int(raw[slot])
+
+                    plt.figure(figsize=(8, 5))
+                    plt.bar(np.arange(self.C), q)
+                    plt.xlabel("Class")
+                    plt.ylabel("Probability")
+                    plt.title(f"Coverage target distribution — cluster {raw_cluster}")
+                    plt.xticks(np.arange(self.C))
+                    plt.ylim(0.0, max(1.0, float(np.max(q)) * 1.1))
+                    plt.tight_layout()
+                    plt.savefig(
+                        os.path.join(
+                            cluster_plot_dir,
+                            f"coverage_target_cluster_{raw_cluster}.png",
+                        ),
+                        dpi=200,
+                    )
+                    plt.close()
+
+            # ---------------------------
+            # Department distributions
+            # ---------------------------
+            if departement_col is not None:
+                arr = self.coverage_target_departement.detach().cpu().numpy()
+                raw = self.departement_slot_to_raw.detach().cpu().numpy()
+
+                valid_slots = [
+                    slot for slot in range(arr.shape[0])
+                    if raw[slot] >= 0 and np.isfinite(arr[slot]).all()
+                ]
+
+                if len(valid_slots) > 0:
+                    dept_plot_dir = os.path.join(plot_dir, "departements")
+                    os.makedirs(dept_plot_dir, exist_ok=True)
+
+                    # Heatmap department x class
+                    mat = arr[valid_slots]
+                    y_labels = [str(int(raw[slot])) for slot in valid_slots]
+
+                    fig, ax = plt.subplots(
+                        figsize=(8, max(4, 0.35 * len(valid_slots)))
+                    )
+                    im = ax.imshow(mat, aspect="auto")
+                    plt.colorbar(im, ax=ax, label="Probability")
+
+                    ax.set_xticks(np.arange(self.C))
+                    ax.set_xticklabels([str(c) for c in range(self.C)])
+                    ax.set_yticks(np.arange(len(valid_slots)))
+                    ax.set_yticklabels(y_labels)
+
+                    ax.set_xlabel("Class")
+                    ax.set_ylabel("Raw department")
+                    ax.set_title("Coverage target distributions — departments")
+
+                    for i in range(mat.shape[0]):
+                        for j in range(mat.shape[1]):
+                            ax.text(
+                                j,
+                                i,
+                                f"{mat[i, j]:.2f}",
+                                ha="center",
+                                va="center",
+                                fontsize=7,
+                            )
+
+                    plt.tight_layout()
+                    plt.savefig(
+                        os.path.join(
+                            plot_dir,
+                            "coverage_target_departement_heatmap.png",
+                        ),
+                        dpi=200,
+                    )
+                    plt.close()
+
+                    # One barplot per department
+                    for slot in valid_slots:
+                        q = arr[slot]
+                        raw_dept = int(raw[slot])
+
+                        plt.figure(figsize=(8, 5))
+                        plt.bar(np.arange(self.C), q)
+                        plt.xlabel("Class")
+                        plt.ylabel("Probability")
+                        plt.title(
+                            f"Coverage target distribution — department {raw_dept}"
+                        )
+                        plt.xticks(np.arange(self.C))
+                        plt.ylim(0.0, max(1.0, float(np.max(q)) * 1.1))
+                        plt.tight_layout()
+                        plt.savefig(
+                            os.path.join(
+                                dept_plot_dir,
+                                f"coverage_target_departement_{raw_dept}.png",
+                            ),
+                            dpi=200,
+                        )
+                        plt.close()
+
+        return self
+
+
+    def _coverage_distance(self, pred_dist: torch.Tensor, target_dist: torch.Tensor) -> torch.Tensor:
+        """
+        Distance entre distributions de classes.
+        """
+        pred_dist = pred_dist.clamp_min(0.0)
+        target_dist = target_dist.clamp_min(0.0)
+
+        pred_dist = pred_dist / pred_dist.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+        target_dist = target_dist / target_dist.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        if self.coverage_distance == "l2":
+            return (pred_dist - target_dist).pow(2).mean(dim=-1)
+
+        pred_cdf = torch.cumsum(pred_dist, dim=-1)
+        target_cdf = torch.cumsum(target_dist, dim=-1)
+        diff = pred_cdf - target_cdf
+
+        if self.coverage_distance == "cdf_l2":
+            return diff.pow(2).mean(dim=-1)
+
+        if self.coverage_distance == "cdf_l1":
+            return diff.abs().mean(dim=-1)
+
+        if self.coverage_distance == "cdf_linf":
+            return diff.abs().max(dim=-1).values
+
+        raise ValueError(f"Unknown coverage_distance={self.coverage_distance}")
+
+
+    def _get_valid_target_or_global(self, target_bank: torch.Tensor, slots: torch.Tensor):
+        """
+        Récupère les distributions cibles pour les slots actifs.
+        Si une cible locale est absente, fallback vers coverage_target_global.
+        """
+        device = slots.device
+        dtype = target_bank.dtype
+
+        target_bank = target_bank.to(device=device)
+        target = target_bank.index_select(0, slots.long())
+
+        global_target = self.coverage_target_global.to(device=device, dtype=dtype)
+
+        if not torch.isfinite(global_target).all():
+            global_target = torch.ones(self.C, device=device, dtype=dtype) / float(self.C)
+
+        global_target = global_target / global_target.sum().clamp_min(self.eps)
+
+        invalid = ~torch.isfinite(target).all(dim=1)
+        if invalid.any():
+            target[invalid] = global_target.to(dtype=target.dtype)
+
+        target = target.clamp_min(0.0)
+        target = target / target.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        return target
+
+
+    def _coverage_loss(
+        self,
+        probs: torch.Tensor,
+        cluster_slot_ids: torch.Tensor,
+        dept_slot_ids: Optional[torch.Tensor] = None,
+        sample_weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Coverage loss avec EMA.
+
+        Pour chaque groupe g du batch :
+
+            p_batch_g = mean_i p_i
+
+            ema_hat_g = beta * EMA_old_g + (1-beta) * p_batch_g
+
+            L_g = distance(ema_hat_g, q_g)
+
+        où q_g vient de calculate_class_coverage.
+        """
+
+        device = probs.device
+        dtype = probs.dtype
+
+        probs = probs.clamp_min(0.0)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(self.eps)
+
+        if sample_weight is not None:
+            sw = sample_weight.view(-1).to(device=device, dtype=dtype).clamp_min(self.eps)
+        else:
+            sw = None
+
+        beta = float(self.coverage_momentum)
+
+        if self.coverageagg == "global":
+            if sw is None:
+                batch_dist = probs.mean(dim=0)
+            else:
+                batch_dist = (probs * sw[:, None]).sum(dim=0) / sw.sum().clamp_min(self.eps)
+
+            batch_dist = batch_dist / batch_dist.sum().clamp_min(self.eps)
+
+            old = self.coverage_pred_ema_global.to(device=device, dtype=dtype)
+
+            if not torch.isfinite(old).all():
+                old = self.coverage_target_global.to(device=device, dtype=dtype)
+                if not torch.isfinite(old).all():
+                    old = batch_dist.detach()
+
+            old = old / old.sum().clamp_min(self.eps)
+
+            ema_hat = beta * old.detach() + (1.0 - beta) * batch_dist
+            ema_hat = ema_hat / ema_hat.sum().clamp_min(self.eps)
+
+            target = self.coverage_target_global.to(device=device, dtype=dtype)
+            if not torch.isfinite(target).all():
+                target = batch_dist.detach()
+
+            target = target / target.sum().clamp_min(self.eps)
+
+            loss = self._coverage_distance(
+                ema_hat.unsqueeze(0),
+                target.unsqueeze(0),
+            ).mean()
+
+            if self.training:
+                with torch.no_grad():
+                    self.coverage_pred_ema_global.copy_(ema_hat.detach().cpu())
+                    self.coverage_update_count_global += 1
+
+            return loss
+
+        if self.coverageagg == "cluster":
+            group_ids = cluster_slot_ids.view(-1).long().to(device)
+            target_bank = self.coverage_target_cluster
+            ema_bank = self.coverage_pred_ema_cluster
+            count_bank = self.coverage_update_count_cluster
+
+        elif self.coverageagg == "department":
+            if dept_slot_ids is None:
+                raise ValueError("dept_slot_ids is required when coverageagg='department'")
+            group_ids = dept_slot_ids.view(-1).long().to(device)
+            target_bank = self.coverage_target_departement
+            ema_bank = self.coverage_pred_ema_departement
+            count_bank = self.coverage_update_count_departement
+
+        else:
+            raise ValueError(f"Unknown coverageagg={self.coverageagg}")
+
+        active_slots = torch.unique(group_ids)
+        losses = []
+        ema_updates = []
+
+        target_bank_dev = target_bank.to(device=device, dtype=dtype)
+        ema_bank_dev = ema_bank.to(device=device, dtype=dtype)
+        count_bank_dev = count_bank.to(device=device)
+
+        targets = self._get_valid_target_or_global(target_bank_dev, active_slots)
+
+        for local_idx, slot_t in enumerate(active_slots):
+            slot = int(slot_t.item())
+            mask = group_ids == slot_t
+
+            if not mask.any():
+                continue
+
+            if sw is None:
+                batch_dist = probs[mask].mean(dim=0)
+            else:
+                sw_g = sw[mask]
+                batch_dist = (probs[mask] * sw_g[:, None]).sum(dim=0) / sw_g.sum().clamp_min(self.eps)
+
+            batch_dist = batch_dist / batch_dist.sum().clamp_min(self.eps)
+
+            old = ema_bank_dev[slot]
+
+            if not torch.isfinite(old).all():
+                old = targets[local_idx].detach()
+
+            old = old / old.sum().clamp_min(self.eps)
+
+            ema_hat = beta * old.detach() + (1.0 - beta) * batch_dist
+            ema_hat = ema_hat / ema_hat.sum().clamp_min(self.eps)
+
+            target = targets[local_idx]
+
+            dist_loss = self._coverage_distance(
+                ema_hat.unsqueeze(0),
+                target.unsqueeze(0),
+            ).mean()
+
+            update_count = int(count_bank_dev[slot].item())
+            if self.coverage_warmup_updates > 0:
+                warmup = min(
+                    1.0,
+                    float(update_count + 1) / float(self.coverage_warmup_updates),
+                )
+            else:
+                warmup = 1.0
+
+            losses.append(dist_loss * probs.new_tensor(warmup))
+            ema_updates.append((slot, ema_hat.detach()))
+
+        if self.training and len(ema_updates) > 0:
+            with torch.no_grad():
+                if ema_bank.device != device:
+                    ema_bank.data = ema_bank.data.to(device)
+                if count_bank.device != device:
+                    count_bank.data = count_bank.data.to(device)
+
+                for slot, ema_hat in ema_updates:
+                    ema_bank[slot].copy_(ema_hat)
+                    count_bank[slot] += 1
+
+        if len(losses) == 0:
+            return probs.new_tensor(0.0)
+
+        return torch.stack(losses).mean()
 
     def update_params(self, new_dict, epoch=None):
         """
@@ -9696,14 +10526,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             tr_list, f_list, ep_list = [], [], []
             for ep, entry in iterator:
                 p = entry["ordinal_params"].d if hasattr(entry["ordinal_params"], "d") else entry["ordinal_params"]
-                if "transition" in p and "focal" in p:
+                if "transition" in p and "coverage" in p:
                     ep_list.append(ep)
                     tr_list.append(np.mean(p["transition"]))
-                    f_list.append(np.mean(p["focal"]))
+                    f_list.append(np.mean(p["coverage"]))
             if ep_list:
                 fig, ax = plt.subplots(figsize=(10, 5))
                 ax.plot(ep_list, tr_list, label="transition")
-                ax.plot(ep_list, f_list, label="focal", linestyle="--")
+                ax.plot(ep_list, f_list, label="coverage", linestyle="--")
                 ax.set_title(f"{self.__class__.__name__} – Loss components")
                 ax.grid(True, alpha=0.3)
                 if best_epoch is not None:
