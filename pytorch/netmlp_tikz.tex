@@ -12,13 +12,13 @@
         $T = \texttt{n\_sequences}$};
 
     % Sequence flattening
-    \node[block, right=2.9cm of input, fill=orange!15] (flatten) {Sequence flattening\\
+    \node[block, below=1.9cm of input, fill=orange!15] (flatten) {Sequence flattening\\
         reshape to $\mathbb{R}^{B \times (C_{in} \cdot T)}$};
 
     \draw[arrow] (input) -- (flatten);
 
     % Linear layers and activations
-    \node[block, right=2.9cm of flatten, fill=purple!12] (linear1) {Linear layer 1\\$\mathbb{R}^{C_{in} \cdot T} \rightarrow \mathbb{R}^{hd1}$\\
+    \node[block, below=1.9cm of flatten, fill=purple!12] (linear1) {Linear layer 1\\$\mathbb{R}^{C_{in} \cdot T} \rightarrow \mathbb{R}^{hd1}$\\
         activation ReLU};
 
     \draw[arrow] (flatten) -- (linear1);
