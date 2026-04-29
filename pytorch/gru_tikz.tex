@@ -1,10 +1,10 @@
 \documentclass[tikz,border=8pt]{standalone}
-\usetikzlibrary{arrows.meta,positioning}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
 
 \begin{document}
 \begin{tikzpicture}[
   font=\small,
-  block/.style={draw, rounded corners=2pt, very thick, align=center, minimum width=7.2cm, minimum height=1.1cm, fill=blue!5},
+  block/.style={draw, rounded corners=2pt, very thick, align=center, minimum width=3.8cm, minimum height=1.2cm, fill=blue!5},
   tblock/.style={block, fill=orange!12},
   sblock/.style={block, fill=green!12},
   hblock/.style={block, fill=purple!12},
@@ -12,24 +12,30 @@
   arr/.style={-{Latex[length=2.8mm]}, thick}
 ]
 
+% Temporal branch
 \node[io] (xin) {Input $X$\\$(B,\ C_{in},\ T)$};
-\node[tblock, below=1.0cm of xin] (split) {Temporal selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ g,\ T)$, $g=|\texttt{temporal\_idx}|$};
-\node[tblock, below=0.9cm of split] (gru) {2-layer GRU\\$(B,\ g,\ T) \rightarrow (B,\ T,\ G)$, $G=128$};
-\node[tblock, below=0.9cm of gru] (pool) {Temporal pooling (flatten)\\$(B,\ T,\ G) \rightarrow (B,\ T\cdot G)$};
-\node[sblock, below=1.0cm of pool] (ssplit) {Static selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ s)$, $s=|\texttt{static\_idx}|$};
-\node[sblock, below=0.9cm of ssplit] (smlp) {Spatial MLP (2 layers)\\$(B,\ s) \rightarrow (B,\ 64)$};
-\node[hblock, below=1.0cm of smlp] (fusion) {Concatenation (time mode)\\$(B,\ T\cdot G)\oplus(B,\64) \rightarrow (B,\ T\cdot G+64)$};
-\node[hblock, below=0.9cm of fusion] (tfuse) {Time-fusion MLP\\$(B,\ T\cdot G+64) \rightarrow (B,\ 128)$};
-\node[hblock, below=0.9cm of tfuse] (head1) {Head linear 1 + activation\\$(B,\ 128) \rightarrow (B,\ 256)$};
-\node[hblock, below=0.9cm of head1] (head2) {Head linear 2 + activation\\$(B,\ 256) \rightarrow (B,\ 64)$};
-\node[io, below=1.0cm of head2] (out) {Output layer\\$(B,\ 64) \rightarrow (B,\ O)$, $O=\texttt{out\_channels}$};
+\node[tblock, right=2.2cm of xin] (split) {Temporal selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ g,\ T)$\\$g=|\texttt{temporal\_idx}|$};
+\node[tblock, right=2.2cm of split] (gru) {2-layer GRU\\$(B,\ g,\ T) \rightarrow (B,\ T,\ G)$\\$G=\texttt{gru\_size}=128$};
+\node[tblock, right=2.2cm of gru] (pool) {Temporal pooling (flatten)\\$(B,\ T,\ G) \rightarrow (B,\ T\cdot G)$};
+
+% Spatial branch
+\node[sblock, below=2.2cm of split] (ssplit) {Static selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ s)$\\$s=|\texttt{static\_idx}|$};
+\node[sblock, right=2.2cm of ssplit] (smlp) {Spatial MLP (2 layers)\\$(B,\ s) \rightarrow (B,\ 64)$};
+
+% Fusion + head
+\node[hblock, right=2.2cm of pool] (fusion) {Concatenation (time mode)\\$(B,\ T\cdot G)\oplus(B,\64) \rightarrow (B,\ T\cdot G+64)$};
+\node[hblock, right=2.2cm of fusion] (tfuse) {Time-fusion MLP\\$(B,\ T\cdot G+64) \rightarrow (B,\ 128)$};
+\node[hblock, right=2.2cm of tfuse] (head1) {Head linear 1 + act\\$(B,\ 128) \rightarrow (B,\ 256)$};
+\node[hblock, right=2.2cm of head1] (head2) {Head linear 2 + act\\$(B,\ 256) \rightarrow (B,\ 64)$};
+\node[io, right=2.2cm of head2] (out) {Output layer\\$(B,\ 64) \rightarrow (B,\ O)$\\$O=\texttt{out\_channels}$};
 
 \draw[arr] (xin) -- (split);
 \draw[arr] (split) -- (gru);
 \draw[arr] (gru) -- (pool);
-\draw[arr] (pool) -- (ssplit);
+\draw[arr] (pool) -- (fusion);
+\draw[arr] (xin) |- (ssplit);
 \draw[arr] (ssplit) -- (smlp);
-\draw[arr] (smlp) -- (fusion);
+\draw[arr] (smlp) -| (fusion);
 \draw[arr] (fusion) -- (tfuse);
 \draw[arr] (tfuse) -- (head1);
 \draw[arr] (head1) -- (head2);
