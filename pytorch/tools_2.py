@@ -627,7 +627,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
             # ---- Pooling sur toute la séquence CNN ----
             'use_full_sequence': True,
-            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            'temporal_pool': 'flatten', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
 
             # ---- Branche spatiale ----
             'use_spatial_mlp': True,
