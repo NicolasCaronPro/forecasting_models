@@ -290,7 +290,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'out_channels': out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
-            'num_layers': num_lstm_layers,
+            'num_layers': 2,
             'device': device,
             'act_func': act_func,
             'task_type': task_type,
@@ -318,6 +318,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'spatial_hidden_channels': 64,  # = spatial_in_dim si None
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
+            'concatenation': 'time',
+            'time_fusion_dim': 128,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -351,16 +353,21 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'conv_channels': None,       # = temporal_in_channels si None
             'conv_kernel_size': 3,       # Doit être impair
             'conv_layers': 1,
-
+            
             # ---- Pooling sur toute la séquence de sortie GRU ----
             'use_full_sequence': True,
-            'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            'temporal_pool': 'flatten', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
 
             # ---- Branche spatiale (MLP vs linear simple) ----
             'use_spatial_mlp': True,
             'spatial_hidden_channels': 64,  # = spatial_in_dim si None
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
+            
+            # ---- Concaténation spatial dynamique -----
+            'concatenation': 'time',
+            'time_fusion_dim': 128,
+            
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -396,7 +403,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             # ---- Paramètres hérités de GRU ----
             'in_channels': in_dim,
             'hidden_channels': 256,
-            'gru_size': 128,
+            'gru_size': 256,
             'out_channels': out_channels,
             'end_channels': 64,
             'n_sequences': k_days + 1,
@@ -424,13 +431,16 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'temporal_pool': 'attn', # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
 
             # ---- Branche spatiale (MLP vs linear simple) ----
-            'use_spatial_mlp': True,
+            'use_spatial_mlp': False,
             'spatial_hidden_channels': 64,  # = spatial_in_dim si None
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
+            'concatenation': 'time',
+            'time_fusion_dim': 128,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
+            
         model = BetterGRU(**default_params)
         model_params.update(default_params)
 
@@ -591,7 +601,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
 
     elif model_name == 'DilatedCNN':
         default_params = {
-            'channels': [in_dim, in_dim, 128],
+            'channels': [in_dim, 128, 128],
             'dilations': [1, 3, 4],
             'end_channels': 64,
             'lin_channels': 256,
@@ -624,6 +634,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'spatial_hidden_channels': 64,
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
+            'concatenation': 'time',
+            'time_fusion_dim': 128,
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -980,7 +992,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'use_full_sequence': True,
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
-            'use_spatial_mlp': True,
+            'use_spatial_mlp': False,
             'spatial_hidden_channels': 64,
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
@@ -1035,7 +1047,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'use_full_sequence': True,
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
-            'use_spatial_mlp': True,
+            'use_spatial_mlp': False,
             'spatial_hidden_channels': 64,
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,
@@ -1088,7 +1100,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'use_full_sequence': True,
             'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
-            'use_spatial_mlp': True,
+            'use_spatial_mlp': False,
             'spatial_hidden_channels': 64,
             'spatial_mlp_layers': 2,
             'spatial_mlp_use_bn': True,

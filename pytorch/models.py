@@ -622,13 +622,17 @@ class LSTM(torch.nn.Module):
         # ---- Normalization refinement parameters ----
         use_temporal_norm=True,
         temporal_norm_type="layernorm",
-        use_spatial_norm=True,
+        use_spatial_norm=False,
         spatial_norm_type="batchnorm",
         use_fusion_norm=False,
 
         # ---- Head normalization ----
         use_head_norm=True,
         head_norm_type="batchnorm",
+
+        # ---- Spatial-temporal concatenation mode ----
+        concatenation: str = "last",   # "last" | "time"
+        time_fusion_dim: Optional[int] = None,
     ):
         super(LSTM, self).__init__()
 
@@ -661,11 +665,24 @@ class LSTM(torch.nn.Module):
         self.use_full_sequence = use_full_sequence
         self.temporal_pool = temporal_pool.lower()
         self.use_spatial_mlp = use_spatial_mlp
+        self.concatenation = concatenation.lower()
 
-        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+        if self.concatenation not in {"last", "time"}:
+            raise ValueError(
+                f"Unsupported concatenation='{concatenation}'. "
+                "Choose from ['last', 'time']."
+            )
+
+        if self.concatenation == "time" and spatialContext:
+            raise ValueError(
+                "concatenation='time' is not compatible with spatialContext=True, "
+                "because spatial features are already injected at each time step."
+            )
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
             raise ValueError(
                 f"Unsupported temporal_pool='{temporal_pool}'. "
-                f"Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+                f"Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
             )
 
         if self.use_temporal_conv and conv_kernel_size % 2 == 0:
@@ -720,37 +737,6 @@ class LSTM(torch.nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True
         ).to(device)
-
-        # ----------------------------
-        # Temporal pooling over full sequence
-        # ----------------------------
-        if not self.use_full_sequence:
-            self.temporal_pool = "last"
-
-        if self.temporal_pool == "meanmax":
-            self.temporal_repr_dim = 2 * lstm_size
-        else:
-            self.temporal_repr_dim = lstm_size
-
-        if self.temporal_pool == "attn":
-            self.temporal_pool_layer = TemporalAttentionPooling(lstm_size, device=device)
-        else:
-            self.temporal_pool_layer = None
-
-        # ----------------------------
-        # Normalization after temporal readout
-        # ----------------------------
-        if use_temporal_norm:
-            if temporal_norm_type == "layernorm":
-                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
-            elif temporal_norm_type == "batchnorm":
-                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
-            else:
-                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
-        else:
-            self.temporal_norm = nn.Identity().to(device)
-
-        self.dropout = nn.Dropout(p=dropout).to(device)
 
         # ----------------------------
         # Spatial branch
@@ -808,9 +794,75 @@ class LSTM(torch.nn.Module):
             self.spatial_norm = nn.Identity().to(device)
 
         # ----------------------------
+        # Temporal-spatial fusion before temporal pooling
+        # ----------------------------
+        if self.concatenation == "time":
+            self.lstm_output_norm = nn.LayerNorm(lstm_size).to(device)
+        else:
+            self.lstm_output_norm = nn.Identity().to(device)
+            
+        if self.concatenation == "time":
+            if not self.has_spatial:
+                raise ValueError(
+                    "concatenation='time' requires static_idx to be non-empty."
+                )
+
+            self.time_fusion_dim = lstm_size if time_fusion_dim is None else time_fusion_dim
+
+            self.time_fusion_mlp = nn.Sequential(
+                nn.Linear(lstm_size + self.spatial_out_dim, self.time_fusion_dim).to(device),
+                nn.LayerNorm(self.time_fusion_dim).to(device),
+                _make_activation(act_func),
+                nn.Dropout(dropout).to(device),
+            )
+
+            temporal_base_dim = self.time_fusion_dim
+
+        else:
+            self.time_fusion_dim = lstm_size
+            self.time_fusion_mlp = nn.Identity().to(device)
+            temporal_base_dim = lstm_size
+
+        # ----------------------------
+        # Temporal pooling over full sequence
+        # ----------------------------
+        if not self.use_full_sequence:
+            self.temporal_pool = "last"
+
+        if self.temporal_pool == "meanmax":
+            self.temporal_repr_dim = 2 * temporal_base_dim
+        elif self.temporal_pool == "flatten":
+            self.temporal_repr_dim = temporal_base_dim * n_sequences
+        else:
+            self.temporal_repr_dim = temporal_base_dim
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(temporal_base_dim, device=device)
+        else:
+            self.temporal_pool_layer = nn.Identity().to(device)
+
+        # ----------------------------
+        # Normalization after temporal readout
+        # ----------------------------
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity().to(device)
+
+        self.dropout = nn.Dropout(p=dropout).to(device)
+
+        # ----------------------------
         # Optional spatial context fusion
         # ----------------------------
-        if self.spatialContext and self.has_spatial:
+        if self.concatenation == "time":
+            self.context_layer = None
+            fusion_dim = self.temporal_repr_dim
+        elif self.spatialContext and self.has_spatial:
             self.context_layer = SpatialContextSet(
                 d_channels,
                 self.temporal_repr_dim,
@@ -859,7 +911,6 @@ class LSTM(torch.nn.Module):
         elif task_type == 'binary':
             self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == "uclassification":
-
             self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
@@ -884,6 +935,8 @@ class LSTM(torch.nn.Module):
         elif self.temporal_pool == "attn":
             x, a_t = self.temporal_pool_layer(seq_out)
             self.last_temporal_attention_coef = a_t
+        elif self.temporal_pool == "flatten":
+            x = seq_out.reshape(seq_out.shape[0], -1)
         else:
             raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
 
@@ -965,32 +1018,56 @@ class LSTM(torch.nn.Module):
 
         # LSTM over full sequence
         seq_out, _ = self.lstm(x, (h0, c0))
+        seq_out = self.lstm_output_norm(seq_out)
 
+        # ------------------------------------------------------------
+        # Spatial-temporal fusion before temporal aggregation
+        # ------------------------------------------------------------
+        spa_repr = None
+
+        if self.has_spatial:
+            X_spa = X[:, self.spatial_idx, -1]
+            spa_repr = self._process_spatial(X_spa)
+
+        if self.concatenation == "time":
+            if spa_repr is None:
+                raise RuntimeError(
+                    "concatenation='time' requires a valid spatial representation."
+                )
+            
+            spa_seq = spa_repr.unsqueeze(1).expand(-1, seq_out.size(1), -1)
+            seq_out = torch.cat((seq_out, spa_seq), dim=-1)
+            seq_out = self.time_fusion_mlp(seq_out)
+        
         # Temporal readout & Normalization ordering
         if self.temporal_pool == "attn":
-            # Recurrent output -> LayerNorm -> attention pooling -> Dropout
-            seq_out = self.temporal_norm(seq_out)
+            # Recurrent sequence -> LayerNorm -> attention pooling -> Dropout
+            if self.concatenation != "time":
+                seq_out = self.temporal_norm(seq_out)
+                
             x = self._pool_temporal_sequence(seq_out)
             x = self.dropout(x)
         else:
             # Recurrent sequence -> pooling -> LayerNorm -> Dropout
             x = self._pool_temporal_sequence(seq_out)
-            x = self.temporal_norm(x)
+            if self.concatenation != "time":
+                x = self.temporal_norm(x)
             x = self.dropout(x)
 
-        # Spatial branch / context branch
-        if self.has_spatial:
-            X_spa = X[:, self.spatial_idx, -1]
-            spa_repr = self._process_spatial(X_spa)
+        # ------------------------------------------------------------
+        # Late spatial fusion only for concatenation="last"
+        # ------------------------------------------------------------
+        if self.concatenation == "last" and self.has_spatial:
+            if spa_repr is None:
+                spa_repr = self._process_spatial(X_spa)
 
-            if self.spatialContext and self.context_layer is not None and spa_repr is not None:
-                # SpatialContextSet expects (B, K, D_stat). 
-                # Since d_stat is 1, each feature is a variable of dim 1.
+            if self.spatialContext and self.context_layer is not None:
+                # SpatialContextSet expects (B, K, D_stat).
                 if spa_repr.dim() == 2:
                     spa_repr = spa_repr.unsqueeze(-1)
                 x, a_s = self.context_layer(x, spa_repr)
                 self.last_attention_coef = a_s
-            elif spa_repr is not None:
+            else:
                 x = torch.cat((x, spa_repr), dim=1)
                 self.last_attention_coef = None
         else:
@@ -1115,13 +1192,17 @@ class DilatedCNN(torch.nn.Module):
         # ---- Normalization refinement parameters ----
         use_temporal_norm=False,
         temporal_norm_type="batchnorm",
-        use_spatial_norm=True,
+        use_spatial_norm=False,
         spatial_norm_type="batchnorm",
         use_fusion_norm=False,
 
         # ---- Head normalization ----
         use_head_norm=True,
         head_norm_type="batchnorm",
+
+        # ---- Spatial-temporal concatenation mode ----
+        concatenation: str = "last",   # "last" | "time"
+        time_fusion_dim: Optional[int] = None,
     ):
         super(DilatedCNN, self).__init__()
 
@@ -1138,11 +1219,24 @@ class DilatedCNN(torch.nn.Module):
         self.use_full_sequence = use_full_sequence
         self.temporal_pool = temporal_pool.lower()
         self.use_spatial_mlp = use_spatial_mlp
+        self.concatenation = concatenation.lower()
 
-        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+        if self.concatenation not in {"last", "time"}:
+            raise ValueError(
+                f"Unsupported concatenation='{concatenation}'. "
+                "Choose from ['last', 'time']."
+            )
+
+        if self.concatenation == "time" and spatialContext:
+            raise ValueError(
+                "concatenation='time' is not compatible with spatialContext=True, "
+                "because spatial features are already injected at each time step."
+            )
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
             raise ValueError(
                 f"Unsupported temporal_pool='{temporal_pool}'. "
-                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
             )
 
         if self.use_temporal_conv and conv_kernel_size % 2 == 0:
@@ -1229,41 +1323,6 @@ class DilatedCNN(torch.nn.Module):
         self.dropout = nn.Dropout(p=dropout).to(device)
 
         # ============================================================
-        # Temporal pooling over CNN output sequence
-        # ============================================================
-        if not self.use_full_sequence:
-            self.temporal_pool = "last"
-
-        cnn_out_channels = channels[-1]
-
-        if self.temporal_pool == "meanmax":
-            self.temporal_repr_dim = 2 * cnn_out_channels
-        else:
-            self.temporal_repr_dim = cnn_out_channels
-
-        if self.temporal_pool == "attn":
-            self.temporal_pool_layer = TemporalAttentionPooling(
-                cnn_out_channels,
-                device=device,
-            )
-        else:
-            self.temporal_pool_layer = None
- 
-        self.temporal_norm_type = temporal_norm_type
-        if use_temporal_norm:
-            if temporal_norm_type == "layernorm":
-                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
-            elif temporal_norm_type == "batchnorm":
-                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
-            else:
-                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
-        else:
-            self.temporal_norm = nn.Identity().to(device)
-
-        self.last_temporal_attention_coef = None
-        self.last_attention_coef = None
-
-        # ============================================================
         # Spatial branch
         # ============================================================
         if self.has_spatial:
@@ -1277,31 +1336,16 @@ class DilatedCNN(torch.nn.Module):
                 d_in = spatial_in_dim
 
                 for _ in range(max(1, spatial_mlp_layers)):
-                    try:
-                        # If your MLPLayer has the same API as in BetterGRU/LSTM.
-                        spatial_layers.append(
-                            MLPLayer(
-                                in_feats=d_in,
-                                out_feats=spatial_hidden_channels,
-                                device=device,
-                                activation=act_func,
-                                dropout=dropout,
-                                use_bn=spatial_mlp_use_bn,
-                            )
+                    spatial_layers.append(
+                        MLPLayer(
+                            in_feats=d_in,
+                            out_feats=spatial_hidden_channels,
+                            device=device,
+                            activation=act_func,
+                            dropout=dropout,
+                            use_bn=spatial_mlp_use_bn,
                         )
-                    except TypeError:
-                        # Fallback if MLPLayer has an older signature.
-                        spatial_layers.append(
-                            _build_mlp_block(
-                                in_dim=d_in,
-                                out_dim=spatial_hidden_channels,
-                                device=device,
-                                activation=act_func,
-                                dropout=dropout,
-                                use_bn=spatial_mlp_use_bn,
-                            )
-                        )
-
+                    )
                     d_in = spatial_hidden_channels
 
                 self.spatial_mlp = nn.Sequential(*spatial_layers)
@@ -1332,30 +1376,80 @@ class DilatedCNN(torch.nn.Module):
             self.spatial_norm = nn.Identity().to(device)
 
         # ============================================================
+        # Temporal-spatial fusion before temporal pooling
+        # ============================================================
+        cnn_out_channels = channels[-1]
+
+        if self.concatenation == "time":
+            if not self.has_spatial:
+                raise ValueError("concatenation='time' requires static_idx to be non-empty.")
+            
+            self.time_fusion_dim = cnn_out_channels if time_fusion_dim is None else time_fusion_dim
+
+            # We use Conv1d with kernel size 1 to perform point-wise fusion over (B, C, T)
+            self.time_fusion_mlp = nn.Sequential(
+                nn.Conv1d(cnn_out_channels + self.spatial_out_dim, self.time_fusion_dim, kernel_size=1).to(device),
+                nn.BatchNorm1d(self.time_fusion_dim).to(device),
+                _make_activation(act_func),
+                nn.Dropout(dropout).to(device),
+            )
+            temporal_base_dim = self.time_fusion_dim
+        else:
+            self.time_fusion_dim = cnn_out_channels
+            self.time_fusion_mlp = nn.Identity().to(device)
+            temporal_base_dim = cnn_out_channels
+
+        # ============================================================
+        # Temporal pooling over CNN output sequence
+        # ============================================================
+        if not self.use_full_sequence:
+            self.temporal_pool = "last"
+
+        if self.temporal_pool == "meanmax":
+            self.temporal_repr_dim = 2 * temporal_base_dim
+        elif self.temporal_pool == "flatten":
+            self.temporal_repr_dim = temporal_base_dim * n_sequences
+        else:
+            self.temporal_repr_dim = temporal_base_dim
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(
+                temporal_base_dim,
+                device=device,
+            )
+        else:
+            self.temporal_pool_layer = None
+ 
+        self.temporal_norm_type = temporal_norm_type
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity().to(device)
+
+        self.last_temporal_attention_coef = None
+        self.last_attention_coef = None
+
+        # ============================================================
         # Optional spatial context fusion
         # ============================================================
-        if self.spatialContext and self.has_spatial:
-            # Prefer the same class as your LSTM if available.
-            if "SpatialContextSet" in globals():
-                self.context_layer = SpatialContextSet(
-                    d_channels,
-                    self.temporal_repr_dim,
-                    1,
-                    n_heads=4,
-                    dropout=dropout,
-                    use_sigmoid_gating=True,
-                    renorm_gates=True,
-                )
-            else:
-                self.context_layer = SpatialContext(
-                    d_channels,
-                    self.temporal_repr_dim,
-                    1,
-                    n_heads=4,
-                    dropout=dropout,
-                )
-
-            self.context_layer = self.context_layer.to(device)
+        if self.concatenation == "time":
+            self.context_layer = None
+            fusion_dim = self.temporal_repr_dim
+        elif self.spatialContext and self.has_spatial:
+            self.context_layer = SpatialContextSet(
+                d_channels,
+                self.temporal_repr_dim,
+                1,
+                n_heads=4,
+                dropout=dropout,
+                use_sigmoid_gating=True,
+                renorm_gates=True,
+            ).to(device)
             fusion_dim = d_channels
         else:
             self.context_layer = None
@@ -1388,7 +1482,6 @@ class DilatedCNN(torch.nn.Module):
         elif task_type == "binary":
             self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == "uclassification":
-
             self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
@@ -1437,6 +1530,8 @@ class DilatedCNN(torch.nn.Module):
             pooled, attn = self.temporal_pool_layer(x_seq)
             self.last_temporal_attention_coef = attn
 
+        elif self.temporal_pool == "flatten":
+            pooled = x.reshape(x.shape[0], -1)
         else:
             raise RuntimeError(f"Unsupported temporal_pool={self.temporal_pool}")
 
@@ -1484,7 +1579,6 @@ class DilatedCNN(torch.nn.Module):
         # ------------------------------------------------------------
         x = self.temporal_encoder(x)
 
-        # ------------------------------------------------------------
         # Dilated CNN stack
         # ------------------------------------------------------------
         for cnn_layer, norm_layer in zip(self.cnn_layer_list, self.norm_layer_list):
@@ -1494,37 +1588,56 @@ class DilatedCNN(torch.nn.Module):
             x = self.dropout(x)
 
         # ------------------------------------------------------------
+        # Spatial-temporal fusion before temporal aggregation
+        # ------------------------------------------------------------
+        spa_repr = None
+
+        if self.has_spatial:
+            spa_repr = self._process_spatial(X_spa_vec)
+
+        if self.concatenation == "time":
+            if spa_repr is None:
+                raise RuntimeError("concatenation='time' requires a valid spatial representation.")
+            
+            # x is (B, C, T). spa_repr is (B, S).
+            spa_seq = spa_repr.unsqueeze(-1).expand(-1, -1, x.size(-1)) # (B, S, T)
+            x = torch.cat((x, spa_seq), dim=1) # (B, C+S, T)
+            x = self.time_fusion_mlp(x)
+
+        # ------------------------------------------------------------
         # Temporal readout & Normalization ordering
+        # ------------------------------------------------------------
         if self.temporal_pool == "attn":
             # sequence → LayerNorm → attention pooling → Dropout
             x_seq = x.transpose(1, 2)            # (B, T, C)
-            x_seq = self.temporal_norm(x_seq)
+            if self.concatenation != "time":
+                x_seq = self.temporal_norm(x_seq)
+            
             x, attn = self.temporal_pool_layer(x_seq)
             self.last_temporal_attention_coef = attn
             x = self.dropout(x)
         else:
             # Sans attention : pooling → LayerNorm → Dropout
             x = self._temporal_pooling(x)        # returns (B, C)
-            x = self.temporal_norm(x)
+            if self.concatenation != "time":
+                x = self.temporal_norm(x)
             x = self.dropout(x)
                 
         # ------------------------------------------------------------
-        # Spatial branch and fusion
+        # Late spatial fusion only for concatenation="last"
         # ------------------------------------------------------------
-        if self.has_spatial:
-            if self.context_layer is not None:
+        if self.concatenation == "last" and self.has_spatial:
+            if spa_repr is None:
                 spa_repr = self._process_spatial(X_spa_vec)
-                if spa_repr is not None:
-                    if spa_repr.dim() == 2:
-                        spa_repr = spa_repr.unsqueeze(-1)
-                    x, attn_coef = self.context_layer(x, spa_repr)
-                    self.last_attention_coef = attn_coef
-                else:
-                    self.last_attention_coef = None
+
+            if self.context_layer is not None:
+                if spa_repr.dim() == 2:
+                    spa_repr = spa_repr.unsqueeze(-1)
+                x, attn_coef = self.context_layer(x, spa_repr)
+                self.last_attention_coef = attn_coef
             else:
-                x_spa = self._process_spatial(X_spa_vec)
-                if x_spa is not None:
-                    x = torch.cat((x, x_spa), dim=1)
+                if spa_repr is not None:
+                    x = torch.cat((x, spa_repr), dim=1)
                 self.last_attention_coef = None
         else:
             self.last_attention_coef = None
@@ -1617,6 +1730,10 @@ class GraphCastGRU(torch.nn.Module):
         use_spatial_norm: bool = True,
         spatial_norm_type: str = "batchnorm",
         use_fusion_norm: bool = False,
+
+        # ---- Head normalization ----
+        use_head_norm: bool = True,
+        head_norm_type: str = "batchnorm",
     ):
         """GraphCast-based model preceded by a GRU that encodes the temporal dimension.
 
@@ -1651,10 +1768,10 @@ class GraphCastGRU(torch.nn.Module):
         self.gru_size       = input_dim_grid_nodes
         self.num_gru_layers = num_gru_layers
 
-        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
             raise ValueError(
                 f"Unsupported temporal_pool='{temporal_pool}'. "
-                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
             )
         if use_temporal_conv and conv_kernel_size % 2 == 0:
             raise ValueError("conv_kernel_size must be odd to preserve temporal length cleanly.")
@@ -1704,6 +1821,8 @@ class GraphCastGRU(torch.nn.Module):
 
         if self.temporal_pool == "meanmax":
             self.temporal_repr_dim = 2 * input_dim_grid_nodes
+        elif self.temporal_pool == "flatten":
+            self.temporal_repr_dim = input_dim_grid_nodes * n_sequences
         else:
             self.temporal_repr_dim = input_dim_grid_nodes
 
@@ -1826,10 +1945,17 @@ class GraphCastGRU(torch.nn.Module):
         # Output head
         # ------------------------------------------------------------------
         self.linear1 = nn.Linear(output_dim_grid_nodes, lin_channels)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, lin_channels, device)
+            if use_head_norm else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
         self.linear2 = nn.Linear(lin_channels, end_channels)
         self.output_layer = nn.Linear(end_channels, out_channels)
-
-        self.act_func = _make_activation(act_func)
 
         if task_type == "classification":
             self.output_activation = nn.Softmax(dim=-1)
@@ -1858,6 +1984,8 @@ class GraphCastGRU(torch.nn.Module):
             x, a_t = self.temporal_pool_layer(seq_out)
             self.last_temporal_attention_coef = a_t
             return x
+        elif self.temporal_pool == "flatten":
+            return seq_out.reshape(seq_out.shape[0], -1)
         raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
 
     def _process_spatial(self, X_spa):
@@ -1977,8 +2105,12 @@ class GraphCastGRU(torch.nn.Module):
         x = self.net(X_graphcast, graph, graph2mesh, mesh2graph)[-1]
 
         # Prediction head
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
+
+        hidden = self.linear2(x)
         logits = self.output_layer(hidden)
 
         if self.task_type == "corn":
@@ -2060,6 +2192,10 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         use_spatial_norm: bool = True,
         spatial_norm_type: str = "batchnorm",
         use_fusion_norm: bool = False,
+
+        # ---- Head normalization ----
+        use_head_norm: bool = True,
+        head_norm_type: str = "batchnorm",
     ):
         """
         GraphCast-based model with attention, preceded by a GRU encoder.
@@ -2108,10 +2244,10 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         self.temporal_norm_type = temporal_norm_type.lower()
         self.spatial_norm_type = spatial_norm_type.lower()
 
-        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
             raise ValueError(
                 f"Unsupported temporal_pool='{temporal_pool}'. "
-                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
             )
 
         if use_temporal_conv and conv_kernel_size % 2 == 0:
@@ -2174,6 +2310,8 @@ class GraphCastGRUWithAttention(torch.nn.Module):
 
         if self.temporal_pool == "meanmax":
             self.temporal_repr_dim = 2 * input_dim_grid_nodes
+        elif self.temporal_pool == "flatten":
+            self.temporal_repr_dim = input_dim_grid_nodes * n_sequences
         else:
             self.temporal_repr_dim = input_dim_grid_nodes
 
@@ -2315,10 +2453,17 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # Therefore the head input is only output_dim_grid_nodes.
         # ------------------------------------------------------------------
         self.linear1 = nn.Linear(output_dim_grid_nodes, lin_channels).to(device)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, lin_channels, device)
+            if use_head_norm else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
         self.linear2 = nn.Linear(lin_channels, end_channels).to(device)
         self.output_layer = nn.Linear(end_channels, out_channels).to(device)
-
-        self.act_func = _make_activation(act_func)
 
         if task_type == "classification":
             self.output_activation = nn.Softmax(dim=-1)
@@ -2361,6 +2506,8 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             x, a_t = self.temporal_pool_layer(seq_out)
             self.last_temporal_attention_coef = a_t
             return x
+        elif self.temporal_pool == "flatten":
+            return seq_out.reshape(seq_out.shape[0], -1)
 
         raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
 
@@ -2531,8 +2678,12 @@ class GraphCastGRUWithAttention(torch.nn.Module):
         # --------------------------------------------------------------
         # Prediction head
         # --------------------------------------------------------------
-        x = self.act_func(self.linear1(x))
-        hidden = self.act_func(self.linear2(x))
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
+
+        hidden = self.linear2(x)
         logits = self.output_layer(hidden)
 
         if self.task_type == "corn":

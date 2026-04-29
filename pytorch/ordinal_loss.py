@@ -7931,7 +7931,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         # ============================================================
         # Soft class-center estimation
         # ============================================================
-        gamma: float = 5.0,
         taugate: float = 0.05,
         gatetemp: float = 0.11,
         massupdate: float = 0.5,
@@ -7984,7 +7983,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.wmu0 = float(wmu0)
         self.wtrans = float(wtrans)
 
-        self.gamma = float(gamma)
         self.taugate = float(taugate)
         self.gatetemp = float(gatetemp)
 
@@ -8421,8 +8419,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         #print('cluster', lambda_c)
         #print('departement', lambda_d)
         
-        min_mass_update = self.massupdate * self.taugate
-
+        min_mass_update = self.massupdate
+        
         # Mapping local cluster -> local department
         if Zd > 0 and departement_ids_local is not None:
             cluster_to_dept_local = torch.empty(Zc, dtype=torch.long, device=device)

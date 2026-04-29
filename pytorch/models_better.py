@@ -77,6 +77,9 @@ class BetterGRU(nn.Module):
     head_norm1: nn.Module
     head_act1: nn.Module
     head_dropout1: nn.Module
+    concatenation: str
+    time_fusion_mlp: nn.Module
+    time_fusion_dim: int
 
     def __init__(
         self,
@@ -116,13 +119,17 @@ class BetterGRU(nn.Module):
         # ---- Normalization refinement parameters ----
         use_temporal_norm: bool = True,
         temporal_norm_type: str = "layernorm",
-        use_spatial_norm: bool = True,
+        use_spatial_norm: bool = False,
         spatial_norm_type: str = "batchnorm",
         use_fusion_norm: bool = False,
 
         # ---- Head normalization ----
         use_head_norm: bool = True,
         head_norm_type: str = "batchnorm",
+
+        # ---- Spatial-temporal concatenation mode ----
+        concatenation: str = "last",   # "last" | "time"
+        time_fusion_dim: Optional[int] = None,
     ):
         super(BetterGRU, self).__init__()
 
@@ -153,11 +160,24 @@ class BetterGRU(nn.Module):
         self.use_full_sequence = use_full_sequence
         self.temporal_pool = temporal_pool.lower()
         self.use_spatial_mlp = use_spatial_mlp
+        self.concatenation = concatenation.lower()
 
-        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn"}:
+        if self.concatenation not in {"last", "time"}:
+            raise ValueError(
+                f"Unsupported concatenation='{concatenation}'. "
+                "Choose from ['last', 'time']."
+            )
+
+        if self.concatenation == "time" and spatialContext:
+            raise ValueError(
+                "concatenation='time' is not compatible with spatialContext=True, "
+                "because spatial features are already injected at each time step."
+            )
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
             raise ValueError(
                 f"Unsupported temporal_pool='{temporal_pool}'. "
-                f"Choose from ['last', 'mean', 'max', 'meanmax', 'attn']."
+                f"Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
             )
 
         if self.use_temporal_conv and conv_kernel_size % 2 == 0:
@@ -215,35 +235,6 @@ class BetterGRU(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True
         ).to(device)
-
-        # ----------------------------
-        # Temporal pooling over full sequence
-        # ----------------------------
-        if not self.use_full_sequence:
-            self.temporal_pool = "last"
-
-        if self.temporal_pool == "meanmax":
-            self.temporal_repr_dim = 2 * gru_size
-        else:
-            self.temporal_repr_dim = gru_size
-
-        if self.temporal_pool == "attn":
-            self.temporal_pool_layer = TemporalAttentionPooling(gru_size, device=device)
-        else:
-            self.temporal_pool_layer = nn.Identity()
-
-        # ----------------------------
-        # Normalization after temporal readout
-        # ----------------------------
-        if use_temporal_norm:
-            if temporal_norm_type == "layernorm":
-                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
-            elif temporal_norm_type == "batchnorm":
-                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
-            else:
-                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
-        else:
-            self.temporal_norm = nn.Identity().to(device)
 
         self.dropout = nn.Dropout(p=dropout).to(device)
 
@@ -303,10 +294,77 @@ class BetterGRU(nn.Module):
             self.spatial_norm = nn.Identity().to(device)
 
         # ----------------------------
-        # Optional spatial context fusion
-        # Assumes SpatialContextSet is already defined in your codebase.
+        # Temporal-spatial fusion before temporal pooling
         # ----------------------------
-        if self.spatialContext and self.has_spatial:
+        if self.concatenation == "time":
+            self.gru_output_norm = nn.LayerNorm(gru_size).to(device)
+        else:
+            self.gru_output_norm = nn.Identity().to(device)
+            
+        if self.concatenation == "time":
+            if not self.has_spatial:
+                raise ValueError(
+                    "concatenation='time' requires static_idx to be non-empty."
+                )
+
+            self.time_fusion_dim = gru_size if time_fusion_dim is None else time_fusion_dim
+
+            self.time_fusion_mlp = nn.Sequential(
+                nn.Linear(gru_size + self.spatial_out_dim, self.time_fusion_dim).to(device),
+                nn.LayerNorm(self.time_fusion_dim).to(device),
+                _make_activation(act_func),
+                nn.Dropout(dropout).to(device),
+            )
+
+            temporal_base_dim = self.time_fusion_dim
+
+        else:
+            self.time_fusion_dim = gru_size
+            self.time_fusion_mlp = nn.Identity().to(device)
+            temporal_base_dim = gru_size
+
+        # ----------------------------
+        # Temporal pooling over full sequence
+        # ----------------------------
+        if not self.use_full_sequence:
+            self.temporal_pool = "last"
+
+        if self.temporal_pool == "meanmax":
+            self.temporal_repr_dim = 2 * temporal_base_dim
+        elif self.temporal_pool == "flatten":
+            self.temporal_repr_dim = temporal_base_dim * n_sequences
+        else:
+            self.temporal_repr_dim = temporal_base_dim
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(
+                temporal_base_dim,
+                device=device,
+            )
+        else:
+            self.temporal_pool_layer = nn.Identity()
+
+        # ----------------------------
+        # Normalization after temporal readout
+        # ----------------------------
+        if use_temporal_norm:
+            if temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(self.temporal_repr_dim).to(device)
+            elif temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(self.temporal_repr_dim).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity().to(device)
+
+        # ----------------------------
+        # Optional spatial context fusion / late fusion
+        # ----------------------------
+        if self.concatenation == "time":
+            self.context_layer = None
+            fusion_dim = self.temporal_repr_dim
+
+        elif self.spatialContext and self.has_spatial:
             self.context_layer = SpatialContextSet(
                 d_channels,
                 self.temporal_repr_dim,
@@ -315,8 +373,9 @@ class BetterGRU(nn.Module):
                 dropout=dropout,
                 use_sigmoid_gating=True,
                 renorm_gates=True,
-            )
+            ).to(device)
             fusion_dim = d_channels
+
         else:
             self.context_layer = None
             fusion_dim = self.temporal_repr_dim + self.spatial_out_dim
@@ -356,6 +415,8 @@ class BetterGRU(nn.Module):
             self.output_activation = nn.Softmax(dim=-1).to(device)
         elif task_type == 'binary':
             self.output_activation = nn.Softmax(dim=-1).to(device)
+        elif task_type == 'uclassification':
+            self.output_activation = UClassificationActivation()
         else:
             self.output_activation = nn.Identity().to(device)
 
@@ -379,6 +440,8 @@ class BetterGRU(nn.Module):
         elif self.temporal_pool == "attn":
             x, a_t = self.temporal_pool_layer(seq_out)
             self.last_temporal_attention_coef = a_t
+        elif self.temporal_pool == "flatten":
+            x = seq_out.reshape(seq_out.shape[0], -1)
         else:
             raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
 
@@ -449,23 +512,48 @@ class BetterGRU(nn.Module):
         
         # GRU over full sequence
         seq_out, _ = self.gru(x, h0)
+        seq_out = self.gru_output_norm(seq_out)
 
+        # ------------------------------------------------------------
+        # Spatial-temporal fusion before temporal aggregation
+        # ------------------------------------------------------------
+        spa_repr = None
+
+        if self.has_spatial:
+            spa_repr = self._process_spatial(X_spa)
+
+        if self.concatenation == "time":
+            if spa_repr is None:
+                raise RuntimeError(
+                    "concatenation='time' requires a valid spatial representation."
+                )
+            
+            spa_seq = spa_repr.unsqueeze(1).expand(-1, seq_out.size(1), -1)
+            seq_out = torch.cat((seq_out, spa_seq), dim=-1)
+            seq_out = self.time_fusion_mlp(seq_out)
+        
         # Temporal readout & Normalization ordering
         if self.temporal_pool == "attn":
             # Recurrent sequence -> LayerNorm -> attention pooling -> Dropout
             # Note: temporal_norm must be LayerNorm or Identity for sequence normalization
-            seq_out = self.temporal_norm(seq_out)
+            if self.concatenation != "time":
+                seq_out = self.temporal_norm(seq_out)
+                
             x = self._pool_temporal_sequence(seq_out)
             x = self.dropout(x)
         else:
             # Recurrent sequence -> pooling -> LayerNorm -> Dropout
             x = self._pool_temporal_sequence(seq_out)
-            x = self.temporal_norm(x)
+            if self.concatenation != "time":
+                x = self.temporal_norm(x)
             x = self.dropout(x)
 
-        # Spatial branch / context branch
-        if self.has_spatial:
-            spa_repr = self._process_spatial(X_spa)
+        # ------------------------------------------------------------
+        # Late spatial fusion only for concatenation="last"
+        # ------------------------------------------------------------
+        if self.concatenation == "last" and self.has_spatial:
+            if spa_repr is None:
+                spa_repr = self._process_spatial(X_spa)
 
             if self.spatialContext and self.context_layer is not None:
                 x, a_s = self.context_layer(x, spa_repr)
@@ -475,6 +563,8 @@ class BetterGRU(nn.Module):
                 self.last_attention_coef = None
         else:
             self.last_attention_coef = None
+            
+        x = self.norm_after_concat(x)
 
         # Head
         x = self.linear1(x)
