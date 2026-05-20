@@ -368,7 +368,7 @@ class NetMLP(nn.Module):
         self.layer2 = nn.Linear(end_channels, output_channels).to(device)
         self.soft = nn.Softmax(dim=1)
 
-    def forward(self, features, z_prev=None, edges=None):
+    def forward(self, features, z_prev=None, edges=None, **kwargs):
         if features.device != self.device:
             features = features.to(self.device)
 
@@ -491,7 +491,7 @@ class GRU(torch.nn.Module):
         else:
             self.output_activation = torch.nn.Identity().to(device)  # For regression or custom handling
             
-    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None, **kwargs):
         """
         Parameters:
             X: Tensor of shape (batch_size, features, sequence_length)
@@ -960,7 +960,7 @@ class LSTM(torch.nn.Module):
         y = self.spatial_norm(y)
         return y
 
-    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None, **kwargs):
         """
         Parameters:
             X: Tensor of shape (batch_size, features, sequence_length)
@@ -1537,7 +1537,7 @@ class DilatedCNN(torch.nn.Module):
 
         return pooled
 
-    def forward(self, x, edges=None, z_prev=None):
+    def forward(self, x, edges=None, z_prev=None, **kwargs):
         x = x.to(self.device) if x.device != self.device else x
 
         # ------------------------------------------------------------
@@ -2692,5 +2692,557 @@ class GraphCastGRUWithAttention(torch.nn.Module):
             output = self.output_activation(logits)
 
         self._decoder_input = hidden
+
+        return output, logits, hidden
+    
+import torch
+import torch.nn as nn
+
+class GraphCastTime(torch.nn.Module):
+    """
+    GraphCastTime:
+    - encode temporal features with a GRU;
+    - encode static/spatial features with a spatial MLP;
+    - concatenate spatial representation at each time step;
+    - apply one shared GraphCast module independently at each time step;
+    - aggregate the resulting graph-aware temporal sequence before prediction.
+
+    Expected input:
+        X: (N, C, T)
+
+    where N is the number of grid nodes of one graph, not an independent batch
+    of unrelated samples. Spatial connections are handled by:
+        graph, graph2mesh, mesh2graph.
+    """
+
+    def __init__(
+        self,
+        *,
+        device,
+        # --- GRU specific parameters ---
+        in_channels: int = 16,
+        num_gru_layers: int = 1,
+
+        # --- GraphCast parameters ---
+        input_dim_grid_nodes: int = 10,
+        input_dim_mesh_nodes: int = 3,
+        input_dim_edges: int = 4,
+        end_channels: int = 64,
+        lin_channels: int = 64,
+        output_dim_grid_nodes: int = 1,   # kept for API compatibility
+        processor_layers: int = 4,
+        hidden_layers: int = 1,
+        hidden_dim: int = 512,
+        aggregation: str = "sum",
+        norm_type: str = "LayerNorm",
+        out_channels: int = 4,
+        task_type: str = "classification",
+        do_concat_trick: bool = False,
+        has_time_dim: bool = False,       # kept, but GraphCast is called per time step
+        n_sequences: int = 1,
+        act_func: str = "ReLU",
+        is_graph_or_node: bool = False,
+        return_hidden: bool = False,
+        horizon: int = 0,
+        temporal_idx=None,
+        static_idx=None,
+        spatialContext=False,             # kept for API compatibility
+        d_channels=16,
+        dropout: float = 0.03,
+
+        # ---- Optional temporal Conv1d encoder before GRU ----
+        use_temporal_conv: bool = False,
+        conv_channels=None,
+        conv_kernel_size: int = 3,
+        conv_layers: int = 1,
+
+        # ---- Temporal aggregation after shared GraphCast ----
+        use_full_sequence: bool = True,
+        temporal_pool: str = "flatten",   # "last" | "mean" | "max" | "meanmax" | "attn" | "flatten"
+
+        # ---- Spatial branch ----
+        use_spatial_mlp: bool = True,
+        spatial_hidden_channels: int = 128,
+        spatial_mlp_layers: int = 3,
+        spatial_mlp_use_bn: bool = True,
+
+        # ---- Fusion mode ----
+        concatenation: str = "time",      # "time" | "none"
+        time_fusion_dim: int = 128,       # GraphCast output dim at each time step
+
+        # ---- Normalization refinement parameters ----
+        use_temporal_norm: bool = True,
+        temporal_norm_type: str = "layernorm",
+        use_spatial_norm: bool = False,
+        spatial_norm_type: str = "batchnorm",
+
+        # ---- Head normalization ----
+        use_head_norm: bool = True,
+        head_norm_type: str = "batchnorm",
+    ):
+        super().__init__()
+        self.device = device
+
+        # ------------------------------------------------------------------
+        # Bookkeeping
+        # ------------------------------------------------------------------
+        self.task_type = task_type
+        self.return_hidden = return_hidden
+        self.end_channels = end_channels
+        self.horizon = horizon
+        self.out_channels = out_channels
+        self.n_sequences = n_sequences
+        self.is_graph_or_node = is_graph_or_node == "graph"
+        self.spatialContext = spatialContext
+
+        self.temporal_idx = list(temporal_idx) if temporal_idx is not None else None
+        self.spatial_idx = list(static_idx) if static_idx is not None else []
+
+        self.use_temporal_conv = use_temporal_conv
+        self.use_full_sequence = use_full_sequence
+        self.temporal_pool = temporal_pool.lower()
+        self.use_spatial_mlp = use_spatial_mlp
+        self.has_spatial = len(self.spatial_idx) > 0
+
+        self.concatenation = concatenation.lower()
+        self.time_fusion_dim = time_fusion_dim
+
+        if self.concatenation not in {"time", "none"}:
+            raise ValueError(
+                f"Unsupported concatenation='{concatenation}'. "
+                "Choose from ['time', 'none']."
+            )
+
+        if self.temporal_pool not in {"last", "mean", "max", "meanmax", "attn", "flatten"}:
+            raise ValueError(
+                f"Unsupported temporal_pool='{temporal_pool}'. "
+                "Choose from ['last', 'mean', 'max', 'meanmax', 'attn', 'flatten']."
+            )
+
+        if use_temporal_conv and conv_kernel_size % 2 == 0:
+            raise ValueError("conv_kernel_size must be odd to preserve temporal length.")
+
+        self.gru_size = input_dim_grid_nodes
+        self.num_gru_layers = num_gru_layers
+
+        # ------------------------------------------------------------------
+        # Dimensions
+        # ------------------------------------------------------------------
+        g_cha = len(self.temporal_idx) if self.temporal_idx is not None else in_channels
+        temporal_in_channels = g_cha + end_channels if horizon > 0 else g_cha
+
+        # ------------------------------------------------------------------
+        # Optional temporal Conv1d encoder
+        # Input:  (N, C, T)
+        # Output: (N, C', T)
+        # ------------------------------------------------------------------
+        if use_temporal_conv:
+            conv_channels = temporal_in_channels if conv_channels is None else conv_channels
+            conv_blocks = []
+
+            c_in = temporal_in_channels
+            c_out = conv_channels
+
+            for _ in range(max(1, conv_layers)):
+                conv_blocks.append(
+                    nn.Conv1d(
+                        c_in,
+                        c_out,
+                        kernel_size=conv_kernel_size,
+                        padding=conv_kernel_size // 2,
+                    )
+                )
+                conv_blocks.append(nn.BatchNorm1d(c_out))
+                conv_blocks.append(_make_activation(act_func))
+                conv_blocks.append(nn.Dropout(dropout))
+                c_in = c_out
+
+            self.temporal_encoder = nn.Sequential(*conv_blocks).to(device)
+            gru_input_size = c_out
+        else:
+            self.temporal_encoder = nn.Identity().to(device)
+            gru_input_size = temporal_in_channels
+
+        # ------------------------------------------------------------------
+        # GRU temporal encoder
+        # Input:  (N, T, C')
+        # Output: (N, T, H)
+        # ------------------------------------------------------------------
+        self.gru = nn.GRU(
+            input_size=gru_input_size,
+            hidden_size=input_dim_grid_nodes,
+            num_layers=num_gru_layers,
+            dropout=dropout if num_gru_layers > 1 else 0.0,
+            batch_first=True,
+        ).to(device)
+
+        # ------------------------------------------------------------------
+        # Temporal normalization on the GRU sequence
+        # ------------------------------------------------------------------
+        self.temporal_norm_type = temporal_norm_type.lower()
+
+        if use_temporal_norm:
+            if self.temporal_norm_type == "layernorm":
+                self.temporal_norm = nn.LayerNorm(input_dim_grid_nodes).to(device)
+            elif self.temporal_norm_type == "batchnorm":
+                self.temporal_norm = nn.BatchNorm1d(input_dim_grid_nodes).to(device)
+            else:
+                raise ValueError(f"Unsupported temporal_norm_type: {temporal_norm_type}")
+        else:
+            self.temporal_norm = nn.Identity().to(device)
+
+        self.dropout = nn.Dropout(dropout).to(device)
+
+        # ------------------------------------------------------------------
+        # Spatial branch
+        # ------------------------------------------------------------------
+        if self.has_spatial:
+            spatial_in_dim = len(self.spatial_idx)
+
+            if spatial_hidden_channels is None:
+                spatial_hidden_channels = spatial_in_dim
+
+            if use_spatial_mlp:
+                spatial_layers = []
+                d_in = spatial_in_dim
+
+                for _ in range(max(1, spatial_mlp_layers)):
+                    spatial_layers.append(
+                        MLPLayer(
+                            in_feats=d_in,
+                            out_feats=spatial_hidden_channels,
+                            device=device,
+                            activation=act_func,
+                            dropout=dropout,
+                            use_bn=spatial_mlp_use_bn,
+                        )
+                    )
+                    d_in = spatial_hidden_channels
+
+                self.spatial_mlp = nn.Sequential(*spatial_layers).to(device)
+                self.encoder_spatial = None
+                self.spa_norm = None
+                self.spatial_out_dim = d_in
+            else:
+                self.spatial_mlp = None
+                self.encoder_spatial = nn.Linear(spatial_in_dim, spatial_in_dim).to(device)
+                self.spa_norm = nn.BatchNorm1d(spatial_in_dim).to(device)
+                self.spatial_out_dim = spatial_in_dim
+
+            if use_spatial_norm:
+                if spatial_norm_type == "batchnorm":
+                    self.spatial_norm = nn.BatchNorm1d(self.spatial_out_dim).to(device)
+                elif spatial_norm_type == "layernorm":
+                    self.spatial_norm = nn.LayerNorm(self.spatial_out_dim).to(device)
+                else:
+                    raise ValueError(f"Unsupported spatial_norm_type: {spatial_norm_type}")
+            else:
+                self.spatial_norm = nn.Identity().to(device)
+        else:
+            self.spatial_mlp = None
+            self.encoder_spatial = None
+            self.spa_norm = None
+            self.spatial_out_dim = 0
+            self.spatial_norm = nn.Identity().to(device)
+
+        # ------------------------------------------------------------------
+        # GraphCast used as a time-shared spatio-temporal fusion operator
+        # ------------------------------------------------------------------
+        if self.concatenation == "time":
+            if not self.has_spatial:
+                raise RuntimeError(
+                    "concatenation='time' requires static_idx / spatial features."
+                )
+            graphcast_input_dim = input_dim_grid_nodes + self.spatial_out_dim
+        else:
+            graphcast_input_dim = input_dim_grid_nodes
+
+        self.graphcast_input_dim = graphcast_input_dim
+
+        self.net = GraphCastNet(
+            graphcast_input_dim,
+            input_dim_mesh_nodes,
+            input_dim_edges,
+            time_fusion_dim,
+            processor_layers,
+            hidden_layers,
+            hidden_dim,
+            aggregation,
+            norm_type,
+            do_concat_trick,
+            False,  # GraphCast is called per time step, so no explicit time dim here
+        ).to(device)
+
+        # ------------------------------------------------------------------
+        # Temporal aggregation after GraphCast
+        # seq_graph: (N, T, time_fusion_dim)
+        # ------------------------------------------------------------------
+        if not use_full_sequence:
+            self.temporal_pool = "last"
+
+        if self.temporal_pool == "meanmax":
+            self.graph_repr_dim = 2 * time_fusion_dim
+        elif self.temporal_pool == "flatten":
+            self.graph_repr_dim = time_fusion_dim * n_sequences
+        else:
+            self.graph_repr_dim = time_fusion_dim
+
+        if self.temporal_pool == "attn":
+            self.temporal_pool_layer = TemporalAttentionPooling(
+                time_fusion_dim,
+                device=device,
+            ).to(device)
+        else:
+            self.temporal_pool_layer = None
+
+        self.last_temporal_attention_coef = None
+        self.last_graph_sequence = None
+
+        # ------------------------------------------------------------------
+        # Output head
+        # ------------------------------------------------------------------
+        self.linear1 = nn.Linear(self.graph_repr_dim, lin_channels).to(device)
+
+        self.head_norm1 = (
+            _make_head_norm(head_norm_type, lin_channels, device)
+            if use_head_norm
+            else nn.Identity().to(device)
+        )
+
+        self.head_act1 = _make_activation(act_func)
+        self.head_dropout1 = nn.Dropout(dropout).to(device)
+
+        self.linear2 = nn.Linear(lin_channels, end_channels).to(device)
+        self.output_layer = nn.Linear(end_channels, out_channels).to(device)
+
+        if task_type == "classification":
+            self.output_activation = nn.Softmax(dim=-1)
+        elif task_type == "binary":
+            self.output_activation = nn.Sigmoid()
+        elif task_type == "uclassification":
+            self.output_activation = UClassificationActivation()
+        else:
+            self.output_activation = nn.Identity()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _process_spatial(self, X_spa):
+        """
+        X_spa: (N, S) -> (N, spatial_out_dim)
+        """
+        if not self.has_spatial:
+            return None
+
+        if self.use_spatial_mlp and self.spatial_mlp is not None:
+            y = self.spatial_mlp(X_spa)
+        elif not self.use_spatial_mlp and self.encoder_spatial is not None:
+            y = self.encoder_spatial(X_spa)
+        else:
+            return None
+
+        y = self.spatial_norm(y)
+        return y
+
+    def _apply_temporal_norm_to_sequence(self, seq_out):
+        """
+        seq_out: (N, T, H)
+        """
+        if isinstance(self.temporal_norm, nn.Identity):
+            return seq_out
+
+        if self.temporal_norm_type == "layernorm":
+            return self.temporal_norm(seq_out)
+
+        if self.temporal_norm_type == "batchnorm":
+            seq_out = seq_out.transpose(1, 2)       # (N, H, T)
+            seq_out = self.temporal_norm(seq_out)   # BatchNorm1d(H)
+            seq_out = seq_out.transpose(1, 2)       # (N, T, H)
+            return seq_out
+
+        raise ValueError(f"Unsupported temporal_norm_type: {self.temporal_norm_type}")
+
+    def _run_graphcast_once(self, x_t, graph, graph2mesh, mesh2graph):
+        """
+        x_t: (N, D_graph)
+
+        Returns:
+            y_t: (N, time_fusion_dim)
+        """
+
+        y = self.net(x_t, graph, graph2mesh, mesh2graph)
+
+        # Compatible with GraphCastNet returning either a tensor or a list/tuple.
+        if isinstance(y, (list, tuple)):
+            y = y[-1]
+
+        # Common case: (1, N, F) -> (N, F)
+        if y.dim() == 3 and y.size(0) == 1:
+            y = y.squeeze(0)
+
+        return y
+
+    def _pool_graph_sequence(self, seq_graph):
+        """
+        seq_graph: (N, T, F) -> (N, F') depending on temporal_pool
+        """
+        self.last_temporal_attention_coef = None
+
+        if self.temporal_pool == "last":
+            return seq_graph[:, -1, :]
+
+        if self.temporal_pool == "mean":
+            return seq_graph.mean(dim=1)
+
+        if self.temporal_pool == "max":
+            return seq_graph.max(dim=1).values
+
+        if self.temporal_pool == "meanmax":
+            return torch.cat(
+                (
+                    seq_graph.mean(dim=1),
+                    seq_graph.max(dim=1).values,
+                ),
+                dim=1,
+            )
+
+        if self.temporal_pool == "attn":
+            x, a_t = self.temporal_pool_layer(seq_graph)
+            self.last_temporal_attention_coef = a_t
+            return x
+
+        if self.temporal_pool == "flatten":
+            if seq_graph.size(1) != self.n_sequences:
+                raise ValueError(
+                    "temporal_pool='flatten' requires a fixed sequence length. "
+                    f"Expected n_sequences={self.n_sequences}, got T={seq_graph.size(1)}."
+                )
+            return seq_graph.reshape(seq_graph.size(0), -1)
+
+        raise ValueError(f"Unsupported temporal_pool: {self.temporal_pool}")
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+    def forward(self, X, graph, graph2mesh, mesh2graph, z_prev=None):
+        """
+        Args:
+            X: Tensor shaped (N, C, T), where N is the number of grid nodes.
+
+        Returns:
+            output, logits, hidden
+        """
+        _dev = next(self.parameters()).device
+        X = X.to(_dev) if X.device != _dev else X
+
+        N, C_in, T = X.shape
+
+        # --------------------------------------------------------------
+        # Split temporal / spatial features
+        # --------------------------------------------------------------
+        X_spa = None
+        if self.has_spatial:
+            X_spa = X[:, self.spatial_idx, -1]          # (N, S)
+
+        if self.temporal_idx is not None:
+            X_temp = X[:, self.temporal_idx, :]         # (N, Ft, T)
+        else:
+            X_temp = X                                  # (N, C, T)
+
+        # --------------------------------------------------------------
+        # Horizon conditioning
+        # --------------------------------------------------------------
+        if z_prev is None:
+            z_prev = torch.zeros(
+                (N, self.end_channels, self.n_sequences),
+                device=_dev,
+                dtype=X.dtype,
+            )
+        else:
+            z_prev = z_prev.view(N, self.end_channels, self.n_sequences)
+
+        if self.horizon > 0:
+            X_temp = torch.cat((X_temp, z_prev), dim=1)
+
+        # --------------------------------------------------------------
+        # Temporal Conv1d encoder
+        # --------------------------------------------------------------
+        X_temp = self.temporal_encoder(X_temp)           # (N, C', T)
+
+        # --------------------------------------------------------------
+        # GRU temporal encoding
+        # --------------------------------------------------------------
+        x_gru = X_temp.permute(0, 2, 1)                 # (N, T, C')
+        h0 = torch.zeros(
+            self.num_gru_layers,
+            N,
+            self.gru_size,
+            device=_dev,
+            dtype=x_gru.dtype,
+        )
+
+        seq_out, _ = self.gru(x_gru, h0)                # (N, T, H)
+        seq_out = self._apply_temporal_norm_to_sequence(seq_out)
+        seq_out = self.dropout(seq_out)
+
+        # --------------------------------------------------------------
+        # Spatial representation
+        # --------------------------------------------------------------
+        spa_repr = None
+        if self.has_spatial and X_spa is not None:
+            spa_repr = self._process_spatial(X_spa)      # (N, S)
+
+        # --------------------------------------------------------------
+        # Time-wise GraphCast fusion
+        # Equivalent idea to a shared time_fusion_mlp, but with message passing.
+        # --------------------------------------------------------------
+        if self.concatenation == "time":
+            if spa_repr is None:
+                raise RuntimeError(
+                    "concatenation='time' requires a valid spatial representation."
+                )
+
+            spa_seq = spa_repr.unsqueeze(1).expand(-1, T, -1)      # (N, T, S)
+            seq_fused = torch.cat((seq_out, spa_seq), dim=-1)      # (N, T, H+S)
+        else:
+            seq_fused = seq_out                                    # (N, T, H)
+
+        graph_outputs = []
+
+        for t in range(T):
+            x_t = seq_fused[:, t, :]                               # (N, D_graph)
+
+            g_t = self._run_graphcast_once(
+                x_t,
+                graph,
+                graph2mesh,
+                mesh2graph,
+            )                                                       # (N, time_fusion_dim)
+
+            graph_outputs.append(g_t)
+
+        seq_graph = torch.stack(graph_outputs, dim=1)              # (N, T, time_fusion_dim)
+        self.last_graph_sequence = seq_graph
+
+        # --------------------------------------------------------------
+        # Temporal aggregation after GraphCast
+        # --------------------------------------------------------------
+        x = self._pool_graph_sequence(seq_graph)                   # (N, graph_repr_dim)
+
+        # --------------------------------------------------------------
+        # Prediction head
+        # --------------------------------------------------------------
+        x = self.linear1(x)
+        x = self.head_norm1(x)
+        x = self.head_act1(x)
+        x = self.head_dropout1(x)
+
+        hidden = self.linear2(x)
+        logits = self.output_layer(hidden)
+
+        if self.task_type == "corn":
+            output = corn_class_probs(logits)
+        else:
+            output = self.output_activation(logits)
 
         return output, logits, hidden

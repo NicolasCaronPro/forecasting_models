@@ -7904,7 +7904,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         sigma:float,
         id: int = 0,
         eps: float = 1e-4,
-
+        
         # ============================================================
         # Group structure
         # ============================================================
@@ -9408,10 +9408,13 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 )
             )
 
+        d = d.loc[:,~d.columns.duplicated()].copy()
+
         # ---------------------------
         # Cluster distributions
         # ---------------------------
         for raw_cluster, dfg in d.groupby(cluster_col):
+            
             slot = self._register_cluster_slot_from_raw(int(raw_cluster))
 
             counts = (
@@ -10696,6 +10699,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
     def __init__(
         self,
         num_classes: int,
+        sigmasig: float = 1.0,
         sigma: float = 1.0,
         num_pairs_per_group: Optional[int] = 2048,
         tie_epsilon: float = 0.0,
@@ -10704,7 +10708,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         weight_by_delta: bool = True,
         delta_power: float = 1.0,
         wrank: float = 1.0,
-        wmid: float = 0.0,
+        wmid: float = 0.1,
         alphatype: str = "department",     # where thresholds are learned
         pair_scope: str = "department",    # where ranking comparisons are formed
         nclusters: int = 1,
@@ -10716,6 +10720,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         self.C = int(num_classes)
         self.id = int(id)
 
+        self.sigmasig = float(sigmasig)
         self.sigma = float(sigma)
         self.num_pairs_per_group = num_pairs_per_group
         self.tie_epsilon = float(tie_epsilon)
@@ -10962,7 +10967,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         else:
             target = (dy > 0).to(dtype=si.dtype)
 
-        logits = self.sigma * (si - sj)
+        logits = self.sigmasig * (si - sj)
         
         # weights
         if self.weight_by_delta:
@@ -10972,7 +10977,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
 
         if wg is not None:
             wi, wj = wg[ii[valid]], wg[jj[valid]]
-            pair_weight = pair_weight * 0.5 * (wi + wj)
+            pair_weight = pair_weight * wi * wj
 
         return logits, target.to(logits.dtype), pair_weight.to(logits.dtype)
 
@@ -11103,6 +11108,9 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         clusters_ids   : (N,) raw cluster ids
         departement_ids: (N,) raw department ids
         """
+        score = score / self.sigma
+        y_cont = y_cont / self.sigma
+
         s = score.view(-1)
         y = y_cont.view(-1).to(device=s.device, dtype=s.dtype)
 

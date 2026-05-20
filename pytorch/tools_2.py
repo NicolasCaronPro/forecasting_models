@@ -325,6 +325,104 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             default_params.update(custom_model_params)
         model = LSTM(**default_params)
         model_params.update(default_params)
+        
+    elif model_name == 'GraphCastTime':
+        default_params = {
+            # ------------------------------------------------------------------
+            # Paramètres d'entrée généraux
+            # ------------------------------------------------------------------
+            'in_channels': in_dim,
+            'out_channels': out_channels,
+            'end_channels': 64,
+            'n_sequences': k_days + 1,
+            'device': device,
+            'act_func': act_func,
+            'task_type': task_type,
+            'return_hidden': False,
+            'dropout': dropout,
+            'horizon': horizon,
+
+            # ------------------------------------------------------------------
+            # Index des variables
+            # ------------------------------------------------------------------
+            'temporal_idx': None,   # sera fourni via custom_model_params
+            'static_idx': None,     # sera fourni via custom_model_params
+
+            # ------------------------------------------------------------------
+            # Encodeur temporel GRU
+            # ------------------------------------------------------------------
+            'input_dim_grid_nodes': 128,   # dimension cachée du GRU dans GraphCastTime
+            'num_gru_layers': 2,
+
+            # ------------------------------------------------------------------
+            # Encodeur Conv1d temporel optionnel avant le GRU
+            # ------------------------------------------------------------------
+            'use_temporal_conv': False,
+            'conv_channels': None,
+            'conv_kernel_size': 3,
+            'conv_layers': 1,
+
+            # ------------------------------------------------------------------
+            # Branche spatiale
+            # ------------------------------------------------------------------
+            'use_spatial_mlp': True,
+            'spatial_hidden_channels': 64,
+            'spatial_mlp_layers': 2,
+            'spatial_mlp_use_bn': True,
+
+            # ------------------------------------------------------------------
+            # Fusion temporelle par GraphCast partagé
+            # ------------------------------------------------------------------
+            'concatenation': 'time',
+            'time_fusion_dim': 128,
+
+            # ------------------------------------------------------------------
+            # Agrégation temporelle après GraphCast
+            # ------------------------------------------------------------------
+            'use_full_sequence': True,
+            'temporal_pool': 'flatten',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn' | 'flatten'
+
+            # ------------------------------------------------------------------
+            # Paramètres GraphCast
+            # ------------------------------------------------------------------
+            'input_dim_mesh_nodes': 3,
+            'input_dim_edges': 4,
+            'output_dim_grid_nodes': 128,  # conservé pour compatibilité API
+            'processor_layers': 4,
+            'hidden_layers': 1,
+            'hidden_dim': 512,
+            'aggregation': 'sum',
+            'norm_type': 'LayerNorm',
+            'do_concat_trick': False,
+            'has_time_dim': False,
+
+            # ------------------------------------------------------------------
+            # Normalisations
+            # ------------------------------------------------------------------
+            'use_temporal_norm': True,
+            'temporal_norm_type': 'layernorm',
+            'use_spatial_norm': False,
+            'spatial_norm_type': 'batchnorm',
+
+            # ------------------------------------------------------------------
+            # Normalisation de la tête de sortie
+            # ------------------------------------------------------------------
+            'use_head_norm': True,
+            'head_norm_type': 'batchnorm',
+
+            # ------------------------------------------------------------------
+            # Paramètres conservés pour compatibilité avec GraphCastGRU
+            # ------------------------------------------------------------------
+            'is_graph_or_node': False,
+            'spatialContext': False,
+            'd_channels': 64,
+        }
+
+        if custom_model_params is not None:
+            default_params.update(custom_model_params)
+
+        model = GraphCastTime(**default_params)
+        model_params.update(default_params)
 
     elif model_name == 'GRU':
         default_params = {
@@ -990,7 +1088,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'conv_layers': 1,
             # ---- Pooling sur la séquence GRU ----
             'use_full_sequence': True,
-            'temporal_pool': 'attn',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
+            'temporal_pool': 'last',  # 'last' | 'mean' | 'max' | 'meanmax' | 'attn'
             # ---- Branche spatiale ----
             'use_spatial_mlp': False,
             'spatial_hidden_channels': 64,

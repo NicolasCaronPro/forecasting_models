@@ -461,7 +461,7 @@ class BetterGRU(nn.Module):
         y = self.spatial_norm(y)
         return y
 
-    def forward(self, X, edge_index=None, graphs=None, z_prev=None):
+    def forward(self, X, edge_index=None, graphs=None, z_prev=None, **kwargs):
         """
         Parameters:
             X: Tensor of shape (batch_size, features, sequence_length)
