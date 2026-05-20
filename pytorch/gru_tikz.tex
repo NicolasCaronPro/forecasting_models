@@ -13,18 +13,18 @@
 ]
 
 % Temporal branch
-\node[io] (xin) {Input $X$\\$(B,\ C_{in},\ T)$};
+\node[io] (xin) {Input $X$\\$(B,\ C_{in},\ T)$\\$T=11$};
 \node[tblock, below=1.8cm of xin] (split) {Temporal selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ g,\ T)$\\$g=|\texttt{temporal\_idx}|$};
-\node[tblock, below=1.8cm of split] (gru) {2-layer GRU\\$(B,\ g,\ T) \rightarrow (B,\ T,\ G)$\\$G=\texttt{gru\_size}=128$};
-\node[tblock, right=2.2cm of gru] (pool) {Temporal pooling (flatten)\\$(B,\ T,\ G) \rightarrow (B,\ T\cdot G)$};
+\node[tblock, below=1.8cm of split] (gru) {2-layer GRU\\$(B,\ g,\ T) \rightarrow (B,\ T,\ 128)$\\$\texttt{gru\_size}=128$};
+\node[tblock, right=2.2cm of gru] (pool) {Temporal pooling (flatten)\\$(B,\ T,\ 128) \rightarrow (B,\ 1408)$};
 
 % Spatial branch
 \node[sblock, right=4.8cm of split] (ssplit) {Static selection\\$(B,\ C_{in},\ T) \rightarrow (B,\ s)$\\$s=|\texttt{static\_idx}|$};
 \node[sblock, below=1.8cm of ssplit] (smlp) {Spatial MLP (2 layers)\\$(B,\ s) \rightarrow (B,\ 64)$};
 
 % Fusion + head
-\node[hblock, below=1.8cm of pool] (fusion) {Concatenation (time mode)\\$(B,\ T\cdot G)\oplus(B,\64) \rightarrow (B,\ T\cdot G+64)$};
-\node[hblock, below=1.8cm of fusion] (tfuse) {Time-fusion MLP\\$(B,\ T\cdot G+64) \rightarrow (B,\ 128)$};
+\node[hblock, below=1.8cm of pool] (fusion) {Concatenation (time mode)\\$(B,\ 1408)\oplus(B,\64) \rightarrow (B,\ 1472)$};
+\node[hblock, below=1.8cm of fusion] (tfuse) {Time-fusion MLP\\$(B,\ 1472) \rightarrow (B,\ 128)$};
 \node[hblock, below=1.8cm of tfuse] (head1) {Head linear 1 + act\\$(B,\ 128) \rightarrow (B,\ 256)$};
 \node[hblock, below=1.8cm of head1] (head2) {Head linear 2 + act\\$(B,\ 256) \rightarrow (B,\ 64)$};
 \node[io, below=1.8cm of head2] (out) {Output layer\\$(B,\ 64) \rightarrow (B,\ O)$\\$O=\texttt{out\_channels}$};
