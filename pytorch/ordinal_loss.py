@@ -8848,77 +8848,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             raw = torch.stack([mu_active[:, b] - mu_active[:, a] for (a, b) in pairs], dim=0).to(s.device)
             margins = torch.stack([gains[a:b].sum() for (a, b) in pairs], dim=0).to(device)
             deltas = raw - margins.unsqueeze(1)
-            check_finite("deltas_before_scaling", deltas)
-
-            pair_indices = torch.as_tensor(
-                [self.pair_to_idx[(a, b)] for (a, b) in pairs],
-                device=device,
-                dtype=torch.long
-            )
-
-            abs_deltas = deltas.detach().abs()
-            batch_scale_per_pair = abs_deltas.median(dim=1).values.clamp_min(self.eps)
-
-            with torch.no_grad():
-                if self.delta_scale_ema.device != device:
-                    self.delta_scale_ema = self.delta_scale_ema.to(device=device)
-                if self.scaleagg == "cluster":
-                    for ci, slot_t in enumerate(active_cluster_slots):
-                        slot = int(slot_t.item())
-                        if slot < 0 or slot >= self.delta_scale_ema.shape[0]:
-                            continue
-                        bs_cid = abs_deltas[:, ci].clamp_min(self.eps)
-                        old = self.delta_scale_ema[slot, pair_indices]
-                        self.delta_scale_ema[slot, pair_indices] = (
-                            old * self.scale_momentum + bs_cid * (1.0 - self.scale_momentum)
-                        )
-                elif self.scaleagg == "department":
-                    if active_dept_slots is not None:
-                        for slot_t in active_dept_slots:
-                            slot = int(slot_t.item())
-                            if slot < 0 or slot >= self.delta_scale_ema.shape[0]:
-                                continue
-                            old = self.delta_scale_ema[slot, pair_indices]
-                            self.delta_scale_ema[slot, pair_indices] = (
-                                old * self.scale_momentum + batch_scale_per_pair * (1.0 - self.scale_momentum)
-                            )
-                
-                elif self.scaleagg == "None":
-                    pass
-                
-                elif self.scaleagg == "global":
-                    old = self.delta_scale_ema[pair_indices]
-                    self.delta_scale_ema[pair_indices] = (
-                        old * self.scale_momentum + batch_scale_per_pair * (1.0 - self.scale_momentum)
-                    )
-                else:
-                    raise ValueError(f'Unknowed value of scaleagg {self.scaleagg}')
-
-            if self.scaleagg == "cluster":
-                sc_raw = self.delta_scale_ema[
-                    active_cluster_slots.clamp(0, self.delta_scale_ema.shape[0] - 1)
-                ][:, pair_indices].T.to(device=device).clamp(self.scale_min, self.scale_max)
-                deltas = deltas / sc_raw
-                #deltas = deltas / margins.unsqueeze(1)
-            elif self.scaleagg == "department":
-                if active_dept_slots is not None:
-                    sc_depts = self.delta_scale_ema[
-                        active_dept_slots.clamp(0, self.delta_scale_ema.shape[0] - 1).long()
-                    ][:, pair_indices].to(device=device).mean(dim=0)
-                    sc = sc_depts.clamp(self.scale_min, self.scale_max)
-                    deltas = deltas / sc.unsqueeze(1)
-                    #deltas = deltas / margins.unsqueeze(1)
-            elif self.scaleagg == "None":
-                pass
-            elif self.scaleagg == "global":
-                sc = self.delta_scale_ema[pair_indices].to(device=device).clamp(self.scale_min, self.scale_max)
-                deltas = deltas / sc.unsqueeze(1)
-                #deltas = deltas / margins.unsqueeze(1)
-            else:
-                raise ValueError(f'Unknowed value of scaleagg {self.scaleagg}')
-
-            check_finite("deltas_after_scaling", deltas)
-            check_finite("delta_scale_ema", self.delta_scale_ema)
             
             MEDk = s.new_tensor(0.0)
             MINk = s.new_tensor(0.0)
@@ -8926,7 +8855,10 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             loss_med = 0.0
             loss_min = 0.0
             
-            loss_neg = F.softplus(-deltas).mean(dim=0)
+            # Évaluation type RankNet : BCEWithLogitsLoss(deltas, target=1)
+            # deltas > 0 signifie que mu_active_b > mu_active_a + margin
+            target_ones = torch.ones_like(deltas)
+            loss_neg = F.binary_cross_entropy_with_logits(deltas, target_ones)
 
             check_finite("loss_neg", loss_neg)
             check_finite("MEDk", MEDk)
@@ -11223,6 +11155,7 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         Convert score -> class using the learned thresholds.
         """
         s = scores.detach().flatten()
+        s = s / self.sigma
         device = s.device
         dtype = self.alpha.dtype
 
