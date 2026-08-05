@@ -3452,7 +3452,7 @@ class Scoring:
                 delta = mu[b] - (mu[a] + min_gain)
                 deltas.append(delta)
                 pairs_used.append((a, b))
-                coverage += 1
+                coverage += min(n_a, n_b)
 
         raw_deltas_by_pair = {pair: d for pair, d in zip(pairs_used, deltas)}
         

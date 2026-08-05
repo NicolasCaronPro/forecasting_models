@@ -1522,7 +1522,8 @@ class FocalLossAndWKLoss(torch.nn.modules.loss._WeightedLoss):
         weight: Optional[Tensor] = None,
         reduction: str = "mean",
         use_logits=True,
-        learned=False
+        learned=False,
+        **kwargs
     ) -> None:
         super().__init__(
             weight=weight, size_average=None, reduce=None, reduction=reduction
@@ -1822,6 +1823,7 @@ class FocalWKInversionLoss(torch.nn.modules.loss._WeightedLoss):
         inv_max_pairs_per_dep=2048,
         inv_weight_by_distance=True,
         inv_ignore_index=-100,
+        **kwargs
     ):
         super().__init__(
             weight=weight, size_average=None, reduce=None, reduction=reduction
@@ -1921,6 +1923,7 @@ class MonoticRiskLoss(nn.Module):
         max_pairs_per_cluster: int = 50,
         eps: float = 1e-8,
         id=None,
+        **kwargs
     ):
         super().__init__()
         self.id = id
@@ -7903,6 +7906,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         num_classes: int,
         sigma:float,
         id: int = 0,
+        iddept: int = 4,
         eps: float = 1e-4,
         
         # ============================================================
@@ -7910,7 +7914,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         # ============================================================
         nclusters: int = 1,
         ndepartements: int = 1,
-        clustersequaldept: bool = False,
 
         # ============================================================
         # Ordinal threshold model
@@ -7945,17 +7948,12 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         muinit=None,
 
         # ============================================================
-        # Delta scaling / normalization
-        # ============================================================
-        scaleagg: str = "department",
-        scaleinit=None,
-
-        # ============================================================
         # Coverage loss
         # ============================================================
         coverageagg: str = "global",          # "cluster", "department", "global"
-        coveragedistance: str = "cdf_l2",     # "cdf_l2", "cdf_l1", "cdf_linf", "l2"
+        coveragedistance: str = "cdf_l1",     # "cdf_l2", "cdf_l1", "cdf_linf", "l2"
         coveragewarmupupdates: int = 0,
+        warmupes: int = 2,
         wcoverage: float = 1.73,
         shift: float = 0.0,
 
@@ -7970,9 +7968,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         self.C = int(num_classes)
         self.id = int(id)
+        self.idept = int(iddept)
         self.nclusters = int(nclusters)
         self.ndepartements = int(ndepartements)
-        self.scaleagg = scaleagg
         self.alphatype = str(alphatype)
 
         self.beta = 0.0
@@ -7980,6 +7978,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         self.eps = float(eps)
 
         self.wcoverage = float(wcoverage)
+        self.warmupes = int(warmupes)
         self.wmu0 = float(wmu0)
         self.wtrans = float(wtrans)
 
@@ -7993,8 +7992,11 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         
         self.sigma = sigma
         
+        clustersequaldept = self.id == self.idept
+        
         if clustersequaldept:
             self.mu_lambda_c = 0
+            
         if self.ndepartements == 1:
             self.mu_lambda_d = 0
         
@@ -8073,24 +8075,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         else:
             self.g_raw = torch.zeros(self.C - 1)
 
-        if self.scaleagg == "cluster":
-            _default_scale = torch.ones(_buf_size, num_pairs)
-            self.register_buffer("delta_scale_ema", _default_scale)
-        elif self.scaleagg == "department":
-            _default_scale = torch.ones(_dept_buf_size, num_pairs)
-            self.register_buffer("delta_scale_ema", _default_scale)
-        else:
-            _default_scale = torch.ones(num_pairs)
-            self.register_buffer("delta_scale_ema", _default_scale)
-
-        if scaleinit is not None:
-            _sc = torch.as_tensor(scaleinit, dtype=torch.float32)
-            if _sc.shape == self.delta_scale_ema.shape:
-                self.delta_scale_ema.copy_(_sc)
-            else:
-                raise ValueError(
-                    f"scaleinit shape {tuple(_sc.shape)} != {tuple(self.delta_scale_ema.shape)}"
-                )
+        _default_scale = torch.ones(num_pairs)
+        self.register_buffer("delta_scale_ema", _default_scale)
 
         self.scale_momentum = mumomentum
         self.scale_min = 1e-3
@@ -8262,6 +8248,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             w = torch.softmax(-alpha * (deltas - c).abs(), dim=0)
             return (w * deltas).sum(dim=0)
 
+            new_buf[:len(old_buf)] = old_buf
+            self.register_buffer("coverage_update_count_departement", new_buf)
+            
+            if self.alphatype == "department":
+                raise RuntimeError("Cannot dynamically resize buffer when alphatype='department' because alpha is an nn.Parameter.")
+
+            self.ndepartements = new_size
+
     def _remap_ids(self, raw_ids: torch.Tensor, buf_size: int, kind: str):
         if raw_ids.dim() != 1:
             raw_ids = raw_ids.view(-1)
@@ -8280,6 +8274,15 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         else:
             raise ValueError(f"Unknown kind: {kind}")
 
+        if not raw_to_slot and (slot_to_raw != -1).any():
+            max_slot = -1
+            for slot_idx, raw_val in enumerate(slot_to_raw.tolist()):
+                if raw_val != -1:
+                    raw_to_slot[raw_val] = slot_idx
+                    if slot_idx > max_slot:
+                        max_slot = slot_idx
+            setattr(self, next_free_attr, max_slot + 1)
+
         local_ids = torch.empty_like(raw_ids, dtype=torch.long, device=device)
         next_free_slot = getattr(self, next_free_attr)
 
@@ -8291,8 +8294,10 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             else:
                 if next_free_slot >= buf_size:
                     raise ValueError(
-                        f"No free slot left for kind='{kind}'. Encountered new raw id {rid}, but buf_size={buf_size}."
+                        f"No free slot left for kind='{kind}'. "
+                        f"Encountered new raw id {rid}, but buf_size={buf_size}."
                     )
+
                 slot = next_free_slot
                 raw_to_slot[rid] = slot
                 slot_to_raw[slot] = rid
@@ -8352,6 +8357,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         mu_hat = torch.zeros(Z, device=device, dtype=dtype)
         mu_hat.scatter_add_(0, group_ids_local, w_loc * y)"""
         
+    def _group_centers_from_weights(self, y, weights, group_ids_local, Z):
         device = y.device
         dtype = y.dtype
         eps = self.eps
@@ -8363,7 +8369,9 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         sum_wy = torch.zeros(Z, device=device, dtype=dtype)
         sum_wy.scatter_add_(0, group_ids_local, wy)
 
-        mu_hat = sum_wy / m_k.clamp_min(eps)
+        mu_hat = torch.full((Z,), float('nan'), device=device, dtype=dtype)
+        valid = m_k > eps
+        mu_hat[valid] = sum_wy[valid] / m_k[valid]
 
         return m_k, mu_hat
     
@@ -8372,6 +8380,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         p,
         y_cont,
         clusters_ids_local,
+        current_epoch,
         departement_ids_local=None,
         sw=None,
         active_cluster_slots=None,
@@ -8387,9 +8396,21 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         if hasattr(self, "mu_prior_departement") and self.mu_prior_departement.device != device:
             self.mu_prior_departement = self.mu_prior_departement.to(device)
 
+        # ---- Log raw soft mass BEFORE gate ----
+        if not hasattr(self, "epoch_stats"):
+            self.epoch_stats = {}
+        if "p_raw_mean" not in self.epoch_stats:
+            self.epoch_stats["p_raw_mean"] = []
+        self.epoch_stats["p_raw_mean"].append(p.detach().mean(dim=0).cpu().numpy())
+
         gate = torch.sigmoid((p - self.taugate) / max(self.gatetemp, 1e-6))
         p = p * gate
-        
+
+        # ---- Log gated soft mass AFTER gate ----
+        if "p_gated_mean" not in self.epoch_stats:
+            self.epoch_stats["p_gated_mean"] = []
+        self.epoch_stats["p_gated_mean"].append(p.detach().mean(dim=0).cpu().numpy())
+
         gamma = getattr(self, "gamma", 1.0)
         if gamma != 1.0:
             p = p.clamp_min(self.eps).pow(gamma)
@@ -8411,9 +8432,11 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         mu_departements = torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
         mass_departements = torch.zeros(Zd, self.C, device=device, dtype=p.dtype) if Zd > 0 else None
 
-        lambda_g = self.mu_lambda_g
-        lambda_c = self.mu_lambda_c
-        lambda_d = self.mu_lambda_d
+        warmup = current_epoch < getattr(self, "warmupes", 0)
+
+        lambda_g = 0.0 if warmup else self.mu_lambda_g
+        lambda_c = 0.0 if warmup else self.mu_lambda_c
+        lambda_d = 0.0 if warmup else self.mu_lambda_d
         
         #print('global', lambda_g)
         #print('cluster', lambda_c)
@@ -8460,13 +8483,14 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 mu_hat_k_global = y.mean()
 
             with torch.no_grad():
-                if not torch.isfinite(self.mu_prior_global[k]):
-                    self.mu_prior_global[k] = mu_hat_k_global.detach()
-                elif m_k_global > min_mass_update:
-                    self.mu_prior_global[k] = (
-                        self.mu_momentum * self.mu_prior_global[k]
-                        + (1.0 - self.mu_momentum) * mu_hat_k_global.detach()
-                    )
+                if not warmup:
+                    if not torch.isfinite(self.mu_prior_global[k]):
+                        self.mu_prior_global[k] = mu_hat_k_global.detach()
+                    elif m_k_global > min_mass_update:
+                        self.mu_prior_global[k] = (
+                            self.mu_momentum * self.mu_prior_global[k]
+                            + (1.0 - self.mu_momentum) * mu_hat_k_global.detach()
+                        )
 
             prior_global_k = self.mu_prior_global[k].to(device=device, dtype=p.dtype)
 
@@ -8485,7 +8509,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 valid_d = m_k_d > min_mass_update
                 
                 with torch.no_grad():
-                    if active_dept_slots is not None:
+                    if not warmup and active_dept_slots is not None:
                         for li, slot_t in enumerate(active_dept_slots):
                             slot = int(slot_t.item())
                             old_val = self.mu_prior_departement[slot, k]
@@ -8507,12 +8531,20 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 else:
                     prior_dept_k = torch.full((Zd,), prior_global_k, device=device, dtype=p.dtype)
 
-                mu_k_d = torch.where(
-                    m_k_d <= self.eps,
-                    mu_hat_d,
-                    (m_k_d * mu_hat_d + lambda_d * prior_dept_k + lambda_g * prior_global_k)
-                    / (m_k_d + lambda_d + lambda_g),
-                )
+                if warmup:
+                    mu_k_d = torch.where(
+                        m_k_d <= self.eps,
+                        torch.tensor(float('nan'), device=device, dtype=p.dtype),
+                        mu_hat_d
+                    )
+                else:
+                    mu_hat_d_safe = torch.nan_to_num(mu_hat_d, nan=0.0)
+                    mu_k_d = torch.where(
+                        m_k_d <= self.eps,
+                        prior_dept_k,
+                        (m_k_d * mu_hat_d_safe + lambda_d * prior_dept_k + lambda_g * prior_global_k)
+                        / (m_k_d + lambda_d + lambda_g),
+                    )
                 mu_departements[:, k] = mu_k_d
             else:
                 prior_dept_k = None
@@ -8531,7 +8563,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             valid_c = m_k_c > min_mass_update
 
             with torch.no_grad():
-                if active_cluster_slots is not None:
+                if not warmup and active_cluster_slots is not None:
                     for li, slot_t in enumerate(active_cluster_slots):
                         slot = int(slot_t.item())
                         old_val = self.mu_prior[slot, k]
@@ -8564,21 +8596,29 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             else:
                 prior_cluster_k = dept_prior_for_cluster
 
-            if prior_dept_k is not None and cluster_to_dept_local is not None:
-                prior_dept_for_cluster = prior_dept_k.index_select(0, cluster_to_dept_local)
+            if warmup:
                 mu_k_c = torch.where(
                     m_k_c <= self.eps,
-                    m_k_c,
-                    (m_k_c * mu_hat_c + lambda_c * prior_cluster_k + lambda_d * prior_dept_for_cluster + lambda_g * prior_global_k)
-                    / (m_k_c + lambda_c + lambda_d + lambda_g),
+                    torch.tensor(float('nan'), device=device, dtype=p.dtype),
+                    mu_hat_c
                 )
             else:
-                mu_k_c = torch.where(
-                    m_k_c <= self.eps,
-                    m_k_c,
-                    (m_k_c * mu_hat_c + lambda_c * prior_cluster_k + lambda_g * prior_global_k)
-                    / (m_k_c + lambda_c + lambda_g),
-                )
+                mu_hat_c_safe = torch.nan_to_num(mu_hat_c, nan=0.0)
+                if prior_dept_k is not None and cluster_to_dept_local is not None:
+                    prior_dept_for_cluster = prior_dept_k.index_select(0, cluster_to_dept_local)
+                    mu_k_c = torch.where(
+                        m_k_c <= self.eps,
+                        prior_cluster_k,
+                        (m_k_c * mu_hat_c_safe + lambda_c * prior_cluster_k + lambda_d * prior_dept_for_cluster + lambda_g * prior_global_k)
+                        / (m_k_c + lambda_c + lambda_d + lambda_g),
+                    )
+                else:
+                    mu_k_c = torch.where(
+                        m_k_c <= self.eps,
+                        prior_cluster_k,
+                        (m_k_c * mu_hat_c_safe + lambda_c * prior_cluster_k + lambda_g * prior_global_k)
+                        / (m_k_c + lambda_c + lambda_g),
+                    )
 
             mu_clusters[:, k] = mu_k_c
 
@@ -8721,10 +8761,20 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         # Robust regression, better than plain MSE if some centers move abruptly
         return F.smooth_l1_loss(theta_ref[valid], target_mid[valid], reduction="mean")
 
-    def forward(self, score, y_cont, clusters_ids, departement_ids, sample_weight=None):
+    def forward(self, score, y_cont, clusters_ids, departement_ids, current_epoch, sample_weight=None):
         s = score.view(-1)
         y = y_cont.view(-1).to(device=s.device)
         
+        if s.numel() == 0:
+            zero = s.sum() * 0.0
+            return {
+                "total_loss": zero,
+                "trans": zero,
+                "coverage": zero,
+                "mu0_term": zero,
+                "lmid": zero,
+            }
+
         s = s / self.sigma
         y = y / self.sigma
 
@@ -8775,14 +8825,18 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             probs,
             y,
             local_cluster_ids,
+            current_epoch,
             departement_ids_local=local_dept_ids,
             sw=sw,
             active_cluster_slots=active_cluster_slots,
             active_dept_slots=active_dept_slots,
         )
-        check_finite("mu", mu)
+        warmup = current_epoch < getattr(self, "warmupes", 0)
+        if not warmup:
+            check_finite("mu", mu)
         check_finite("mass", mass)
-        check_finite("mu_prior", self.mu_prior_global)
+        if not warmup:
+            check_finite("mu_prior", self.mu_prior_global)
 
         gains = self._compute_gains()
         active_local_clusters = torch.arange(len(active_cluster_slots), device=device)
@@ -8792,7 +8846,8 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         
         mu_active = mu[active_local_clusters]
         mass_active = mass[active_local_clusters]
-        check_finite("mu_active", mu_active)
+        if not warmup:
+            check_finite("mu_active", mu_active)
         
         theta_all = self._compute_thresholds().to(device)
 
@@ -8855,24 +8910,30 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             loss_med = 0.0
             loss_min = 0.0
             
+            valid_mask = torch.isfinite(deltas)
+            deltas_safe = torch.where(valid_mask, deltas, torch.zeros_like(deltas))
+            
             # Évaluation type RankNet : BCEWithLogitsLoss(deltas, target=1)
             # deltas > 0 signifie que mu_active_b > mu_active_a + margin
-            target_ones = torch.ones_like(deltas)
-            loss_neg = F.binary_cross_entropy_with_logits(deltas, target_ones)
+            target_ones = torch.ones_like(deltas_safe)
+            loss_neg_matrix = F.binary_cross_entropy_with_logits(deltas_safe, target_ones, reduction='none')
+            
+            loss_neg_matrix = torch.where(valid_mask, loss_neg_matrix, torch.zeros_like(loss_neg_matrix))
+            
+            valid_count = valid_mask.sum(dim=0).clamp_min(1.0)
+            Lk_clusters = loss_neg_matrix.sum(dim=0) / valid_count
 
-            check_finite("loss_neg", loss_neg)
+            check_finite("Lk_clusters", Lk_clusters)
             check_finite("MEDk", MEDk)
             check_finite("MINk", MINk)
-
-            Lk_clusters = loss_neg
 
             w = float(self.wk.get(k, 1.0))
             loss_accum = loss_accum + w * Lk_clusters.detach()
             waccum = waccum + w
 
-            Lk = (Lk_clusters * w_viol).sum() / w_viol.sum()
+            # Lk = (Lk_clusters * w_viol).sum() / w_viol.sum()
+            Lk = Lk_clusters.mean()  # Commented out w_viol for now per user request
 
-            #Lk = Lk_clusters
             if not hasattr(self, "epoch_stats"):
                 self.epoch_stats = {}
             if "deltas" not in self.epoch_stats:
@@ -8883,7 +8944,7 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
             self.epoch_stats["deltas"][k]["median"].append(MEDk.mean().item())
             self.epoch_stats["deltas"][k]["min"].append(MINk.mean().item())
             self.epoch_stats["deltas"][k]["viol"].append((deltas < 0).float().mean().item())
-            self.epoch_stats["deltas"][k]["neg"].append(loss_neg.mean().item())
+            self.epoch_stats["deltas"][k]["neg"].append(Lk_clusters.mean().item())
 
             loss = loss + w * Lk
             wsum = wsum + w
@@ -9089,6 +9150,12 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         if hasattr(self, "epoch_stats") and self.epoch_stats.get("mass_active"):
             ma_stack = np.stack(self.epoch_stats["mass_active"])
             payload["mass_active"] = np.max(ma_stack, axis=0)
+
+        if hasattr(self, "epoch_stats") and self.epoch_stats.get("p_raw_mean"):
+            payload["p_raw_mean"] = np.mean(np.stack(self.epoch_stats["p_raw_mean"]), axis=0)
+
+        if hasattr(self, "epoch_stats") and self.epoch_stats.get("p_gated_mean"):
+            payload["p_gated_mean"] = np.mean(np.stack(self.epoch_stats["p_gated_mean"]), axis=0)
 
         return [("ordinal_params", DictWrapper(payload))]
     
@@ -9617,7 +9684,6 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
 
         return self
 
-
     def _coverage_distance(self, pred_dist: torch.Tensor, target_dist: torch.Tensor) -> torch.Tensor:
         """
         Distance entre distributions de classes.
@@ -9882,6 +9948,11 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
                 )
             with torch.no_grad():
                 self.alpha.copy_(alpha_new)
+        else:
+            if "alpha" not in payload or payload["alpha"] is None:
+                raise ValueError(
+                    f"alpha missing from payload, {payload}"
+                )
 
         # --------------------------------------------------
         # 3) mu_prior
@@ -10568,7 +10639,63 @@ class ClusterCLMBinnedTransitionLoss(nn.Module):
         except Exception as _e:
             plt.close("all")
             print(f"[plot_params] mu_per_departement error: {_e}")
-        
+
+        # --- Plot soft mass per class (raw vs gated) ---
+        try:
+            p_raw_list   = []
+            p_gated_list = []
+            ep_sm        = []
+
+            for ep, entry in iterator:
+                p = entry["ordinal_params"].d if hasattr(entry["ordinal_params"], "d") else entry["ordinal_params"]
+                if not isinstance(p, dict):
+                    continue
+                has_raw   = "p_raw_mean"   in p and p["p_raw_mean"]   is not None
+                has_gated = "p_gated_mean" in p and p["p_gated_mean"] is not None
+                if has_raw or has_gated:
+                    ep_sm.append(ep)
+                    p_raw_list.append(p.get("p_raw_mean",   None))
+                    p_gated_list.append(p.get("p_gated_mean", None))
+
+            if ep_sm:
+                # determine C from first valid entry
+                first_raw   = next((x for x in p_raw_list   if x is not None), None)
+                first_gated = next((x for x in p_gated_list if x is not None), None)
+                C = (first_raw if first_raw is not None else first_gated).shape[0]
+
+                cmap = plt.cm.plasma
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+
+                for c in range(C):
+                    color = cmap(c / max(C - 1, 1))
+
+                    # raw
+                    if first_raw is not None:
+                        vals = [x[c] if x is not None else float("nan") for x in p_raw_list]
+                        axes[0].plot(ep_sm, vals, color=color, label=f"class {c}")
+
+                    # gated
+                    if first_gated is not None:
+                        vals = [x[c] if x is not None else float("nan") for x in p_gated_list]
+                        axes[1].plot(ep_sm, vals, color=color, label=f"class {c}")
+
+                axes[0].set_title("Soft mass per class — RAW (before gate)")
+                axes[1].set_title("Soft mass per class — GATED (after gate)")
+                for ax in axes:
+                    ax.set_xlabel("Epoch")
+                    ax.set_ylabel("mean p[:, c]")
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(fontsize=7, ncol=2)
+                    if best_epoch is not None:
+                        ax.axvline(best_epoch, color="r", linestyle="--", linewidth=0.8, label="Best")
+
+                plt.tight_layout()
+                plt.savefig(root_dir / "soft_mass_per_class.png")
+                plt.close()
+        except Exception as _e:
+            plt.close("all")
+            print(f"[plot_params] soft_mass_per_class error: {_e}")
+
 class ClusterDepartmentRankNetLoss(nn.Module):
     """
     RankNet pairwise loss + thresholds learned per department or per cluster.
@@ -10742,6 +10869,15 @@ class ClusterDepartmentRankNetLoss(nn.Module):
             next_free_attr = "departement_next_free_slot"
         else:
             raise ValueError(f"Unknown kind: {kind}")
+
+        if not raw_to_slot and (slot_to_raw != -1).any():
+            max_slot = -1
+            for slot_idx, raw_val in enumerate(slot_to_raw.tolist()):
+                if raw_val != -1:
+                    raw_to_slot[raw_val] = slot_idx
+                    if slot_idx > max_slot:
+                        max_slot = slot_idx
+            setattr(self, next_free_attr, max_slot + 1)
 
         local_ids = torch.empty_like(raw_ids, dtype=torch.long, device=device)
         next_free_slot = getattr(self, next_free_attr)
@@ -11012,7 +11148,8 @@ class ClusterDepartmentRankNetLoss(nn.Module):
             count_k.scatter_add_(0, group_ids[mask], ones_k)
             sum_k.scatter_add_(0, group_ids[mask], s_det[mask])
 
-            centers_s[:, k] = sum_k / count_k.clamp_min(1.0)
+            valid_g = (count_k > 0)
+            centers_s[valid_g, k] = sum_k[valid_g] / count_k[valid_g]
 
         target_mid = 0.5 * (centers_s[:, :-1] + centers_s[:, 1:])
         valid = torch.isfinite(target_mid) & torch.isfinite(theta_rows)
@@ -11205,11 +11342,16 @@ class ClusterDepartmentRankNetLoss(nn.Module):
     def update_params(self, new_dict, epoch=None):
         payload = new_dict
 
-        # Cas: {"epoch": ..., "ordinal_params": DictWrapper(...)}
-        if isinstance(payload, dict) and "ordinal_params" in payload:
-            if epoch is None and "epoch" in payload:
-                epoch = payload["epoch"]
-            payload = payload["ordinal_params"]
+        # Cas: {"epoch": ..., "ranknet_params": DictWrapper(...)}
+        if isinstance(payload, dict):
+            if "ranknet_params" in payload:
+                if epoch is None and "epoch" in payload:
+                    epoch = payload["epoch"]
+                payload = payload["ranknet_params"]
+            elif "ordinal_params" in payload:
+                if epoch is None and "epoch" in payload:
+                    epoch = payload["epoch"]
+                payload = payload["ordinal_params"]
 
         # Cas: DictWrapper(...)
         if hasattr(payload, "numpy") and not isinstance(payload, dict):
@@ -11223,7 +11365,9 @@ class ClusterDepartmentRankNetLoss(nn.Module):
         print('Old alpha', self.alpha)
 
         if "alpha" not in payload or payload["alpha"] is None:
-            return
+            raise ValueError(
+                f"alpha missing from payload, {payload}"
+            )
 
         alpha_new = torch.as_tensor(
             payload["alpha"],
@@ -11486,6 +11630,15 @@ class CIOL(nn.Module):
         else:
             raise ValueError(f"Unknown kind: {kind}")
 
+        if not raw_to_slot and (slot_to_raw != -1).any():
+            max_slot = -1
+            for slot_idx, raw_val in enumerate(slot_to_raw.tolist()):
+                if raw_val != -1:
+                    raw_to_slot[raw_val] = slot_idx
+                    if slot_idx > max_slot:
+                        max_slot = slot_idx
+            setattr(self, next_free_attr, max_slot + 1)
+
         local_ids = torch.empty_like(raw_ids, dtype=torch.long, device=device)
         next_free_slot = getattr(self, next_free_attr)
 
@@ -11527,7 +11680,9 @@ class CIOL(nn.Module):
         sum_wy = torch.zeros(Z, device=device, dtype=dtype)
         sum_wy.scatter_add_(0, group_ids_local, wy)
 
-        mu_hat = sum_wy / m_k.clamp_min(eps)
+        mu_hat = torch.full((Z,), float('nan'), device=device, dtype=dtype)
+        valid = m_k > eps
+        mu_hat[valid] = sum_wy[valid] / m_k[valid]
         return m_k, mu_hat
 
     def _build_cluster_to_dept_map(self, clusters_ids_local, departement_ids_local, Zc):
@@ -11668,10 +11823,11 @@ class CIOL(nn.Module):
                         (Zd,), prior_global_k, device=device, dtype=p.dtype
                     )
 
+                mu_hat_d_safe = torch.nan_to_num(mu_hat_d, nan=0.0)
                 mu_k_d = torch.where(
                     m_k_d <= self.eps,
                     prior_dept_k,
-                    (m_k_d * mu_hat_d + lambda_c * prior_dept_k + lambda_g * prior_global_k)
+                    (m_k_d * mu_hat_d_safe + lambda_c * prior_dept_k + lambda_g * prior_global_k)
                     / (m_k_d + lambda_c + lambda_g),
                 )
                 mu_departements[:, k] = mu_k_d
@@ -11728,22 +11884,24 @@ class CIOL(nn.Module):
                         cluster_to_dept_local[valid_map]
                     ]
 
+                mu_hat_c_safe = torch.nan_to_num(mu_hat_c, nan=0.0)
                 mu_k_c = torch.where(
                     m_k_c <= self.eps,
                     prior_cluster_k,
                     (
-                        m_k_c * mu_hat_c
+                        m_k_c * mu_hat_c_safe
                         + lambda_c * prior_cluster_k
                         + lambda_d * cluster_dept_prior
                         + lambda_g * prior_global_k
                     ) / (m_k_c + lambda_c + lambda_d + lambda_g),
                 )
             else:
+                mu_hat_c_safe = torch.nan_to_num(mu_hat_c, nan=0.0)
                 mu_k_c = torch.where(
                     m_k_c <= self.eps,
                     prior_cluster_k,
                     (
-                        m_k_c * mu_hat_c
+                        m_k_c * mu_hat_c_safe
                         + lambda_c * prior_cluster_k
                         + lambda_g * prior_global_k
                     ) / (m_k_c + lambda_c + lambda_g),

@@ -1294,9 +1294,7 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'device' : device,
             'return_hidden': False,
             'horizon': horizon
-
-
-          
+            
         }
         if custom_model_params is not None:
             default_params.update(custom_model_params)
@@ -1314,8 +1312,8 @@ def make_model(model_name, in_dim, in_dim_2D, graph, dropout, act_func, k_days, 
             'device' : device,
             'return_hidden': False,
             'horizon': horizon
-
         }
+        
         if custom_model_params is not None:
             default_params.update(custom_model_params)
         default_params['task_type'] = task_type
