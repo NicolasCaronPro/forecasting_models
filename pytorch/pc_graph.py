@@ -423,24 +423,28 @@ class PCGraphModel(nn.Module):
         self.clm_deltas = nn.Parameter(torch.zeros(max(out_channels - 2, 0)))
         self.clm_tau = float(clm_tau)
 
-        # Statistiques glissantes pour standardiser `s` (esprit BatchNorm).
-        # Sans clampage du label, rien n'etablit l'echelle de `s` : le graphe
-        # sort `s ~ 0` alors que des seuils absolus vivaient dans [0.8, 3.3],
-        # les sigmoides des seuils eloignes saturaient (gradient ~0.2 contre
-        # ~1.5 dans la zone utile) et tout s'effondrait en classe 0.
+        # Mise a l'echelle de `s` : division par une CONSTANTE, PAS par son
+        # propre ecart-type.
         #
-        # ATTENTION -- effet de bord identifie ensuite, non corrige ici :
-        # standardiser par l'ecart-type de `s` LUI-MEME rend la loss aveugle a
-        # son amplitude (verifie : `s` multiplie par 10 000, `L_ord` et `L_cov`
-        # identiques au septieme chiffre). Le weight decay peut alors ecraser
-        # `s` sans penalite ; sur des dates neuves il s'effondre (ecart-type
-        # 0.205 sur le train contre 0.016 hors periode) et tout le test tombe
-        # dans une seule classe. Une division par une CONSTANTE fixe (ex.
-        # l'ecart-type de la cible reelle) preserverait l'echelle et rendrait
-        # l'effondrement visible par la loss.
-        self.register_buffer('clm_running_mean', torch.zeros(1))
-        self.register_buffer('clm_running_var', torch.ones(1))
-        self.clm_momentum = 0.1
+        # Une standardisation (retrancher la moyenne, diviser par l'ecart-type
+        # courant) DETRUIT l'information d'echelle : si `s` retrecit, le
+        # denominateur retrecit avec lui et le quotient est inchange. Verifie --
+        # `s` multiplie par 10 000, `L_ord` et `L_cov` restaient identiques au
+        # septieme chiffre. La loss devenait donc aveugle a l'amplitude, tandis
+        # que le weight decay la reduisait librement : `s` s'ecrasait sans
+        # penalite (ecart-type 0.205 sur le train, 0.016 sur des dates neuves)
+        # et tout le test tombait dans une seule classe.
+        #
+        # Avec un diviseur CONSTANT, l'echelle est preservee et la loss voit
+        # l'effondrement : un `s` ecrase de 100x fait grimper `L_cov` d'un
+        # facteur 11. C'est `clm_tau`, fixe, qui sert d'ancre -- si `s` et les
+        # seuils retrecissent ensemble, `(theta_k - s)/tau` retrecit aussi, les
+        # bosses se recouvrent et la couverture se degrade.
+        #
+        # Renseigne par le Training via `set_clm_scale` (ecart-type de la cible
+        # reelle). Purement numerique : amener `s` dans une plage saine, jamais
+        # absorber ses variations d'amplitude.
+        self.register_buffer('clm_scale', torch.ones(1))
 
         if topology == 'full':
             mask = fully_connected_mask(n)
@@ -535,6 +539,13 @@ class PCGraphModel(nn.Module):
         gaps = nn.functional.softplus(self.clm_deltas) + self.clm_min_gap
         return torch.cat([self.clm_base, self.clm_base + torch.cumsum(gaps, 0)])
 
+    def set_clm_scale(self, scale):
+        """Constante de mise a l'echelle de `s` (typiquement l'ecart-type de la
+        cible reelle). Fixe : elle amene `s` dans une plage numerique saine sans
+        jamais absorber ses variations d'amplitude."""
+        with torch.no_grad():
+            self.clm_scale.fill_(max(float(scale), 1e-6))
+
     def set_clm_thresholds(self, thresholds):
         """INITIALISE les seuils (ils restent appris ensuite). Les quantiles de
         la distribution cible sont un point de depart raisonnable, plus la
@@ -560,17 +571,10 @@ class PCGraphModel(nn.Module):
             # ordonnes et espaces, les classes intermediaires sont atteignables
             # par l'argmax -- ce que le produit cumule de CORN interdisait.
             s = logits[:, 0:1]
-            # Standardisation : en entrainement sur le lot, a l'inference sur
-            # les statistiques glissantes (donc deterministe et par echantillon).
-            if self.training and s.shape[0] > 1:
-                mean, var = s.mean(), s.var(unbiased=False)
-                with torch.no_grad():
-                    mo = self.clm_momentum
-                    self.clm_running_mean.mul_(1 - mo).add_(mo * mean.detach())
-                    self.clm_running_var.mul_(1 - mo).add_(mo * var.detach())
-            else:
-                mean, var = self.clm_running_mean, self.clm_running_var
-            s = (s - mean) / (var + 1e-5).sqrt()
+            # Constante : identique en entrainement et a l'inference, aucune
+            # statistique a maintenir, et surtout l'amplitude de `s` reste
+            # visible par la loss (cf. commentaire sur `clm_scale`).
+            s = s / self.clm_scale
             # La TEMPERATURE est critique, pas cosmetique : la sigmoide standard
             # (tau=1) transitionne sur ~4 unites alors que les seuils sont
             # espaces de ~0.6-0.85. Les bosses se recouvrent alors totalement et
