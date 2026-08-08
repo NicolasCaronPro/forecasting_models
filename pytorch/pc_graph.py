@@ -151,6 +151,19 @@ class PCGraphCore(nn.Module):
         conserve sur toute la relaxation (retropropagation a travers le temps
         complete) -- beaucoup plus couteux en memoire, utile seulement pour
         comparer a l'approximation "phantom" ci-dessus.
+
+        IMPORTANT -- on derive `energy_per_sample(x).sum()` et NON `.mean()`.
+        La relaxation est independante par echantillon (aucun couplage entre
+        lignes du lot), donc le gradient reçu par l'echantillon i doit etre le
+        sien, pas 1/B fois le sien. Avec `.mean()`, le pas effectif valait
+        `lr_x / B` : la relaxation avancait B fois moins vite sur un grand lot,
+        et les noeuds libres restaient d'autant plus proches de leur valeur
+        initiale. Mesure sur les memes donnees -- ecart-type du noeud de label
+        0.516 (B=1), 0.124 (B=64), 0.016 (B=4096). Consequence concrete :
+        entraine par lots de 64 puis evalue sur un lot unique de 5840, le score
+        s'ecrasait d'un facteur ~12 et toutes les predictions tombaient dans la
+        meme classe -- ce qui ressemblait a un defaut de generalisation sans en
+        etre un.
         """
         free = (~clamp_mask).float()
 
@@ -166,7 +179,7 @@ class PCGraphCore(nn.Module):
             with torch.enable_grad():
                 x = x_init.clone().requires_grad_(True)
                 for _ in range(t_steps):
-                    E = self.energy(x)
+                    E = self.energy_per_sample(x).sum()   # .sum() : cf. docstring
                     (grad,) = torch.autograd.grad(E, x, create_graph=True)
                     x = x - lr_x * grad * free
             return x if was_grad_enabled else x.detach()
@@ -174,7 +187,7 @@ class PCGraphCore(nn.Module):
         x = x_init.clone().detach().requires_grad_(True)
         for _ in range(t_steps):
             with torch.enable_grad():
-                E = self.energy(x)
+                E = self.energy_per_sample(x).sum()       # .sum() : cf. docstring
                 (grad,) = torch.autograd.grad(E, x)
             with torch.no_grad():
                 x = x - lr_x * grad * free
@@ -337,6 +350,7 @@ class PCGraphModel(nn.Module):
                  device: str = 'cpu', horizon: int = 0,
                  spatial_feature_idx=None, n_internal_spatial: int = 16,
                  label_mode: str = 'onehot', clm_tau: float = 0.3,
+                 n_departements: int = 1,
                  **_ignored):
         super().__init__()
 
@@ -418,10 +432,33 @@ class PCGraphModel(nn.Module):
         # softplus(delta_j). La stricte croissance -- exigee sous peine de
         # probabilites negatives -- est ainsi garantie PAR CONSTRUCTION, sans
         # projection ni contrainte a maintenir pendant l'optimisation.
+        # Un jeu de seuils PAR DEPARTEMENT : `s` porte une quantite physique
+        # partagee ("combien de sinistres attendus"), les seuils portent la
+        # convention locale ("a partir de combien parle-t-on de risque eleve
+        # ICI"). Les departements ont des echelles de risque non comparables,
+        # et il ne faut pas les ecraser sous un decoupage unique.
+        #
+        # `s` reste commun -- seul le decoupage est local. On ne fragmente donc
+        # pas les donnees : les 5*n_dept seuils sont estimes sur tout le jeu.
+        self.n_departements = max(int(n_departements), 1)
+        self.register_buffer('clm_dept_ids', torch.zeros(self.n_departements, dtype=torch.long))
         self.clm_min_gap = 1e-2
-        self.clm_base = nn.Parameter(torch.zeros(1))
-        self.clm_deltas = nn.Parameter(torch.zeros(max(out_channels - 2, 0)))
-        self.clm_tau = float(clm_tau)
+        self.clm_base = nn.Parameter(torch.zeros(self.n_departements, 1))
+        self.clm_deltas = nn.Parameter(torch.zeros(self.n_departements, max(out_channels - 2, 0)))
+        # Departement du lot courant, pose par le Training juste avant l'appel
+        # au modele. Transitoire (jamais dans le state_dict) : `forward(x,
+        # z_prev)` ne peut pas recevoir le departement sans casser le contrat
+        # attendu par le pipeline herite, et il n'est pas recuperable depuis les
+        # features -- `cluster_encoder` est ambigu, 3 de ses valeurs
+        # correspondent a plusieurs departements.
+        self._current_dept = None
+        # BUFFER, pas un simple attribut : `clm_tau` doit survivre au
+        # state_dict. Sinon la valeur deduite a la construction est perdue au
+        # rechargement et le modele repart sur le defaut du constructeur --
+        # constate en production (tau deduit ~0.09 pendant l'entrainement, 0.3
+        # au rechargement, ecart_min/tau retombant a 0.94 et vidant les classes
+        # intermediaires alors que les donnees franchissaient bien les seuils).
+        self.register_buffer('clm_tau', torch.tensor(float(clm_tau)))
 
         # Mise a l'echelle de `s` : division par une CONSTANTE, PAS par son
         # propre ecart-type.
@@ -490,7 +527,7 @@ class PCGraphModel(nn.Module):
         else:
             self.output_activation = nn.Identity()
 
-    def forward(self, x: torch.Tensor, z_prev: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, z_prev: torch.Tensor = None, departement=None):
         B = x.shape[0]
         x_sensory = x.reshape(B, -1)
         if x_sensory.shape[1] != self.n_sensory:
@@ -523,21 +560,62 @@ class PCGraphModel(nn.Module):
 
         logits = node_values[:, self.label_slice]
         hidden = x_conv[:, self.internal_slice]
+        # `departement` explicite quand l'appelant peut le fournir ; sinon on
+        # retombe sur `_current_dept`, pose par le Training. Le pipeline herite
+        # appelle `self.model(inputs_horizon, z_prev=...)` en six endroits de
+        # pytorch_model_tools.py (code partage par TOUS les modeles), donc il ne
+        # passera jamais l'argument -- d'ou le repli, indispensable a
+        # l'inference.
+        if departement is not None:
+            self.set_current_departement(departement)
         output = self.class_probs(logits)
 
         return output, logits, hidden
 
     @property
     def clm_thresholds(self) -> torch.Tensor:
-        """Seuils effectifs, croissants par construction."""
-        if self.clm_deltas.numel() == 0:
-            return self.clm_base
+        """Seuils effectifs `(n_departements, out_channels - 1)`, croissants par
+        construction le long de la derniere dimension."""
+        # Retrocompatibilite : les modeles anterieurs aux seuils par departement
+        # ont `clm_base` (1,) et `clm_deltas` (K-2,) en 1-D. On les relit comme
+        # un unique departement plutot que de rendre leurs pickles illisibles.
+        base = self.clm_base if self.clm_base.dim() == 2 else self.clm_base.view(1, -1)
+        deltas = self.clm_deltas if self.clm_deltas.dim() == 2 else self.clm_deltas.view(1, -1)
+        if deltas.shape[1] == 0:
+            return base
         # `+ clm_min_gap` : softplus tend vers 0 pour un delta tres negatif, ce
         # qui collerait deux seuils et viderait la classe intermediaire. L'ecart
         # minimal garantit une croissance STRICTE quels que soient les
         # parametres, sans contrainte a maintenir pendant l'optimisation.
-        gaps = nn.functional.softplus(self.clm_deltas) + self.clm_min_gap
-        return torch.cat([self.clm_base, self.clm_base + torch.cumsum(gaps, 0)])
+        gaps = nn.functional.softplus(deltas) + self.clm_min_gap
+        return torch.cat([base, base + torch.cumsum(gaps, dim=1)], dim=1)
+
+    def set_current_departement(self, departement):
+        """Departement de chaque echantillon du lot a venir (ou None pour
+        retomber sur les seuils du premier departement).
+
+        Pose par le Training juste avant l'appel au modele : `forward(x,
+        z_prev)` ne peut pas recevoir cette information sans casser le contrat
+        attendu par le pipeline herite."""
+        self._current_dept = None if departement is None else departement.view(-1).long()
+
+    def _dept_rows(self, n: int, device) -> torch.Tensor:
+        """Indice de ligne de seuils pour chaque echantillon du lot."""
+        if getattr(self, 'n_departements', 1) == 1 or self._current_dept is None \
+                or self.clm_thresholds.shape[0] == 1:
+            return torch.zeros(n, dtype=torch.long, device=device)
+        d = self._current_dept.to(device)
+        if d.numel() != n:                      # lot partiel : on ne devine pas
+            return torch.zeros(n, dtype=torch.long, device=device)
+        return (d.view(-1, 1) == self.clm_dept_ids.to(device).view(1, -1)).float().argmax(dim=1)
+
+    def set_clm_tau(self, tau):
+        """Temperature des sigmoides du CLM. Doit rester PETITE devant l'ecart
+        entre seuils (rapport >= ~1.5) : la transition s'etale sur ~4*tau, donc
+        au-dela les bosses se recouvrent et les classes intermediaires ne
+        gagnent plus jamais l'argmax."""
+        with torch.no_grad():
+            self.clm_tau.fill_(max(float(tau), 1e-6))
 
     def set_clm_scale(self, scale):
         """Constante de mise a l'echelle de `s` (typiquement l'ecart-type de la
@@ -550,15 +628,26 @@ class PCGraphModel(nn.Module):
         """INITIALISE les seuils (ils restent appris ensuite). Les quantiles de
         la distribution cible sont un point de depart raisonnable, plus la
         reponse figee qu'ils etaient auparavant."""
-        t = torch.as_tensor(thresholds, dtype=self.clm_base.dtype).view(-1)
-        if t.numel() != self.out_channels - 1:
-            raise ValueError(f'{self.out_channels - 1} seuils attendus, recu {t.numel()}')
-        if not bool((t[1:] > t[:-1]).all()):
+        t = torch.as_tensor(thresholds, dtype=self.clm_base.dtype)
+        if t.dim() == 1:                        # meme jeu pour tous les departements
+            t = t.view(1, -1).expand(self.n_departements, -1)
+        if t.shape != (self.n_departements, self.out_channels - 1):
+            raise ValueError(f'seuils attendus de forme '
+                             f'{(self.n_departements, self.out_channels - 1)}, recu {tuple(t.shape)}')
+        if not bool((t[:, 1:] > t[:, :-1]).all()):
             raise ValueError(f'seuils non croissants : {t.tolist()}')
         with torch.no_grad():
-            self.clm_base.copy_(t[:1])
-            gaps = (t[1:] - t[:-1] - self.clm_min_gap).clamp_min(1e-4)
+            self.clm_base.copy_(t[:, :1])
+            gaps = (t[:, 1:] - t[:, :-1] - self.clm_min_gap).clamp_min(1e-4)
             self.clm_deltas.copy_(torch.log(torch.expm1(gaps)))   # softplus^-1
+
+    def set_clm_dept_ids(self, dept_ids):
+        """Identifiants de departement, dans l'ordre des lignes de seuils."""
+        d = torch.as_tensor(list(dept_ids), dtype=torch.long)
+        if d.numel() != self.n_departements:
+            raise ValueError(f'{self.n_departements} identifiants attendus, recu {d.numel()}')
+        with torch.no_grad():
+            self.clm_dept_ids.copy_(d)
 
     def class_probs(self, logits: torch.Tensor) -> torch.Tensor:
         """Probabilites de classe (B, out_channels) a partir des valeurs des
@@ -580,7 +669,8 @@ class PCGraphModel(nn.Module):
             # espaces de ~0.6-0.85. Les bosses se recouvrent alors totalement et
             # l'argmax ne vaut plus que 0 ou K-1 -- exactement le defaut de CORN.
             # Verifie : tau=1 -> 2 classes atteignables, tau <= 0.5 -> les 5.
-            F = torch.sigmoid((self.clm_thresholds.view(1, -1) - s) / self.clm_tau)
+            th = self.clm_thresholds[self._dept_rows(s.shape[0], s.device)]   # (B, K-1)
+            F = torch.sigmoid((th - s) / self.clm_tau)
             first = F[:, :1]
             middle = F[:, 1:] - F[:, :-1]
             last = 1.0 - F[:, -1:]

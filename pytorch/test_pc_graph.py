@@ -42,6 +42,23 @@ class TestPCGraphCore(unittest.TestCase):
         x_conv = self.core.relax(x_init, self.clamp, t_steps=5, lr_x=0.5, differentiable=True)
         self.assertTrue(x_conv.requires_grad)
 
+    def test_relax_is_batch_size_independent(self):
+        """La relaxation est independante par echantillon : le resultat d'une
+        ligne ne doit pas dependre du nombre de lignes traitees avec elle.
+
+        Non-regression d'un bug reel : `relax` derivait `energy()`, qui fait
+        `.mean()` sur le lot -- chaque echantillon recevait donc 1/B fois son
+        propre gradient, et le pas effectif valait `lr_x / B`. Un modele
+        entraine par lots de 64 puis evalue sur un lot unique de 5840 voyait
+        ses noeuds libres s'ecraser d'un facteur ~12, ce qui ressemblait a un
+        defaut de generalisation sans en etre un."""
+        x_init = torch.randn(32, self.n)
+        full = self.core.relax(x_init, self.clamp, t_steps=15, lr_x=0.5)
+        by_one = torch.cat([self.core.relax(x_init[i:i + 1], self.clamp, t_steps=15, lr_x=0.5)
+                            for i in range(len(x_init))])
+        self.assertTrue(torch.allclose(full, by_one, atol=1e-5),
+                        f'ecart max {float((full - by_one).abs().max()):.2e}')
+
     def test_causal_strength_matrix_shape_and_sign(self):
         m = self.core.causal_strength_matrix(n_hops=3)
         self.assertEqual(m.shape, (self.n, self.n))
@@ -387,6 +404,52 @@ class TestCornLabelMode(unittest.TestCase):
             logits[0, :k] = c                      # k seuils franchis -> classe k
             p = m.class_probs(torch.cat([torch.zeros(1, 1), logits], dim=1))
             self.assertEqual(int(p.argmax(dim=1)), k)
+
+    def test_clm_tau_survives_state_dict(self):
+        """`clm_tau` doit etre un BUFFER, pas un attribut Python.
+
+        Non-regression d'un bug reel : deduit a la construction (~0.09), il
+        etait perdu au rechargement et le modele repartait sur le defaut du
+        constructeur (0.3). Le rapport ecart_min/tau retombait a 0.94, sous le
+        ~1.5 requis, et les classes intermediaires se vidaient -- alors que les
+        donnees franchissaient bien les seuils."""
+        m = self._model()
+        m.set_clm_thresholds([0.02, 0.13, 0.22, 0.33])
+        m.set_clm_tau(0.037)
+        self.assertIn('clm_tau', m.state_dict())
+
+        reloaded = self._model()
+        self.assertNotAlmostEqual(float(reloaded.clm_tau), 0.037, places=4)
+        reloaded.load_state_dict(m.state_dict())
+        self.assertAlmostEqual(float(reloaded.clm_tau), 0.037, places=6)
+        self.assertTrue(torch.allclose(reloaded.clm_thresholds, m.clm_thresholds, atol=1e-6))
+
+    def test_per_department_thresholds(self):
+        """Un jeu de seuils par departement : le MEME `s` doit pouvoir tomber
+        dans des classes differentes selon la zone."""
+        m = PCGraphModel(in_dim=6, k_days=0, out_channels=5, task_type='classification',
+                         n_internal=8, topology='layered', label_mode='clm',
+                         clm_tau=0.05, n_departements=3, device='cpu')
+        m.set_clm_dept_ids([1, 6, 25])
+        m.set_clm_thresholds(torch.tensor([[0.00, 0.30, 0.50, 0.70],
+                                           [-0.20, 0.20, 0.45, 0.70],
+                                           [0.20, 0.40, 0.55, 0.70]]))
+        self.assertEqual(m.clm_thresholds.shape, (3, 4))
+
+        s = torch.full((3, 1), 0.10)                 # meme score
+        m.set_current_departement(torch.tensor([1, 6, 25]))
+        pred = m.class_probs(s).argmax(dim=1)
+        self.assertEqual(int(pred[1]), 1)            # dept 6 : au-dessus de -0.20
+        self.assertEqual(int(pred[2]), 0)            # dept 25 : en dessous de 0.20
+        self.assertNotEqual(int(pred[1]), int(pred[2]))
+
+    def test_department_ids_survive_state_dict(self):
+        m = PCGraphModel(in_dim=6, k_days=0, out_channels=5, task_type='classification',
+                         n_internal=8, topology='layered', label_mode='clm',
+                         n_departements=3, device='cpu')
+        m.set_clm_dept_ids([1, 6, 25])
+        self.assertIn('clm_dept_ids', m.state_dict())
+        self.assertNotIn('_current_dept', m.state_dict())   # transitoire, jamais persiste
 
     def test_rejects_unknown_label_mode(self):
         with self.assertRaises(ValueError):
